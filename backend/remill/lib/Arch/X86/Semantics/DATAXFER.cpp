@@ -679,6 +679,29 @@ DEF_ISEL(MOV_SEG_GPR16_DS) = MOV_DS<R16>;
 DEF_ISEL(MOV_SEG_GPR16_FS) = MOV_FS<R16>;
 DEF_ISEL(MOV_SEG_GPR16_GS) = MOV_GS<R16>;
 
+namespace {
+DEF_SEM(MOVMSKPS, R32W dst, V128 src) {
+  auto vec = UReadV32(src);
+  uint32_t mask = 0;
+  _Pragma("unroll") for (unsigned i = 0; i < 4; ++i) {
+    mask |= (UExtractV32(vec, i) >> 31) << i;
+  }
+  WriteZExt(dst, mask);
+}
+
+DEF_SEM(MOVMSKPD, R32W dst, V128 src) {
+  auto vec = UReadV64(src);
+  uint32_t mask = 0;
+  _Pragma("unroll") for (unsigned i = 0; i < 2; ++i) {
+    mask |= static_cast<uint32_t>(UExtractV64(vec, i) >> 63) << i;
+  }
+  WriteZExt(dst, mask);
+}
+}  // namespace
+
+DEF_ISEL(MOVMSKPS_GPR32_XMMps) = MOVMSKPS;
+DEF_ISEL(MOVMSKPD_GPR32_XMMpd) = MOVMSKPD;
+
 /*
 
 25 MOV_DR MOV_DR_DR_GPR32 DATAXFER BASE I86 ATTRIBUTES: NOTSX RING0

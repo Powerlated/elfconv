@@ -258,6 +258,7 @@ DEF_SEM(SHUFPD, D dst, S1 src1, S2 src2, I8 src3) {
 }  // namespace
 
 DEF_ISEL(SHUFPD_XMMpd_XMMpd_IMMb) = SHUFPD<V128W, V128, V128>;
+DEF_ISEL(SHUFPD_XMMpd_MEMpd_IMMb) = SHUFPD<V128W, V128, MV128>;
 
 
 namespace {
@@ -378,6 +379,7 @@ IF_AVX(DEF_ISEL(VPSHUFLW_YMMqq_YMMqq_IMMb) = PSHUFLW<VV256W, V256>;)
 */
 
 DEF_ISEL(PSHUFHW_XMMdq_XMMdq_IMMb) = PSHUFHW<V128W, V128>;
+DEF_ISEL(PSHUFHW_XMMdq_MEMdq_IMMb) = PSHUFHW<V128W, MV128>;
 
 namespace {
 
@@ -1565,15 +1567,15 @@ IF_AVX(DEF_ISEL(VMOVDDUP_XMMdq_XMMq) = MOVDDUP<VV128W, V128>;)
 
 namespace {
 
-template <typename D, typename S1>
-DEF_SEM(SQRTSS, D dst, S1 src1) {
+template <typename D, typename S1, typename S2>
+DEF_SEM(SQRTSS, D dst, S1 old_dst, S2 src1) {
 
   // Extract a "single-precision" (32-bit) float from [31:0] of src1 vector:
   auto src_float = FExtractV32(FReadV32(src1), 0);
 
   // Store the square root result in dest[32:0]:
   auto square_root = SquareRoot32(rt_m, state, src_float);
-  auto temp_vec = FReadV32(dst);  // initialize a destination vector
+  auto temp_vec = FReadV32(old_dst);
   temp_vec = FInsertV32(temp_vec, 0, square_root);
 
   // Write out the result and return memory state:
@@ -1632,8 +1634,8 @@ DEF_SEM(VRSQRTSS, D dst, S1 src1, S2 src2) {
 #endif  // HAS_FEATURE_AVX
 }  // namespace
 
-DEF_ISEL(SQRTSS_XMMss_MEMss) = SQRTSS<V128W, MV32>;
-DEF_ISEL(SQRTSS_XMMss_XMMss) = SQRTSS<V128W, V128>;
+DEF_ISEL(SQRTSS_XMMss_MEMss) = SQRTSS<V128W, V128, MV32>;
+DEF_ISEL(SQRTSS_XMMss_XMMss) = SQRTSS<V128W, V128, V128>;
 IF_AVX(DEF_ISEL(VSQRTSS_XMMdq_XMMdq_MEMd) = VSQRTSS<VV128W, V128, MV32>;)
 IF_AVX(DEF_ISEL(VSQRTSS_XMMdq_XMMdq_XMMd) = VSQRTSS<VV128W, V128, V128>;)
 /*

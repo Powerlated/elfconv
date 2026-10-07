@@ -2,3 +2,6 @@
 	path = xterm-pty
 	url = https://github.com/mame/xterm-pty
 	ignore = dirty
+[submodule "examples/sm64ex"]
+	path = examples/sm64ex
+	url = https://github.com/sm64pc/sm64ex

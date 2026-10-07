@@ -415,8 +415,10 @@ void ELFObject::ResolveI386Imports() {
       if (type == R_386_GLOB_DAT && GELF_ST_BIND(sym.st_info) == STB_WEAK &&
           sym.st_shndx == SHN_UNDEF) {
         patch(rel.r_offset, 0);
-      } else if (type == R_386_COPY && std::string(name) == "stderr" && sym.st_size == 4) {
-        patch(rel.r_offset, 2);  // Guest stdio handle, never a host FILE pointer.
+      } else if (type == R_386_COPY && sym.st_size == 4 &&
+                 (std::string(name) == "stdout" || std::string(name) == "stderr")) {
+        patch(rel.r_offset, std::string(name) == "stdout" ? 1 : 2);
+        // Guest stdio handle, never a host FILE pointer.
       } else if (type == R_386_JMP_SLOT) {
         uint64_t entry = 0;
         asection *entry_section = nullptr;

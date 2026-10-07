@@ -94,3 +94,38 @@ $ make # busybox is generated, and you can convert it.
 $ git apply path/to/sh-busybox.patch
 $ make # busybox is generated, and you can convert it and execute it on the browser.
 ```
+
+## sm64ex
+
+[`sm64ex`](https://github.com/sm64pc/sm64ex) is pinned as a submodule at
+`examples/sm64ex`. Initialize it with:
+
+```bash
+git submodule update --init examples/sm64ex
+```
+
+The native build requires a user-supplied `baserom.us.z64` in that directory
+to extract game assets. Do not commit the ROM or extracted copyrighted assets.
+
+With the LLVM 16, i386 sysroot, and Emscripten toolchains described above:
+
+```bash
+bash scripts/sm64ex.sh native
+bash scripts/sm64ex.sh bitcode
+bash scripts/sm64ex.sh wasm
+```
+
+Run these commands from the repository root. Host asset tools are built with
+GCC before the game is compiled as a non-PIE i386 ELF. Outputs are under
+`examples/sm64ex/build/us_pc/`.
+
+The native executable's `--help` command succeeds, and the lifted bitcode
+passes LLVM verification. Lifting required fixes for `stdout` copy relocations,
+variable-length x86 instruction scanning in indirect-jump functions, i386
+indirect-branch PHI widths, and missing SIMD/NOP semantics.
+
+Wasm generation is blocked by Emscripten's LLVM backend: compiling the lifted
+x87 floating-point operations fails with `do not know how to soften fp_extend`
+and `unsupported library call operation`. No working Wasm game or browser
+runtime is verified. Upstream's `TARGET_WEB` build compiles source directly
+with Emscripten and is not ELF lifting.

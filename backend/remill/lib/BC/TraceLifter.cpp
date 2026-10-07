@@ -873,9 +873,19 @@ bool TraceLifter::Impl::Lift(uint64_t addr, const char *fn_name,
 
     // if the func includes intraprocedural indirect jump instruction, it is necessary to lift all instructions of the func.
     if (br_bb && !lift_all_insn /* always be vrp_opt_mode || !vrp_opt_mode*/) {
-      for (uint64_t insn_vma = trace_addr; insn_vma < end_addr; insn_vma += 4) {
+      for (uint64_t insn_vma = trace_addr; insn_vma < end_addr;) {
         if (lifted_block_map.count(insn_vma) == 0) {
           inst_work_list.insert(insn_vma);
+        }
+        if (arch->IsX86() || arch->IsAMD64()) {
+          Instruction decoded;
+          CHECK(ReadInstructionBytes(insn_vma));
+          CHECK(arch->DecodeInstruction(insn_vma, inst_bytes, decoded,
+                                        arch->CreateInitialContext()));
+          CHECK_GT(decoded.next_pc, insn_vma);
+          insn_vma = decoded.next_pc;
+        } else {
+          insn_vma += 4;
         }
       }
       lift_all_insn = true;
@@ -934,12 +944,14 @@ void TraceLifter::Impl::MainIndirectJumpCode(uint64_t trace_addr) {
   // generate the IR code of indirectbr jump.
   GenIndirectJumpCode(trace_addr);
 
-  _near_jump_ir.CreateBr(br_bb);
   if (auto br_bb_phi = llvm::dyn_cast<llvm::PHINode>(&br_bb->front()); br_bb_phi) {
-    br_bb_phi->addIncoming(NthArgument(func, kPCArgNum), _near_jump_bb);
+    auto pc = _near_jump_ir.CreateZExtOrTrunc(NthArgument(func, kPCArgNum),
+                                             br_bb_phi->getType());
+    br_bb_phi->addIncoming(pc, _near_jump_bb);
   } else {
     LOG(FATAL) << "br_bb is not defined correctly.";
   }
+  _near_jump_ir.CreateBr(br_bb);
 
   // Update cache.
   virtual_regs_opt->bb_parents.insert({_near_jump_bb, {root_bb}});
@@ -962,7 +974,8 @@ void TraceLifter::Impl::GenIndirectJumpCode(uint64_t trace_addr) {
   // i.e. t_vma_phi = phi i64 [ %t_vma1, $%br_bb_1 ], [ %t_vma2, %br_bb_2 ], [ %t_vma3, %br_bb_3 ], ...
   auto t_vma_phi = br_ir.CreatePHI(u64ty, br_blocks.size());
   for (auto &[br_bb, t_vma] : br_blocks) {
-    t_vma_phi->addIncoming(t_vma, br_bb);
+    llvm::IRBuilder<> incoming_ir(br_bb->getTerminator());
+    t_vma_phi->addIncoming(incoming_ir.CreateZExtOrTrunc(t_vma, u64ty), br_bb);
     virtual_regs_opt->bb_parents[br_bb].insert(br_bb);
   }
 

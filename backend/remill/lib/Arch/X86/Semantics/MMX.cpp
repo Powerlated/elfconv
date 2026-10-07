@@ -558,6 +558,26 @@ DEF_ISEL(PSUBUSW_XMMdq_XMMdq) = PSUBUSW<V128W, V128, V128>;
 DEF_ISEL(PSUBUSW_XMMdq_MEMdq) = PSUBUSW<V128W, V128, MV128>;
 
 namespace {
+template <typename D, typename S1, typename S2>
+DEF_SEM(PSUBSW, D dst, S1 src1, S2 src2) {
+  auto lhs = SReadV16(src1);
+  auto rhs = SReadV16(src2);
+  auto result = lhs;
+  _Pragma("unroll") for (size_t i = 0; i < NumVectorElems(result); ++i) {
+    int32_t difference = static_cast<int32_t>(SExtractV16(lhs, i)) -
+                         static_cast<int32_t>(SExtractV16(rhs, i));
+    difference = difference < -32768 ? -32768 : difference;
+    difference = difference > 32767 ? 32767 : difference;
+    result = SInsertV16(result, i, static_cast<int16_t>(difference));
+  }
+  SWriteV16(dst, result);
+}
+}  // namespace
+
+DEF_ISEL(PSUBSW_XMMdq_XMMdq) = PSUBSW<V128W, V128, V128>;
+DEF_ISEL(PSUBSW_XMMdq_MEMdq) = PSUBSW<V128W, V128, MV128>;
+
+namespace {
 
 template <typename D, typename S1, typename S2>
 DEF_SEM(PAVGB, D dst, S1 src1, S2 src2) {
