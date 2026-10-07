@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>Converted i386 spinning shader cube</title>
+<style>
+  body { background: #202020; color: #eee; font: 16px monospace; margin: 24px; }
+  canvas { display: block; border: 1px solid #666; }
+  pre { white-space: pre-wrap; }
+</style>
+<h1>Converted i386 spinning shader cube</h1>
+<p>Lifted i386 code animates an indexed VBO cube with GLSL lighting and depth testing. No immediate mode or legacy GL emulation. Press Escape to exit.</p>
+<canvas id="canvas" width="640" height="480" tabindex="0"></canvas>
+<p id="status">Loading Wasm…</p>
+<pre id="output"></pre>
+<script>
+  var Module = {
+    canvas: document.getElementById('canvas'),
+    arguments: new URLSearchParams(location.search).has('frames')
+      ? ['--frames', new URLSearchParams(location.search).get('frames')] : [],
+    print: function (line) { document.getElementById('output').textContent += line + '\n'; },
+    printErr: function (line) { document.getElementById('output').textContent += line + '\n'; },
+    onRuntimeInitialized: function () {
+      document.getElementById('status').textContent = 'Running lifted i386 code';
+      Module.canvas.focus();
+    },
+    onExit: function (code) {
+      document.getElementById('status').textContent = 'Exited with status ' + code;
+      document.body.dataset.exitCode = String(code);
+    },
+    onAbort: function (reason) {
+      document.getElementById('status').textContent = 'Aborted: ' + reason;
+      document.body.dataset.abort = String(reason);
+    }
+  };
+</script>
+<script src="cube.js"></script>
+</html>

@@ -235,7 +235,8 @@ main() {
     ;;
     i386-wasm)
       "${EMCC}" ${EMCCFLAGS} -std=c++17 ${RUNTIME_MACRO} \
-        -sUSE_SDL=2 -sLEGACY_GL_EMULATION=1 -sASYNCIFY=1 \
+        -sUSE_SDL=2 -sLEGACY_GL_EMULATION="${ECV_LEGACY_GL:-1}" \
+        -DECV_LEGACY_GL="${ECV_LEGACY_GL:-1}" -sASYNCIFY=1 \
         -sALLOW_MEMORY_GROWTH=1 -sINITIAL_MEMORY=335544320 -sEXIT_RUNTIME=1 \
         "${MAINIR}" ${ELFCONV_COMMON_RUNTIMES} "${RUNTIME_DIR}/I386Imports.cpp" \
         -o "${CUR_DIR}/${ELFNAME}.js"

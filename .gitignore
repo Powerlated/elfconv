@@ -41,6 +41,8 @@ compile_commands.json
 examples/assets/**
 !examples/sdl_triangle/index.html
 examples/sdl_triangle/triangle
+!examples/sdl_cube/index.html
+examples/sdl_cube/cube
 node_modules
 package-lock.json
 package.json

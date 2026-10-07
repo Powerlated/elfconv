@@ -2,6 +2,7 @@
 #include "utils/elfconv.h"
 
 #include <SDL2/SDL.h>
+#define GL_GLEXT_PROTOTYPES 1
 #include <SDL2/SDL_opengl.h>
 #include <algorithm>
 #include <cerrno>
@@ -11,6 +12,10 @@
 #include <cstring>
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
+#endif
+
+#ifndef ECV_LEGACY_GL
+#define ECV_LEGACY_GL 1
 #endif
 
 extern "C" const uint32_t _ecv_i386_initializers[];
@@ -105,6 +110,12 @@ void invoke(uint8_t *arena, State *state, RuntimeManager *runtime, uint32_t targ
   state->gpr.rip.dword = saved_pc;
 }
 
+FILE *stream(uint32_t handle) {
+  if (handle == 1) return stdout;
+  if (handle == 2) return stderr;
+  elfconv_runtime_error("Unsupported guest FILE handle.\n");
+}
+
 int print(Call &call, FILE *stream, unsigned format_arg) {
   const char *format = text(call.arena, call.word(format_arg));
   unsigned argument = format_arg + 1;
@@ -172,9 +183,16 @@ IMPORT(strtoul) {
 IMPORT(printf) { CALL; call.result(print(call, stdout, 0)); }
 IMPORT(fprintf) {
   CALL;
-  uint32_t stream = call.word(0);
-  if (stream != 1 && stream != 2) elfconv_runtime_error("Unsupported guest FILE handle.\n");
-  call.result(print(call, stream == 2 ? stderr : stdout, 1));
+  call.result(print(call, stream(call.word(0)), 1));
+}
+IMPORT(puts) { CALL; call.result(puts(text(arena, call.word(0)))); }
+IMPORT(fwrite) {
+  CALL;
+  uint32_t size = call.word(1), count = call.word(2);
+  if (!size || !count) { call.result(0); return; }
+  uint64_t length = uint64_t(size) * count;
+  if (length > MEMORY_ARENA_SIZE) elfconv_runtime_error("Guest fwrite buffer is too large.\n");
+  call.result(fwrite(guest(arena, call.word(0), length), size, count, stream(call.word(3))));
 }
 IMPORT(SDL_Init) { CALL; call.result(SDL_Init(call.word(0))); }
 IMPORT(SDL_Quit) {
@@ -262,8 +280,10 @@ IMPORT(glGetError) {
 #endif
   call.result(glGetError());
 }
+#if ECV_LEGACY_GL
 IMPORT(glBegin) { CALL; glBegin(call.word(0)); }
 IMPORT(glEnd) { CALL; glEnd(); }
+#endif
 IMPORT(glClear) { CALL; glClear(call.word(0)); }
 IMPORT(glViewport) { CALL; glViewport(call.word(0), call.word(1), call.word(2), call.word(3)); }
 IMPORT(glPixelStorei) {
@@ -289,10 +309,12 @@ IMPORT(glPixelStorei) {
 #endif
   glPixelStorei(call.word(0), call.word(1));
 }
+#if ECV_LEGACY_GL
 IMPORT(glMatrixMode) { CALL; glMatrixMode(call.word(0)); }
 IMPORT(glLoadIdentity) { CALL; glLoadIdentity(); }
 IMPORT(glVertex2f) { CALL; glVertex2f(call.real(0), call.real(1)); }
 IMPORT(glColor3f) { CALL; glColor3f(call.real(0), call.real(1), call.real(2)); }
+#endif
 IMPORT(glClearColor) { CALL; glClearColor(call.real(0), call.real(1), call.real(2), call.real(3)); }
 IMPORT(glReadPixels) {
   CALL;
@@ -338,4 +360,102 @@ IMPORT(glReadPixels) {
 #else
   glReadPixels(call.word(0), call.word(1), width, height, format, type, destination);
 #endif
+}
+
+IMPORT(glCreateShader) { CALL; call.result(glCreateShader(call.word(0))); }
+IMPORT(glCompileShader) { CALL; glCompileShader(call.word(0)); }
+IMPORT(glDeleteShader) { CALL; glDeleteShader(call.word(0)); }
+IMPORT(glCreateProgram) { CALL; call.result(glCreateProgram()); }
+IMPORT(glAttachShader) { CALL; glAttachShader(call.word(0), call.word(1)); }
+IMPORT(glBindAttribLocation) { CALL; glBindAttribLocation(call.word(0), call.word(1), text(arena, call.word(2))); }
+IMPORT(glLinkProgram) { CALL; glLinkProgram(call.word(0)); }
+IMPORT(glUseProgram) { CALL; glUseProgram(call.word(0)); }
+IMPORT(glDeleteProgram) { CALL; glDeleteProgram(call.word(0)); }
+IMPORT(glGetUniformLocation) { CALL; call.result(glGetUniformLocation(call.word(0), text(arena, call.word(1)))); }
+IMPORT(glEnable) { CALL; glEnable(call.word(0)); }
+IMPORT(glEnableVertexAttribArray) { CALL; glEnableVertexAttribArray(call.word(0)); }
+IMPORT(glBindBuffer) { CALL; glBindBuffer(call.word(0), call.word(1)); }
+
+IMPORT(glShaderSource) {
+  CALL;
+  int32_t count = call.word(1);
+  if (count < 0 || count > 64) elfconv_runtime_error("Guest shader source count must be 0..64.\n");
+  if (!count) { glShaderSource(call.word(0), 0, nullptr, nullptr); return; }
+  const GLchar *sources[64];
+  auto *addresses = static_cast<const uint8_t *>(guest(arena, call.word(2), count * 4));
+  auto *lengths = call.word(3) ? static_cast<const GLint *>(guest(arena, call.word(3), count * 4)) : nullptr;
+  for (int32_t i = 0; i < count; ++i) {
+    uint32_t address;
+    memcpy(&address, addresses + i * 4, 4);
+    sources[i] = lengths && lengths[i] >= 0
+        ? static_cast<const GLchar *>(guest(arena, address, lengths[i])) : text(arena, address);
+  }
+  glShaderSource(call.word(0), count, sources, lengths);
+}
+IMPORT(glGetShaderiv) {
+  CALL;
+  glGetShaderiv(call.word(0), call.word(1), static_cast<GLint *>(guest(arena, call.word(2), 4)));
+}
+IMPORT(glGetProgramiv) {
+  CALL;
+  glGetProgramiv(call.word(0), call.word(1), static_cast<GLint *>(guest(arena, call.word(2), 4)));
+}
+IMPORT(glGetShaderInfoLog) {
+  CALL;
+  int32_t size = call.word(1);
+  if (size < 0) elfconv_runtime_error("Negative guest shader log buffer size.\n");
+  auto *length = call.word(2) ? static_cast<GLsizei *>(guest(arena, call.word(2), 4)) : nullptr;
+  auto *log = size ? static_cast<GLchar *>(guest(arena, call.word(3), size)) : nullptr;
+  glGetShaderInfoLog(call.word(0), size, length, log);
+}
+IMPORT(glGetProgramInfoLog) {
+  CALL;
+  int32_t size = call.word(1);
+  if (size < 0) elfconv_runtime_error("Negative guest program log buffer size.\n");
+  auto *length = call.word(2) ? static_cast<GLsizei *>(guest(arena, call.word(2), 4)) : nullptr;
+  auto *log = size ? static_cast<GLchar *>(guest(arena, call.word(3), size)) : nullptr;
+  glGetProgramInfoLog(call.word(0), size, length, log);
+}
+IMPORT(glGenBuffers) {
+  CALL;
+  int32_t count = call.word(0);
+  if (count < 0 || uint64_t(count) * 4 > MEMORY_ARENA_SIZE)
+    elfconv_runtime_error("Invalid guest GL buffer count.\n");
+  auto *buffers = count ? static_cast<GLuint *>(guest(arena, call.word(1), count * 4)) : nullptr;
+  glGenBuffers(count, buffers);
+}
+IMPORT(glDeleteBuffers) {
+  CALL;
+  int32_t count = call.word(0);
+  if (count < 0 || uint64_t(count) * 4 > MEMORY_ARENA_SIZE)
+    elfconv_runtime_error("Invalid guest GL buffer count.\n");
+  auto *buffers = count ? static_cast<const GLuint *>(guest(arena, call.word(1), count * 4)) : nullptr;
+  glDeleteBuffers(count, buffers);
+}
+IMPORT(glBufferData) {
+  CALL;
+  int32_t size = call.word(1);
+  if (size < 0) elfconv_runtime_error("Negative guest GL buffer size.\n");
+  const void *data = call.word(2) ? guest(arena, call.word(2), size) : nullptr;
+  glBufferData(call.word(0), size, data, call.word(3));
+}
+IMPORT(glVertexAttribPointer) {
+  CALL;
+  // With a VBO bound, this argument is a byte offset, not a guest address.
+  glVertexAttribPointer(call.word(0), call.word(1), call.word(2), call.word(3), call.word(4),
+                        reinterpret_cast<const void *>(uintptr_t(call.word(5))));
+}
+IMPORT(glUniformMatrix4fv) {
+  CALL;
+  int32_t count = call.word(1);
+  if (count < 0 || uint64_t(count) * 64 > MEMORY_ARENA_SIZE)
+    elfconv_runtime_error("Invalid guest uniform matrix count.\n");
+  auto *values = count ? static_cast<const GLfloat *>(guest(arena, call.word(3), count * 64)) : nullptr;
+  glUniformMatrix4fv(call.word(0), count, call.word(2), values);
+}
+IMPORT(glDrawElements) {
+  CALL;
+  // The element-array buffer owns the indices; retain its byte offset.
+  glDrawElements(call.word(0), call.word(1), call.word(2),
+                 reinterpret_cast<const void *>(uintptr_t(call.word(3))));
 }
