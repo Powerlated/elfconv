@@ -82,7 +82,8 @@ class ELFObject {
   enum BinaryArch : uint8_t {
     ARCH_AARCH64 = 0,
     ARCH_AMD64 = 1,
-    ARCH_UNKNOWN = 2,
+    ARCH_I386 = 2,
+    ARCH_UNKNOWN = 3,
   };
 
   struct CodeSection {
@@ -127,6 +128,11 @@ class ELFObject {
   std::unordered_map<uint64_t, ELFSymbol> func_symbols_map;
   std::vector<ELFSymbol> func_symbols;
   std::unordered_map<std::string, CodeSection> code_sections;
+
+  // ELF32 import entry addresses and their host symbol names.
+  std::map<uint64_t, std::string> i386_imports;
+  std::vector<uint32_t> i386_initializers;
+  std::vector<uint32_t> i386_finalizers;
   unsigned long symbol_table_size;
 
   uint64_t e_phent;
@@ -142,6 +148,7 @@ class ELFObject {
   void LoadStaticSymbolsBFD();
   void LoadDynamicSymbolsBFD();
   void LoadSectionsBFD();
+  void ResolveI386Imports();
   void GetEhdr();
 };
 }  // namespace BinaryLoader

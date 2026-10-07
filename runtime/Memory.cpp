@@ -1,6 +1,5 @@
 #include "Memory.h"
 
-#include "remill/Arch/AArch64/Runtime/State.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -13,7 +12,9 @@
 #if defined(ELF_IS_AARCH64)
 #  define SP_REG state->gpr.sp.qword
 #elif defined(ELF_IS_AMD64)
-#  define SP_REG state.gpr.rsp.qword
+#  define SP_REG state->gpr.rsp.qword
+#elif defined(ELF_IS_I386)
+#  define SP_REG state->gpr.rsp.dword
 #endif
 
 #define SP_REAL_ADDR bytes + (sp - MEMORY_ARENA_VMA)
@@ -26,7 +27,7 @@
 
 MemoryArena *MemoryArena::MemoryArenaInit(int argc, char *argv[], char *envp[], State *state) {
 
-  char *env_ptr[1000];
+  char *env_ptr[1000] = {};
 
 #if defined(__wasm__)
   env_ptr[0] = NULL;
@@ -37,13 +38,13 @@ MemoryArena *MemoryArena::MemoryArenaInit(int argc, char *argv[], char *envp[], 
 #endif
 
   /* Initialize Stack */
-  _ecv_reg64_t sp;
+  addr_t sp;
   auto bytes = reinterpret_cast<uint8_t *>(malloc(MEMORY_ARENA_SIZE));
   memset(bytes, 0, MEMORY_ARENA_SIZE);
   sp = STACK_TOP_VMA;
 
   /* Initialize AT_RANDOM (placed on the stack temporarily) */
-  _ecv_reg64_t randomp;
+  addr_t randomp;
   sp -= 16;
 
 #if defined(TARGET_IS_WASI)
@@ -54,7 +55,7 @@ MemoryArena *MemoryArena::MemoryArenaInit(int argc, char *argv[], char *envp[], 
   randomp = sp;
 
   /* Initialize AT_PHDR (placed on the stack temporarily) */
-  _ecv_reg64_t phdr;
+  addr_t phdr;
   auto e_ph_size = _ecv_e_phent * _ecv_e_phnum;
   sp -= e_ph_size;
   memcpy(SP_REAL_ADDR, _ecv_e_ph, e_ph_size);
@@ -63,8 +64,8 @@ MemoryArena *MemoryArena::MemoryArenaInit(int argc, char *argv[], char *envp[], 
   sp -= sp & 0xf;  // This sp points to the stack bottom (16 bit align).
 
   // end marker
-  sp -= sizeof(_ecv_reg64_t);
-  *(_ecv_reg64_t *) (SP_REAL_ADDR) = (_ecv_reg64_t) NULL;
+  sp -= sizeof(addr_t);
+  *reinterpret_cast<addr_t *>(SP_REAL_ADDR) = 0;
 
   /* Initialize env and argv contents */
   size_t envc = 0, envp_size = 0, argv_size = 0;
@@ -103,17 +104,17 @@ MemoryArena *MemoryArena::MemoryArenaInit(int argc, char *argv[], char *envp[], 
 
   /* Initialize auxv */
   struct {
-    _ecv_reg64_t _ecv_a_type;
+    addr_t _ecv_a_type;
     union {
-      _ecv_reg64_t _ecv_a_val;
+      addr_t _ecv_a_val;
     } _ecv_a_un;
   } _ecv_auxv64[] = {
 #if defined(TARGET_IS_WASI)
       {3 /* AT_PHDR */, phdr},
-      {4 /* AT_PHENT */, _ecv_e_phent},
-      {5 /* AT_PHNUM */, _ecv_e_phnum},
+      {4 /* AT_PHENT */, static_cast<addr_t>(_ecv_e_phent)},
+      {5 /* AT_PHNUM */, static_cast<addr_t>(_ecv_e_phnum)},
       {6 /* AT_PAGESZ */, 4096},
-      {9 /* AT_ENTRY */, _ecv_entry_pc},
+      {9 /* AT_ENTRY */, static_cast<addr_t>(_ecv_entry_pc)},
       {11 /* AT_UID */, 42},
       {12 /* AT_EUID */, 42},
       {13 /* AT_GID */, 42},
@@ -122,9 +123,12 @@ MemoryArena *MemoryArena::MemoryArenaInit(int argc, char *argv[], char *envp[], 
       {25 /* AT_RANDOM */, randomp},
       {0 /* AT_NULL */, 0},
 #else
-      {3 /* AT_PHDR */, {phdr}},           {4 /* AT_PHENT */, {_ecv_e_phent}},
-      {5 /* AT_PHNUM */, {_ecv_e_phnum}},  {6 /* AT_PAGESZ */, {4096}},
-      {9 /* AT_ENTRY */, {_ecv_entry_pc}}, {11 /* AT_UID */, {getuid()}},
+      {3 /* AT_PHDR */, {phdr}},
+      {4 /* AT_PHENT */, {static_cast<addr_t>(_ecv_e_phent)}},
+      {5 /* AT_PHNUM */, {static_cast<addr_t>(_ecv_e_phnum)}},
+      {6 /* AT_PAGESZ */, {4096}},
+      {9 /* AT_ENTRY */, {static_cast<addr_t>(_ecv_entry_pc)}},
+      {11 /* AT_UID */, {getuid()}},
       {12 /* AT_EUID */, {geteuid()}},     {13 /* AT_GID */, {getgid()}},
       {14 /* AT_EGID */, {getegid()}},     {23 /* AT_SECURE */, {0}},
       {25 /* AT_RANDOM */, {randomp}},     {0 /* AT_NULL */, {0}},
@@ -134,28 +138,28 @@ MemoryArena *MemoryArena::MemoryArenaInit(int argc, char *argv[], char *envp[], 
   memcpy(SP_REAL_ADDR, _ecv_auxv64, sizeof(_ecv_auxv64));
 
   /* Initialize env_ptr and argv pointers */
-  sp -= sizeof(_ecv_reg64_t) * (envc + 1);
+  sp -= sizeof(addr_t) * (envc + 1);
   env_i_sp = env_0_sp;
   for (size_t i = 0; i < envc; i++) {
-    *(_ecv_reg64_t *) (SP_REAL_ADDR + sizeof(_ecv_reg64_t) * i) = env_i_sp;
+    *reinterpret_cast<addr_t *>(SP_REAL_ADDR + sizeof(addr_t) * i) = env_i_sp;
     env_i_sp += strlen(env_ptr[i]) + 1;
   }
   // NULL for the head of env_ptr
-  *(_ecv_reg64_t *) (SP_REAL_ADDR + sizeof(_ecv_reg64_t) * envc) = (_ecv_reg64_t) NULL;
+  *reinterpret_cast<addr_t *>(SP_REAL_ADDR + sizeof(addr_t) * envc) = 0;
 
   // argv poiner settings
-  sp -= sizeof(_ecv_reg64_t) * (argc + 1);
+  sp -= sizeof(addr_t) * (argc + 1);
   argv_i_sp = argv_0_sp;
   for (size_t i = 0; i < (size_t) argc; i++) {
-    *(_ecv_reg64_t *) (SP_REAL_ADDR + sizeof(_ecv_reg64_t) * i) = argv_i_sp;
+    *reinterpret_cast<addr_t *>(SP_REAL_ADDR + sizeof(addr_t) * i) = argv_i_sp;
     argv_i_sp += strlen(argv[i]) + 1;
   }
   // NULL for the head of argv
-  *(_ecv_reg64_t *) (SP_REAL_ADDR + sizeof(_ecv_reg64_t) * argc) = (_ecv_reg64_t) NULL;
+  *reinterpret_cast<addr_t *>(SP_REAL_ADDR + sizeof(addr_t) * argc) = 0;
 
   // argc settings
-  sp -= sizeof(_ecv_reg64_t);
-  *(_ecv_reg64_t *) (SP_REAL_ADDR) = argc;
+  sp -= sizeof(addr_t);
+  *reinterpret_cast<addr_t *>(SP_REAL_ADDR) = argc;
 
   // starting stack pointer indicates the pointer of `argc`.
   SP_REG = sp;

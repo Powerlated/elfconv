@@ -2,13 +2,14 @@
 
 ## Overview
 
-elfconv supports three conversion targets from an AArch64 ELF binary:
+elfconv provides the following conversion targets:
 
 | Target | `TARGET` value | Output | Runtime |
 |---|---|---|---|
 | Browser (Wasm) | `aarch64-wasm` | `.wasm` + `.js` + `.html` | Browser (Emscripten) |
 | WASI (Wasm) | `aarch64-wasi32` | `.wasm` | WasmEdge etc. |
 | Native | `aarch64-native` | Host ELF binary | Direct execution |
+| Experimental i386 browser | `i386-wasm` | `.bc` + `.wasm` + `.js` | Emscripten host-import adapters |
 
 ## Build Commands
 
@@ -36,6 +37,23 @@ TARGET=aarch64-wasm ../scripts/dev.sh /path/to/busybox
 TARGET=aarch64-wasm INITWASM=1 MOUNT_SETTING="/host/dir@/mount/point" ../scripts/dev.sh /path/to/elf
 ```
 
+### i386 SDL/OpenGL (ELF → Wasm)
+
+The input must be a non-PIE i386 ELF executable. The supported libc/SDL2/OpenGL
+imports resolve to guest-ABI adapters; Linux shared libraries and syscalls are
+not emulated. This target does not use the AArch64 process-management JS kernel.
+
+```bash
+TARGET=i386-wasm ELFLIFT=/path/to/elflift EMCC=/path/to/em++ \
+  ECV_OUT_DIR=/path/to/output bash bin/exe.sh /path/to/i386-elf
+```
+
+`ELFLIFT` defaults to `build/lifter/elflift`; `EMCC` defaults to `em++`.
+The output directory must exist. The lifter must be built with x86 semantics.
+For a complete browser page and the exercised Makefile workflow, see the
+[SDL triangle example](../examples/README.md#sdl--opengl-2-triangle).
+Unsupported imported functions fail at link time rather than receiving stubs.
+
 ### WASI (ELF → Wasm)
 ```bash
 cd build
@@ -52,7 +70,7 @@ TARGET=aarch64-native ../scripts/dev.sh /path/to/elf
 
 | Variable | Description |
 |---|---|
-| `TARGET` | **Required.** Conversion target: `aarch64-native`, `aarch64-wasm`, or `aarch64-wasi32` |
+| `TARGET` | **Required.** Conversion target: `aarch64-native`, `aarch64-wasm`, `aarch64-wasi32`, or experimental `i386-wasm` |
 | `INITWASM` | Set to `1` to generate `js-kernel.js` and `main.html` (browser target, init program only) |
 | `NO_LIFTED` | Skip ELF → LLVM IR lifting (reuse existing `.bc`/`.ll` file) |
 | `NO_COMPILED` | Skip LLVM IR → object file compilation (reuse existing `.o` file) |
@@ -61,3 +79,5 @@ TARGET=aarch64-native ../scripts/dev.sh /path/to/elf
 | `TEXTIR` | Output `.ll` (human-readable LLVM IR) instead of `.bc` |
 | `FLOAT_STATUS` | Enable floating-point exception tracking |
 | `ECV_OUT_DIR` | Override output directory (default: current directory) |
+| `ELFLIFT` | Lifter executable path (default: `build/lifter/elflift`) |
+| `EMCC` | Emscripten C++ compiler path (default: `em++`) |

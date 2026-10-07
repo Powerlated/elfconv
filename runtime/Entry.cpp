@@ -1,6 +1,5 @@
 #include "Memory.h"
 #include "Runtime.h"
-#include "remill/Arch/Runtime/Types.h"
 #include "utils/Util.h"
 
 #include <algorithm>
@@ -27,11 +26,11 @@ const char *ORG_ELF_NAME = ELFNAME;
 const char *ORG_ELF_NAME = "app";
 #endif
 
-#if defined(ELF_IS_AMD64)
+#if defined(ELF_IS_AMD64) || defined(ELF_IS_I386)
 uint8_t *MemoryArenaPtr = nullptr;
 #endif
 
-#if defined(__EMSCRIPTEN__)
+#if defined(__EMSCRIPTEN__) && !defined(ELF_IS_I386)
 
 /// `fork` syscall emulation
 extern "C" EMSCRIPTEN_KEEPALIVE uint32_t me_forked = 0;
@@ -208,7 +207,7 @@ int main(int argc, char *argv[], char *envp[]) {
 
   uint32_t this_ecv_pid = 42, par_ecv_pid = 0, this_ecv_pgid = 42;
 
-#if defined(__EMSCRIPTEN__)
+#if defined(__EMSCRIPTEN__) && !defined(ELF_IS_I386)
 
   // preprocess of `fork`
   if (me_forked) {
@@ -254,7 +253,7 @@ int main(int argc, char *argv[], char *envp[]) {
   memory_arena = MemoryArena::MemoryArenaInit(argc, argv, envp, cpu_state);
 #endif
 
-#if defined(ELF_IS_AMD64)
+#if defined(ELF_IS_AMD64) || defined(ELF_IS_I386)
   // set the global data of memory arena pointer.
   MemoryArenaPtr = memory_arena->bytes;
 #endif
@@ -277,6 +276,8 @@ int main(int argc, char *argv[], char *envp[]) {
   cpu_state->sr.midr_el1 = {.qword = 0xf0510};
   cpu_state->sr.ctr_el0 = {.qword = 0x80038003};
   cpu_state->sr.dczid_el0 = {.qword = 0x4};
+#elif defined(ELF_IS_I386)
+  cpu_state->gpr.rip.dword = static_cast<uint32_t>(_ecv_entry_pc);
 #endif
 
   auto main_ecv_pr =

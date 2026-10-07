@@ -122,14 +122,17 @@ int ReadEhdr(const char *file_name, uint64_t *e_phent, uint64_t *e_phnum, uint8_
     elfconv_runtime_error("%s is not an ELF file\n", file_name);
   }
 
-  auto _ehdr = elf64_getehdr(_elf);
-  /* set e_phentsize */
-  *e_phent = _ehdr->e_phentsize;
-  /* set e_phnum */
-  *e_phnum = _ehdr->e_phnum;
+  GElf_Ehdr ehdr;
+  if (!gelf_getehdr(_elf, &ehdr)) {
+    elfconv_runtime_error("Failed to get ELF header.\n");
+  }
+  *e_phent = ehdr.e_phentsize;
+  *e_phnum = ehdr.e_phnum;
 
   /* get phder array */
-  auto e_phdrs = elf64_getphdr(_elf);
+  void *e_phdrs = gelf_getclass(_elf) == ELFCLASS32
+                      ? static_cast<void *>(elf32_getphdr(_elf))
+                      : static_cast<void *>(elf64_getphdr(_elf));
   if (!e_phdrs) {
     elf_end(_elf);
     close(fd);
@@ -209,6 +212,10 @@ void ELFObject::LoadELFBFD() {
       bin_arch = BinaryArch::ARCH_AMD64;
       bits = 64;
       break;
+    case bfd_mach_i386_i386:
+      bin_arch = BinaryArch::ARCH_I386;
+      bits = 32;
+      break;
     default: elfconv_runtime_error("unknown architecture\n"); break;
   }
 
@@ -241,6 +248,10 @@ void ELFObject::LoadELFBFD() {
     LoadStaticSymbolsBFD();
     is_stripped = false;
     able_vrp_opt = true;
+  }
+
+  if (bin_arch == ARCH_I386) {
+    ResolveI386Imports();
   }
 
   func_symbols.reserve(func_symbols_map.size());
@@ -282,8 +293,14 @@ void ELFObject::LoadStaticSymbolsBFD() {
     elfconv_runtime_error("failed to read symtab.\n");
   }
   for (int i = 0; i < sym_num; i++) {
+    if (bfd_is_und_section(bfd_symtab[i]->section)) {
+      continue;
+    }
     if (bfd_symtab[i]->flags & BSF_FUNCTION ||
-        std::memcmp(bfd_symtab[i]->name, "_start", sizeof("_start")) == 0) {
+        strcmp(bfd_symtab[i]->name, "_start") == 0 ||
+        (bin_arch == ARCH_I386 &&
+         (bfd_section_flags(bfd_symtab[i]->section) & SEC_CODE) &&
+         !(bfd_symtab[i]->flags & (BSF_SECTION_SYM | BSF_FILE)))) {
     } else {
       continue;
     }
@@ -339,6 +356,98 @@ void ELFObject::LoadDynamicSymbolsBFD() {
   } else {
     printf("[INFO] static symbol table is not found.\n");
   }
+}
+
+void ELFObject::ResolveI386Imports() {
+  for (const auto &section : sections) {
+    if (section.sec_name == ".init") i386_initializers.push_back(section.vma);
+    if (section.sec_name == ".init_array" || section.sec_name == ".fini_array") {
+      auto &functions = section.sec_name == ".init_array" ? i386_initializers : i386_finalizers;
+      if (section.size % 4) elfconv_runtime_error("Invalid i386 initializer array.\n");
+      for (size_t offset = 0; offset < section.size; offset += 4) {
+        uint32_t function;
+        memcpy(&function, section.bytes + offset, 4);
+        if (function && function != UINT32_MAX) functions.push_back(function);
+      }
+    }
+  }
+  std::reverse(i386_finalizers.begin(), i386_finalizers.end());
+  for (const auto &section : sections) {
+    if (section.sec_name == ".fini") i386_finalizers.push_back(section.vma);
+  }
+  int fd = open(file_name.c_str(), O_RDONLY);
+  Elf *elf = fd < 0 ? nullptr : elf_begin(fd, ELF_C_READ, nullptr);
+  GElf_Ehdr header;
+  if (!elf || !gelf_getehdr(elf, &header) || header.e_type != ET_EXEC) {
+    elfconv_runtime_error("i386 conversion currently requires a non-PIE ELF executable.\n");
+  }
+  auto patch = [&](uint64_t address, uint32_t value) {
+    for (auto &section : sections) {
+      if (address >= section.vma && address - section.vma + 4 <= section.size) {
+        memcpy(section.bytes + address - section.vma, &value, 4);
+        return;
+      }
+    }
+    elfconv_runtime_error("Unmapped i386 relocation at 0x%lx.\n", address);
+  };
+  Elf_Scn *scn = nullptr;
+  while ((scn = elf_nextscn(elf, scn))) {
+    GElf_Shdr shdr;
+    if (!gelf_getshdr(scn, &shdr) || shdr.sh_type != SHT_REL) continue;
+    Elf_Data *relocations = elf_getdata(scn, nullptr);
+    Elf_Scn *sym_scn = elf_getscn(elf, shdr.sh_link);
+    GElf_Shdr sym_header;
+    if (!relocations || !sym_scn || !gelf_getshdr(sym_scn, &sym_header)) {
+      elfconv_runtime_error("Invalid i386 relocation table.\n");
+    }
+    Elf_Data *symbols = elf_getdata(sym_scn, nullptr);
+    for (size_t i = 0; i < shdr.sh_size / shdr.sh_entsize; ++i) {
+      GElf_Rel rel;
+      GElf_Sym sym;
+      if (!gelf_getrel(relocations, i, &rel) ||
+          !gelf_getsym(symbols, GELF_R_SYM(rel.r_info), &sym)) {
+        elfconv_runtime_error("Invalid i386 relocation or symbol.\n");
+      }
+      const char *name = elf_strptr(elf, sym_header.sh_link, sym.st_name);
+      if (!name) elfconv_runtime_error("Invalid i386 import name.\n");
+      unsigned type = GELF_R_TYPE(rel.r_info);
+      if (type == R_386_NONE) continue;
+      if (type == R_386_GLOB_DAT && GELF_ST_BIND(sym.st_info) == STB_WEAK &&
+          sym.st_shndx == SHN_UNDEF) {
+        patch(rel.r_offset, 0);
+      } else if (type == R_386_COPY && std::string(name) == "stderr" && sym.st_size == 4) {
+        patch(rel.r_offset, 2);  // Guest stdio handle, never a host FILE pointer.
+      } else if (type == R_386_JMP_SLOT) {
+        uint64_t entry = 0;
+        asection *entry_section = nullptr;
+        for (auto &section : sections) {
+          if (section.sec_name != ".plt" && section.sec_name != ".plt.sec") continue;
+          for (size_t offset = 0; offset + 6 <= section.size; ++offset) {
+            uint32_t got;
+            memcpy(&got, section.bytes + offset + 2, 4);
+            if (section.bytes[offset] != 0xff || section.bytes[offset + 1] != 0x25 ||
+                got != rel.r_offset) continue;
+            if (offset >= 4 && memcmp(section.bytes + offset - 4, "\\xf3\\x0f\\x1e\\xfb", 4) == 0)
+              offset -= 4;
+            entry = section.vma + offset;
+            entry_section = GetIncludedSection(entry);
+            break;
+          }
+        }
+        if (!entry) elfconv_runtime_error("No i386 PLT entry for %s.\n", name);
+        i386_imports.emplace(entry, name);
+        func_symbols.emplace_back(ELFSymbol::SYM_TYPE_FUNC, std::string(name) + "@plt",
+                                  entry, entry_section, 16);
+        patch(rel.r_offset, static_cast<uint32_t>(entry));
+      } else {
+        elfconv_runtime_error("Unsupported i386 relocation %u for %s.\n", type, name);
+      }
+    }
+  }
+  std::sort(func_symbols.begin(), func_symbols.end(),
+            [](const auto &lhs, const auto &rhs) { return lhs.addr < rhs.addr; });
+  elf_end(elf);
+  close(fd);
 }
 
 void ELFObject::SetCodeSection() {

@@ -552,7 +552,8 @@ bool TraceLifter::Impl::Lift(uint64_t addr, const char *fn_name,
             virtual_regs_opt->bb_reg_info_node_map.insert(
                 {br_bb, new BBRegInfoNode(func, state_ptr, runtime_ptr)});
           }
-          br_blocks.push_back({block, FindIndirectBrAddress(block)});
+          br_blocks.push_back({block, arch->IsX86() ? LoadNextProgramCounter(block, *intrinsics)
+                                                   : FindIndirectBrAddress(block)});
           /* jmp to indirectbr block */
           DirectBranchWithSaveParents(br_bb, block);
           break;
@@ -580,7 +581,8 @@ bool TraceLifter::Impl::Lift(uint64_t addr, const char *fn_name,
           auto not_taken_block = GetOrCreateBranchNotTakenBlock();
 
           llvm::IRBuilder<> ir(block);
-          llvm::Value *t_func_addr = FindIndirectBrAddress(block);
+          llvm::Value *t_func_addr = arch->IsX86() ? LoadNextProgramCounter(block, *intrinsics)
+                                                 : FindIndirectBrAddress(block);
 
           if (inst.lift_config.fork_emulation) {
             // call `_ecv_save_call_history`

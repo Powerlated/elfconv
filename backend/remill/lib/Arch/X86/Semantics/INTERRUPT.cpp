@@ -33,6 +33,11 @@ DEF_SEM(BOUND, R8W cond, S1 src1, S2 src2, R32W) {
 DEF_SEM(DoINT_IMMb, I8 num, IF_32BIT_ELSE(R32W, R64W)) {
   INTERRUPT_VECTOR = Read(num);
   HYPER_CALL = AsyncHyperCall::kX86IntN;
+  IF_32BIT(if (INTERRUPT_VECTOR == 0x80) {
+    __remill_syscall_tranpoline_call(nullptr, state, rt_m);
+  } else {
+    __remill_error(nullptr, state, REG_PC, rt_m);
+  })
 }
 
 DEF_SEM(DoINT1, IF_32BIT_ELSE(R32W, R64W)) {

@@ -140,7 +140,8 @@ LiftStatus InstructionLifter::LiftIntoBlock(Instruction &arch_inst, llvm::BasicB
   // Lift every operand of the target instruction.
   if (arch_inst.lift_config.target_elf_arch == kArchAArch64LittleEndian) {
     LiftAArch64EveryOperand(arch_inst, block, state_ptr, isel_func, bb_reg_info_node);
-  } else if (arch_inst.lift_config.target_elf_arch == kArchAMD64) {
+  } else if (arch_inst.lift_config.target_elf_arch == kArchAMD64 ||
+             arch_inst.lift_config.target_elf_arch == kArchX86) {
     // Standard remill lifting path for x86 (no VRO).
     llvm::IRBuilder<> ir(block);
 

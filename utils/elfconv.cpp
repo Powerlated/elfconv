@@ -6,7 +6,7 @@
 
 #if defined(ELF_IS_AARCH64)
 #  include <remill/Arch/AArch64/Runtime/State.h>
-#elif defined(ELF_IS_AMD64)
+#elif defined(ELF_IS_AMD64) || defined(ELF_IS_I386)
 #  include <remill/Arch/X86/Runtime/State.h>
 #else
 #  include <remill/Arch/AArch64/Runtime/State.h>
@@ -18,7 +18,7 @@ extern State *CPUState;
 
 typedef unsigned long long ull;
 
-#if defined(__EMSCRIPTEN__)
+#if defined(__EMSCRIPTEN__) && !defined(ELF_IS_I386)
 extern "C" uint32_t me_forked;
 #endif
 
@@ -27,9 +27,22 @@ extern "C" uint32_t me_forked;
 #define SR_ECV_NZCV__C ((ecv_nzcv & 0b10) >> 1)
 #define SR_ECV_NZCV__V (ecv_nzcv & 0b1)
 
+#if defined(ELF_IS_I386)
+static void debug_i386_gprs() {
+  printf("EAX: 0x%08x EBX: 0x%08x ECX: 0x%08x EDX: 0x%08x\n"
+         "ESI: 0x%08x EDI: 0x%08x EBP: 0x%08x ESP: 0x%08x EIP: 0x%08x\n",
+         CPUState->gpr.rax.dword, CPUState->gpr.rbx.dword,
+         CPUState->gpr.rcx.dword, CPUState->gpr.rdx.dword,
+         CPUState->gpr.rsi.dword, CPUState->gpr.rdi.dword,
+         CPUState->gpr.rbp.dword, CPUState->gpr.rsp.dword, CPUState->gpr.rip.dword);
+}
+#endif
+
 /* debug func */
 extern "C" void debug_state_machine() {
-#if !defined(ELF_IS_AMD64)
+#if defined(ELF_IS_I386)
+  debug_i386_gprs();
+#elif !defined(ELF_IS_AMD64)
   printf("PC: 0x%llx ", (ull) CPUState->gpr.pc.qword);
   PRINT_GPR(0);
   PRINT_GPR(1);
@@ -77,6 +90,10 @@ extern "C" void debug_state_machine() {
 }
 
 extern "C" void debug_gprs_nzcv(uint64_t pc) {
+#if defined(ELF_IS_I386)
+  printf("PC: 0x%llx\n", (ull) pc);
+  debug_i386_gprs();
+#else
   printf("PC: 0x%llx ", (ull) pc);
   PRINT_GPR(0);
   PRINT_GPR(1);
@@ -111,10 +128,17 @@ extern "C" void debug_gprs_nzcv(uint64_t pc) {
   PRINT_GPR(30);
   printf("SP: 0x%llx PC: 0x%llx ECV_NZCV: 0x%llx\n", (ull) CPUState->gpr.sp.qword, (ull) pc,
          (ull) CPUState->ecv_nzcv);
+#endif
 }
 
 extern "C" void debug_state_machine_vectors() {
-#if !defined(ELF_IS_AMD64)
+#if defined(ELF_IS_I386)
+  for (size_t i = 0; i < 8; ++i) {
+    printf("XMM%zu: 0x%016llx%016llx\n", i,
+           (ull) CPUState->vec[i].xmm.qwords.elems[1],
+           (ull) CPUState->vec[i].xmm.qwords.elems[0]);
+  }
+#elif !defined(ELF_IS_AMD64)
   printf("[Debug] State Machine Vector Registers. Program Counter: 0x%016llx\n",
          (ull) CPUState->gpr.pc.qword);
   printf("State.SIMD:\n");
@@ -135,7 +159,9 @@ extern "C" void debug_llvmir_f64value(double val) {
 }
 
 extern "C" void debug_insn() {
-#if !defined(ELF_IS_AMD64)
+#if defined(ELF_IS_I386)
+  debug_i386_gprs();
+#elif !defined(ELF_IS_AMD64)
   auto gpr = CPUState->gpr;
   printf("[DEBUG INSN]\n");
   printf("PC: 0x%llx x0: 0x%llx x1: 0x%llx x2: 0x%llx x3: 0x%llx\n", (ull) gpr.pc.qword,

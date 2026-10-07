@@ -12,12 +12,8 @@ set -e
 # $2: path/to/outdir
 setting() {
 
-  ROOT_DIR=$( dirname "${PWD}" )
-
-  if [[ $( basename "${ROOT_DIR}" ) != "elfconv" ]]; then
-    echo "[${RED}ERROR${NC}]: This script must be executed at 'path/to/elfconv/build' or 'path/to/elfconv/bin'."
-    exit 1
-  fi
+  ROOT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+  ELFLIFT="${ELFLIFT:-${ROOT_DIR}/build/lifter/elflift}"
 
   # elf
   ELFPATH=$( realpath "$1" )
@@ -39,7 +35,7 @@ setting() {
   CXX=clang++-16
   CLANGFLAGS="${OPTFLAGS} -std=c++20 -static -I${ROOT_DIR}/backend/remill/include -I${ROOT_DIR}"
   # emscripten
-  EMCC=em++
+  EMCC="${EMCC:-em++}"
   EMCC_OPTION="-sASYNCIFY=0 -sINITIAL_MEMORY=536870912 -sSTACK_SIZE=16MB -sPTHREAD_POOL_SIZE=0 -pthread -sALLOW_MEMORY_GROWTH -sEXPORT_ES6 -sENVIRONMENT=web,worker"
   EMCCFLAGS="${OPTFLAGS} -I${ROOT_DIR}/backend/remill/include -I${ROOT_DIR}"
   # wasi
@@ -60,7 +56,9 @@ lifting() {
   echo -e "[${GREEN}INFO${NC}] ELF -> LLVM bitcode..."
   
   TARGET_ARCH=${HOST_CPU}
-  if [[ "${TARGET}" = "*-wasi32" ]]; then
+  if [[ "${TARGET}" == "i386-wasm" ]]; then
+    TARGET_ARCH='emscripten32'
+  elif [[ "${TARGET}" == *-wasi32 ]]; then
     TARGET_ARCH='wasi32'
   fi
 
@@ -72,6 +70,10 @@ lifting() {
   # fork emulation is enabled if targetgin wasm on browser.
   FORK_EMULATION=
   case "${TARGET}" in
+    i386-wasm)
+      NORM_MODE="1"
+      FORK_EMULATION="0"
+      ;;
     *-wasm)
       NORM_MODE="1"
       FORK_EMULATION="1"
@@ -81,15 +83,13 @@ lifting() {
       ;;
   esac
 
-  # copy `elflift` into current directory.
-  cp -p ${ROOT_DIR}/build/lifter/elflift ${CUR_DIR}
   
   dbg_fun_vma=0
   if [[ -n "${DEBUG_FUNC_ADDR}" ]]; then
     dbg_fun_vma=${DEBUG_FUNC_ADDR}
   fi
 
-  ${CUR_DIR}/elflift \
+  "${ELFLIFT}" \
   --arch "$2" \
   --bc_out "${CUR_DIR}/${ELFNAME}.bc" \
   --target_elf "${ELFPATH}" \
@@ -207,6 +207,9 @@ main() {
     amd64-*)
       RUNTIME_MACRO="${RUNTIME_MACRO} -DELF_IS_AMD64"
       ;;
+    i386-wasm)
+      RUNTIME_MACRO="${RUNTIME_MACRO} -DELF_IS_I386 -DADDRESS_SIZE_BITS=32"
+      ;;
     *)
       echo -e "Unsupported architecture of ELF: ${TARGET}."
       ;;
@@ -228,6 +231,15 @@ main() {
       if [[ -n "${OUT_EXE}" ]]; then
         mv "${ELFNAME}.${HOST_CPU}" "${OUT_EXE}"
       fi
+      return 0
+    ;;
+    i386-wasm)
+      "${EMCC}" ${EMCCFLAGS} -std=c++17 ${RUNTIME_MACRO} \
+        -sUSE_SDL=2 -sLEGACY_GL_EMULATION=1 -sASYNCIFY=1 \
+        -sALLOW_MEMORY_GROWTH=1 -sINITIAL_MEMORY=335544320 -sEXIT_RUNTIME=1 \
+        "${MAINIR}" ${ELFCONV_COMMON_RUNTIMES} "${RUNTIME_DIR}/I386Imports.cpp" \
+        -o "${CUR_DIR}/${ELFNAME}.js"
+      echo -e "[${GREEN}INFO${NC}] built ${ELFNAME}.js and ${ELFNAME}.wasm"
       return 0
     ;;
     *-wasm)

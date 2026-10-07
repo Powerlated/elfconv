@@ -16,6 +16,8 @@
 
 #pragma once
 
+#include <cstdint>
+
 #ifndef REMILL_ARCH
 #  if defined(__x86_64__)
 #    define REMILL_ARCH "amd64_avx"

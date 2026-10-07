@@ -121,6 +121,8 @@ void MainLifter::SetCommonMetaData(LiftConfig lift_config) {
     SetPlatform("aarch64");
   } else if (target_manager->target_arch == "x86_64") {
     SetPlatform("x86_64");
+  } else if (target_manager->target_arch == "emscripten32") {
+    SetPlatform("i686");
   }
 
   // Debug.

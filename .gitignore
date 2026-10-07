@@ -39,6 +39,8 @@ compile_commands.json
 *.amd64
 *.x86-64
 examples/assets/**
+!examples/sdl_triangle/index.html
+examples/sdl_triangle/triangle
 node_modules
 package-lock.json
 package.json

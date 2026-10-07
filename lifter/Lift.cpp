@@ -30,7 +30,10 @@
 #include "TraceManager.h"
 
 #include <llvm/IR/LegacyPassManager.h>
+#include <llvm/Pass.h>
 #include <llvm/Transforms/IPO/PassManagerBuilder.h>
+#include <llvm/Transforms/IPO.h>
+#include <llvm/Transforms/Utils/ModuleUtils.h>
 #include <remill/BC/HelperMacro.h>
 #include <remill/BC/InstructionLifter.h>
 #include <remill/BC/Lifter.h>
@@ -89,6 +92,12 @@ int main(int argc, char *argv[]) {
   llvm::LLVMContext context;
   auto os_name = remill::GetOSName(REMILL_OS);
   auto arch_name = remill::GetArchName(FLAGS_arch);
+  if (FLAGS_arch == "i386") {
+    arch_name = remill::kArchX86;
+  }
+  if (manager.elf_obj.bits != (arch_name == remill::kArchX86 ? 32 : 64)) {
+    elfconv_runtime_error("ELF class does not match --arch.\n");
+  }
   auto arch = remill::Arch::Build(&context, os_name,
                                   arch_name);  // e.g., arch = std::unique_ptr<AArch64Arch>
   auto module = FLAGS_bitcode_path.empty()
@@ -109,8 +118,10 @@ int main(int argc, char *argv[]) {
 
   // Set various lifting config.
   auto lift_config = LiftConfig(FLAGS_float_exception == "1",
-                                FLAGS_norm_mode == "1" || FLAGS_fork_emulation == "1", arch_name,
-                                FLAGS_fork_emulation == "1", !manager.elf_obj.is_stripped);
+                                FLAGS_norm_mode == "1" || FLAGS_fork_emulation == "1" ||
+                                    arch_name == remill::kArchX86,
+                                arch_name, FLAGS_fork_emulation == "1",
+                                !manager.elf_obj.is_stripped);
 #if defined(PRINT_FUNC_ADDR)
   if (FLAGS_dbg_fun_vma > 0) {
     lift_config.dbg_fun_vma = FLAGS_dbg_fun_vma;
@@ -124,6 +135,28 @@ int main(int argc, char *argv[]) {
   // Set various common metadata not depending on whether the ELF binary is not stripped or not.
   // entry point, program header, every data sections, etc.
   main_lifter.SetCommonMetaData(lift_config);
+
+  for (const auto &[address, name] : manager.elf_obj.i386_imports) {
+    auto *wrapper = arch->DeclareLiftedFunction(manager.GetLiftedFuncName(address), module.get());
+    auto callee = module->getOrInsertFunction("__ecv_i386_" + name, wrapper->getFunctionType());
+    auto *block = llvm::BasicBlock::Create(context, "import", wrapper);
+    llvm::IRBuilder<> ir(block);
+    std::vector<llvm::Value *> args;
+    for (auto &arg : wrapper->args()) args.push_back(&arg);
+    ir.CreateCall(callee, args);
+    ir.CreateRetVoid();
+    manager.SetLiftedTraceDefinition(address, wrapper);
+  }
+  if (arch_name == remill::kArchX86) {
+    auto emit_functions = [&](const char *name, std::vector<uint32_t> addresses) {
+      addresses.push_back(0);
+      auto *data = llvm::ConstantDataArray::get(context, addresses);
+      new llvm::GlobalVariable(*module, data->getType(), true,
+                               llvm::GlobalValue::ExternalLinkage, data, name);
+    };
+    emit_functions("_ecv_i386_initializers", manager.elf_obj.i386_initializers);
+    emit_functions("_ecv_i386_finalizers", manager.elf_obj.i386_finalizers);
+  }
 
   // Lift every function.
   std::unordered_map<uint64_t, const char *> addr_fun_name_map;
@@ -173,6 +206,24 @@ int main(int argc, char *argv[]) {
   // Prepare and validate the LLVM Module.
   auto host_arch = remill::Arch::Build(&context, os_name, remill::GetArchName(REMILL_ARCH));
   host_arch->PrepareModule(module.get());
+  if (arch_name == remill::kArchX86) {
+    // Instruction selectors are a lifting-time registry, not runtime roots.
+    llvm::removeFromUsedLists(*module, [](llvm::Constant *value) {
+      auto *global = llvm::dyn_cast<llvm::GlobalValue>(value->stripPointerCasts());
+      return global && (global->getName().startswith("ISEL_") ||
+                        global->getName().startswith("COND_"));
+    });
+    llvm::legacy::PassManager passes;
+    passes.add(llvm::createInternalizePass([](const llvm::GlobalValue &global) {
+      return global.getName().startswith("_ecv_");
+    }));
+    passes.add(llvm::createGlobalDCEPass());
+    passes.run(*module);
+    if (manager.target_arch == "emscripten32") {
+      module->setTargetTriple("wasm32-unknown-emscripten");
+      module->setDataLayout("e-m:e-p:32:32-p10:8:8-p20:8:8-i64:64-n32:64-S128-ni:1:10:20");
+    }
+  }
   // Make LLVM bitcode file.
   remill::StoreModuleToFile(module.get(), FLAGS_bc_out);
 

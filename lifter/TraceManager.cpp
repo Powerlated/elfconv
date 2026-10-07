@@ -156,12 +156,20 @@ void AArch64TraceManager::SetELFData() {
     disasm_funcs.emplace(last_func_symbol.addr,
                          DisasmFunc(lifted_func_name, last_func_symbol.addr, func_size));
 
+    if (entry_point == last_func_symbol.addr) {
+      entry_func_lifted_name = lifted_func_name;
+    }
+
   } else {
     elfconv_runtime_error("Now not supported for ELF with no eh_frame section.\n");
   }
 
   if (entry_func_lifted_name.empty()) {
     elfconv_runtime_error("[ERROR] entry_function is not found.\n");
+  }
+
+  if (elf_obj.bin_arch != BinaryLoader::ELFObject::ARCH_AARCH64) {
+    return;
   }
 
   // define functions in .plt section (FIXME)

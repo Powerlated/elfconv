@@ -16,6 +16,8 @@
 
 #pragma once
 
+#include <cstdint>
+
 #include <string>
 
 #ifndef REMILL_OS

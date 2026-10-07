@@ -19,7 +19,7 @@ extern State *CPUState;
 // for debug
 extern bool INVALID_ADDR_ACCESS;
 
-#if defined(ELF_IS_AMD64)
+#if defined(ELF_IS_AMD64) || defined(ELF_IS_I386)
 extern "C" uint8_t *MemoryArenaPtr;
 #endif
 

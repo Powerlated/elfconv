@@ -508,7 +508,11 @@ void X86ArchBase::FinishLiftedFunctionInitialization(llvm::Module *module,
   llvm::IRBuilder<> ir(entry_block);
 
   const auto state_ptr_arg = NthArgument(bb_func, kStatePointerArgNum);
-  (void) this->RegisterByName(kRIPVariableName)->AddressOf(state_ptr_arg, ir);
+  (void) this->RegisterByName(IsX86() ? kPCVariableName : kRIPVariableName)->AddressOf(state_ptr_arg, ir);
+  ir.CreateStore(NthArgument(bb_func, kPCArgNum),
+                 FindVarInFunction(bb_func, kNextPCVariableName).first);
+  ir.CreateStore(llvm::ConstantInt::get(llvm::Type::getInt64Ty(context), 0),
+                 FindVarInFunction(bb_func, kBranchTakenVariableName).first);
 
   if (64 == address_size) {
     ir.CreateStore(zero_addr_val, ir.CreateAlloca(addr, nullptr, "CSBASE"));

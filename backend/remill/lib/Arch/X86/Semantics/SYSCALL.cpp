@@ -17,17 +17,20 @@
 namespace {
 
 DEF_SEM(DoSYSCALL, IF_32BIT_ELSE(R32W, R64W)) {
-  __remill_sync_hyper_call(state, rt_m, SyncHyperCall::kX86SysCall);
+  IF_32BIT_ELSE(__remill_syscall_tranpoline_call(nullptr, state, rt_m),
+                __remill_sync_hyper_call(state, rt_m, SyncHyperCall::kX86SysCall));
   HYPER_CALL = AsyncHyperCall::kX86SysCall;
 }
 
 DEF_SEM(DoSYSCALL_AMD, IF_32BIT_ELSE(R32W, R64W)) {
-  __remill_sync_hyper_call(state, rt_m, SyncHyperCall::kX86SysCall);
+  IF_32BIT_ELSE(__remill_syscall_tranpoline_call(nullptr, state, rt_m),
+                __remill_sync_hyper_call(state, rt_m, SyncHyperCall::kX86SysCall));
   HYPER_CALL = AsyncHyperCall::kX86SysCall;
 }
 
 DEF_SEM(DoSYSENTER, IF_32BIT_ELSE(R32W, R64W)) {
-  __remill_sync_hyper_call(state, rt_m, SyncHyperCall::kX86SysEnter);
+  IF_32BIT_ELSE(__remill_syscall_tranpoline_call(nullptr, state, rt_m),
+                __remill_sync_hyper_call(state, rt_m, SyncHyperCall::kX86SysEnter));
   HYPER_CALL = AsyncHyperCall::kX86SysEnter;
 }
 

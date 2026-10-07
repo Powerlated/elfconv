@@ -12,9 +12,10 @@ void elfconv_runtime_error(const char *fmt, ...) {
   va_list args;
   va_start(args, fmt);
 #if defined(__wasm__)
-  vprintf(fmt, args);
-  abort();
+  vfprintf(stderr, fmt, args);
   va_end(args);
+  fflush(stderr);
+  abort();
 #else
   char error_message[1000];
   std::strncpy(error_message, ERROR_PREFIX, sizeof(ERROR_PREFIX));

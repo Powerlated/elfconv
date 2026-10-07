@@ -31,6 +31,9 @@
 #elif defined(ELF_IS_AMD64)
 #  include <remill/Arch/X86/Runtime/State.h>
 #  define PCREG CPUState->gpr.rip.qword
+#elif defined(ELF_IS_I386)
+#  include <remill/Arch/X86/Runtime/State.h>
+#  define PCREG CPUState->gpr.rip.dword
 #else
 #  define PCREG CPUState.gpr.pc.qword
 #endif
@@ -172,8 +175,13 @@ void __remill_write_memory_f128(RuntimeManager *, addr_t, float128_t) {}
   tranpoline call for emulating syscall of original ELF binary.
 */
 void __remill_syscall_tranpoline_call(uint8_t *arena_ptr, State &state, RuntimeManager *rt_m) {
+  if (!arena_ptr) {
+    arena_ptr = rt_m->main_memory_arena->bytes;
+  }
   /* TODO: We should select one syscall emulate process (own implementation, WASI, LKL, etc...) */
-#if defined(TARGET_IS_WASI)
+#if defined(ELF_IS_I386)
+  elfconv_runtime_error("Raw Linux i386 syscalls are unsupported; use host import adapters.\n");
+#elif defined(TARGET_IS_WASI)
   rt_m->SVCWasiCall(arena_ptr);
 #elif defined(TARGET_IS_BROWSER)
   rt_m->SVCBrowserCall(arena_ptr);
@@ -300,7 +308,14 @@ extern "C" uint64_t *_ecv_noopt_get_bb(RuntimeManager *rt_m, addr_t cur_fun_vma,
   return res;
 }
 
-#if defined(__EMSCRIPTEN__)
+#if defined(ELF_IS_I386)
+extern "C" void _ecv_save_call_history(State &, RuntimeManager &, uint64_t, uint64_t) {
+  elfconv_runtime_error("i386 fork emulation is unsupported.");
+}
+extern "C" void _ecv_func_epilogue(State &, RuntimeManager &) {
+  elfconv_runtime_error("i386 fork emulation is unsupported.");
+}
+#elif defined(__EMSCRIPTEN__)
 extern "C" void _ecv_save_call_history(State &state, RuntimeManager &rt_m, uint64_t cur_func_addr,
                                        uint64_t ret_addr) {
   rt_m.main_ecv_pr->call_history.push({cur_func_addr, ret_addr});

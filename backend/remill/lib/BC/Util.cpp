@@ -355,7 +355,7 @@ llvm::Value *LoadProgramCounterRef(llvm::BasicBlock *block) {
 
 // Return a reference to the next program counter.
 llvm::Value *LoadNextProgramCounterRef(llvm::BasicBlock *block) {
-  return FindVarInFunction(block->getParent(), "DELETED_NEXT_PC").first;
+  return FindVarInFunction(block->getParent(), kNextPCVariableName).first;
 }
 
 // Return the next program counter.
@@ -780,7 +780,8 @@ LiftedFunctionArgsWithPCValue(llvm::BasicBlock *block, const IntrinsicTable &int
 
   args[kArenaPointerArgNum] = NthArgument(func, kArenaPointerArgNum);
   args[kStatePointerArgNum] = NthArgument(func, kStatePointerArgNum);
-  args[kPCArgNum] = pc_value;
+  llvm::IRBuilder<> ir(block);
+  args[kPCArgNum] = ir.CreateZExtOrTrunc(pc_value, NthArgument(func, kPCArgNum)->getType());
   args[kRuntimePointerArgNum] = NthArgument(func, kRuntimePointerArgNum);
 
   return args;

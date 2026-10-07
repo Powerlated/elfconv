@@ -28,10 +28,18 @@ An ahead-of-time binary translator that converts Linux applications to WebAssemb
 > [!WARNING]
 > **elfconv is WORK IN PROGRESS**. You may encounter failures when compiling ELF binaries or executing generated Wasm binaries.
 
-- **Architecture Support**: Only AArch64 ELF binaries are currently supported
-  - x86-64 support is under development
-- **Linking**: No support for Linux shared objects
-  - Only statically-linked binaries are supported
+- **Architecture Support**: AArch64 ELF binaries are supported
+  - x86-64 support is under development.
+  - Experimental i386 support converts the dynamically linked, non-PIE
+    [SDL/OpenGL triangle](examples/README.md#sdl--opengl-2-triangle) to Wasm.
+    Browser framebuffer readback and interactive keyboard exit have passed.
+    This does not establish compatibility with arbitrary i386 binaries or Portal.
+- **Linking**: No general Linux shared-object loader
+  - AArch64 conversion requires statically linked binaries.
+  - `i386-wasm` resolves the triangle's libc/SDL2/OpenGL imports to Emscripten
+    guest-ABI adapters. It does not load the corresponding Linux libraries.
+    PIE, unsupported relocations, and unknown imports are rejected.
+    Raw i386 syscalls are rejected explicitly by the runtime.
 - **System Calls**: Partial Linux syscall implementation
   - See [`runtime/syscalls/`](https://github.com/yomaytk/elfconv/blob/main/runtime/syscalls) for currently supported syscalls
 

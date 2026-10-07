@@ -12,7 +12,7 @@
 #if defined(ELF_IS_AARCH64)
 #  include <remill/Arch/AArch64/Runtime/State.h>
 #  include <remill/Arch/Runtime/Types.h>
-#elif defined(ELF_IS_AMD64)
+#elif defined(ELF_IS_AMD64) || defined(ELF_IS_I386)
 #  include <remill/Arch/Runtime/RemillTypes.h>
 #  include <remill/Arch/X86/Runtime/State.h>
 #endif
@@ -67,7 +67,7 @@ typedef uint64_t _ecv_reg64_t;
 //  Lifted entry function pointer
 extern "C" const LiftedFunc _ecv_entry_func;
 //  Entry point of the ELF
-extern "C" const addr_t _ecv_entry_pc;
+extern "C" const uint64_t _ecv_entry_pc;
 //  Data of data sections of the ELF
 extern "C" const uint8_t *_ecv_data_sec_name_ptr_array[];
 extern "C" const uint64_t _ecv_data_sec_vma_array[];
@@ -75,8 +75,8 @@ extern "C" const uint64_t _ecv_data_sec_size_array[];
 extern "C" const uint8_t *_ecv_data_sec_bytes_ptr_array[];
 extern "C" const uint64_t _ecv_data_sec_num;
 //  Program header data of the ELF
-extern "C" _ecv_reg_t _ecv_e_phent;
-extern "C" _ecv_reg_t _ecv_e_phnum;
+extern "C" uint64_t _ecv_e_phent;
+extern "C" uint64_t _ecv_e_phnum;
 extern "C" uint8_t _ecv_e_ph[];
 //  Platform name of the target architecture
 extern "C" uint8_t *_ecv_platform_name;
