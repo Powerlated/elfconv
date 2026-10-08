@@ -15,58 +15,54 @@
 enable_language(ASM)
 
 find_package(LLVM CONFIG REQUIRED)
-include_directories(${LLVM_INCLUDE_DIRS})
+find_path(BFD_INCLUDE_DIR NAMES bfd.h REQUIRED)
+find_path(ELF_INCLUDE_DIR NAMES libelf.h REQUIRED)
+find_path(DWARF_INCLUDE_DIR NAMES libdwarf/libdwarf.h REQUIRED)
+find_library(BFD_LIBRARY NAMES bfd REQUIRED)
+find_library(ELF_LIBRARY NAMES elf REQUIRED)
+find_library(DWARF_LIBRARY NAMES dwarf REQUIRED)
 
 add_executable(elflift
   Binary/Loader.cpp
   MainLifter.cpp
   TraceManager.cpp
   Lift.cpp
-  ${CMAKE_SOURCE_DIR}/utils/Util.cpp
+  "${ELFCONV_ROOT}/utils/Util.cpp"
 )
+add_dependencies(elflift semantics)
+target_include_directories(elflift BEFORE PRIVATE "${DWARF_INCLUDE_DIR}")
 
-set_target_properties(elflift PROPERTIES
-  POSITION_INDEPENDENT_CODE ON
-  COMPILE_FLAGS "-O3 -fPIC"
-)
+set_target_properties(elflift PROPERTIES POSITION_INDEPENDENT_CODE ON)
+target_compile_options(elflift PRIVATE -O3)
 
 if(CMAKE_ELFCONV_AARCH64_BUILD)
-  target_compile_definitions(elflift PUBLIC "ELFCONV_AARCH64_BUILD=1")
+  target_compile_definitions(elflift PRIVATE "ELFCONV_AARCH64_BUILD=1")
 elseif(CMAKE_ELFCONV_X86_BUILD)
-  target_compile_definitions(elflift PUBLIC "ELFCONV_X86_BUILD=1")
+  target_compile_definitions(elflift PRIVATE "ELFCONV_X86_BUILD=1")
 else()
-  message(FATAL_ERROR, "CMAKE_ELFCONV_<arch_name>_BUILD must be 1. (lifter/CMakeLists.txt)")
+  message(FATAL_ERROR "CMAKE_ELFCONV_<arch_name>_BUILD must be enabled (lifter/CMakeLists.txt)")
 endif()
 
-# static link
-if(${CMAKE_ELFLIFT_STATIC_LINK})
-  if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64")
-      set(LIBIBERTY_PATH "/usr/lib/aarch64-linux-gnu/libiberty.a")
-  elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64")
-      set(LIBIBERTY_PATH "/usr/lib/x86_64-linux-gnu/libiberty.a")
-  else()
-      message(FATAL_ERROR "Unsupported architecture: ${CMAKE_SYSTEM_PROCESSOR}")
-  endif() 
-  target_link_options(elflift PUBLIC -static)
-  target_link_libraries(
-    elflift
-    PRIVATE
-    bfd
-    elf
-    dwarf
-    ${LIBIBERTY_PATH}
-  )
+if(CMAKE_ELFLIFT_STATIC_LINK)
+  find_library(LIBIBERTY_LIBRARY NAMES iberty REQUIRED)
+  target_link_options(elflift PRIVATE -static)
+  target_link_libraries(elflift PRIVATE bfd elf dwarf "${LIBIBERTY_LIBRARY}")
 else()
-# dynamic link
-  target_link_libraries(
-    elflift
-    PRIVATE
-    bfd
-    elf
-    dwarf
+  target_link_libraries(elflift PRIVATE
+    "${BFD_LIBRARY}"
+    "${ELF_LIBRARY}"
+    "${DWARF_LIBRARY}"
   )
 endif()
 
-target_link_libraries(elflift PUBLIC remill ${PROJECT_LIBRARIES} )
-target_include_directories(elflift PUBLIC ${PROJECT_INCLUDEDIRECTORIES})
-target_include_directories(elflift PRIVATE ${CMAKE_SOURCE_DIR})
+target_link_libraries(elflift PRIVATE remill ${PROJECT_LIBRARIES})
+target_include_directories(elflift SYSTEM PRIVATE ${LLVM_INCLUDE_DIRS})
+target_include_directories(elflift PRIVATE
+  "${BFD_INCLUDE_DIR}"
+  "${ELF_INCLUDE_DIR}"
+  "${DWARF_INCLUDE_DIR}"
+  ${PROJECT_INCLUDEDIRECTORIES}
+  ${ELFCONV_ROOT}
+)
+install(TARGETS elflift RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
+

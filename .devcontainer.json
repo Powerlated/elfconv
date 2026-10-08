@@ -2,7 +2,7 @@
   "name": "elfconv dev environment",
   "dockerFile": "Dockerfile",
   "image": "elfconv-devcontainer",
-  "postCreateCommand": "cd /root/elfconv && ./scripts/build.sh",
+  "postCreateCommand": "cd /root/elfconv && cmake -S dependencies -B build/dependencies -G Ninja -DUSE_EXTERNAL_LLVM=ON -DLLVM_DIR=/usr/lib/llvm-16/lib/cmake/llvm -DCMAKE_PREFIX_PATH=/usr/lib/llvm-16 -DCMAKE_INSTALL_PREFIX=/root/elfconv/build/dependencies/install -DCMAKE_C_COMPILER=/usr/lib/llvm-16/bin/clang -DCMAKE_CXX_COMPILER=/usr/lib/llvm-16/bin/clang++ && cmake --build build/dependencies && cmake -S . -B build -G Ninja -DELFCONV_ARCH=x86 -DLLVM_DIR=/usr/lib/llvm-16/lib/cmake/llvm '-DCMAKE_PREFIX_PATH=/root/elfconv/build/dependencies/install;/usr/lib/llvm-16' -DCMAKE_INSTALL_PREFIX=/root/elfconv/build/install -DCMAKE_C_COMPILER=/usr/lib/llvm-16/bin/clang -DCMAKE_CXX_COMPILER=/usr/lib/llvm-16/bin/clang++ && cmake --build build --target elflift",
   // Set *default* container specific settings.json values on container create.
   "settings": {
     "terminal.integrated.shell.linux": "/bin/bash",

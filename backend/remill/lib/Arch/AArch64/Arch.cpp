@@ -21,7 +21,7 @@
 #include <gflags/gflags.h>
 #include <glog/logging.h>
 #include <iomanip>
-#include <llvm/ADT/Triple.h>
+#include <remill/Triple.h>
 #include <llvm/IR/Attributes.h>
 #include <llvm/IR/DataLayout.h>
 #include <llvm/IR/Function.h>

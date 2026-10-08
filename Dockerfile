@@ -86,7 +86,23 @@ RUN if [ $(( ${ELFCONV_AARCH64:-0} ^ ${ELFCONV_X86:-0} )) -eq 0 ]; then \
 WORKDIR ${ROOT_DIR}
 COPY ./ ./
 
-RUN ./scripts/build.sh
-RUN make -C  /root/elfconv/examples/hello/c hello
+RUN cmake -S dependencies -B build/dependencies -G Ninja \
+      -DUSE_EXTERNAL_LLVM=ON \
+      -DLLVM_DIR="/usr/lib/llvm-${LLVM_VERSION}/lib/cmake/llvm" \
+      -DCMAKE_PREFIX_PATH="/usr/lib/llvm-${LLVM_VERSION}" \
+      -DCMAKE_INSTALL_PREFIX="/root/elfconv/build/dependencies/install" \
+      -DCMAKE_C_COMPILER="/usr/lib/llvm-${LLVM_VERSION}/bin/clang" \
+      -DCMAKE_CXX_COMPILER="/usr/lib/llvm-${LLVM_VERSION}/bin/clang++" && \
+    cmake --build build/dependencies
+RUN if [ "${ELFCONV_AARCH64:-0}" = "1" ]; then arch=aarch64; else arch=x86; fi && \
+    cmake -S . -B build -G Ninja \
+      -DELFCONV_ARCH="${arch}" \
+      -DLLVM_DIR="/usr/lib/llvm-${LLVM_VERSION}/lib/cmake/llvm" \
+      -DCMAKE_PREFIX_PATH="/root/elfconv/build/dependencies/install;/usr/lib/llvm-${LLVM_VERSION}" \
+      -DCMAKE_INSTALL_PREFIX="/root/elfconv/build/install" \
+      -DCMAKE_C_COMPILER="/usr/lib/llvm-${LLVM_VERSION}/bin/clang" \
+      -DCMAKE_CXX_COMPILER="/usr/lib/llvm-${LLVM_VERSION}/bin/clang++" && \
+    cmake --build build --target elflift && \
+    cmake --build build --target hello-stripped
 ENTRYPOINT ["/bin/bash", "--login", "-c"]
 CMD ["/bin/bash"]

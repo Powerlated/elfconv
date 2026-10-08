@@ -2,7 +2,7 @@
 build
 debugs
 
-# Downloaded libraries (build.sh downloads them inside container)
+# Remill generated download artifacts
 backend/lifting-bits-downloads
 
 # IDE / editor local settings

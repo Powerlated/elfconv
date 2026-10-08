@@ -22,8 +22,8 @@ set(DEFAULT_BC_COMPILER_FLAGS
 )
 
 find_package(Clang CONFIG REQUIRED)
-get_target_property(CLANG_PATH clang LOCATION)
-get_target_property(LLVMLINK_PATH llvm-link LOCATION)
+find_program(CLANG_PATH NAMES clang HINTS "${LLVM_TOOLS_BINARY_DIR}" REQUIRED)
+find_program(LLVMLINK_PATH NAMES llvm-link HINTS "${LLVM_TOOLS_BINARY_DIR}" REQUIRED)
 
 file(WRITE "${CMAKE_BINARY_DIR}/emitllvm.test.cpp" "int main(int argc, char* argv[]){return 0;}\n\n")
 
@@ -213,10 +213,8 @@ function(add_runtime target_name)
     COMMENT "Linking BC runtime ${absolute_target_path}"
   )
 
-  set(DIRECTORY APPEND PROPERTY ADDITIONAL_MAKE_CLEAN_FILES "${absolute_target_path}")
-
+  set_property(DIRECTORY APPEND PROPERTY ADDITIONAL_MAKE_CLEAN_FILES "${absolute_target_path}")
   add_custom_target("${target_name}" ALL DEPENDS "${absolute_target_path}")
-  set_property(TARGET "${target_name}" PROPERTY LOCATION "${absolute_target_path}")
 
   if(REMILL_ENABLE_INSTALL_TARGET)
     if(DEFINED install_destination)

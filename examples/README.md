@@ -1,6 +1,7 @@
 # Examples for conversion
 
-This directory has some example programs you can try converting the Linux/ELF. You can build the Linux/ELF by using a Makefile included in the every directory.
+Each project-owned example uses its directory's `CMakeLists.txt`. Configure
+from the repository root and build into `build/`.
 
 ## SDL / OpenGL 2 triangle
 
@@ -10,62 +11,96 @@ calls. Building the ELF requires an i386 C toolchain and i386 SDL2/OpenGL
 development libraries.
 
 ```bash
-cd examples/sdl_triangle
-make
-./triangle
-make smoke
+cmake -S examples/sdl_triangle -B build/sdl_triangle
+cmake --build build/sdl_triangle --target triangle
+cmake --build build/sdl_triangle --target triangle-smoke
 ```
 
-Escape or closing the window exits interactive mode. `make smoke` renders three
-frames and checks that the triangle's center is colored and the background is
-black. Override `CC`, `ARCH_FLAGS`, `PKG_CONFIG`, `LDFLAGS`, and `RUNNER` for a
-local cross-toolchain or sysroot. Keep `-m32 -fno-pie -no-pie` when preparing
-the ELF for conversion.
+Escape or closing the window exits interactive mode. `triangle-smoke` renders
+three frames and checks that the triangle's center is colored and the background
+is black. The target keeps `-m32 -fno-pie -no-pie` for conversion.
 
 ### Convert the ELF to Wasm
 
 Build the x86-enabled elfconv lifter and install/configure Emscripten first.
-Then, from `examples/sdl_triangle`:
+Then configure and build the conversion target:
 
 ```bash
-make wasm ELFLIFT=../../build/lifter/elflift EMXX=em++
-python3 -m http.server 8000 --bind 127.0.0.1
+cmake -S examples/sdl_triangle -B build/sdl_triangle \
+  -DELFCONV_LIFTER="$PWD/build/lifter/elflift" \
+  -DELFCONV_EMCC="$HOME/emsdk/upstream/emscripten/em++"
+cmake --build build/sdl_triangle --target triangle-wasm
+python3 -m http.server 8000 --bind 127.0.0.1 \
+  --directory build/sdl_triangle
 ```
 
 Open `http://127.0.0.1:8000/` for interactive rendering, or
 `http://127.0.0.1:8000/?frames=3` for framebuffer checks and an exit status.
-`make wasm` lifts `triangle` into `triangle.bc` and links it with the host-import
-runtime to produce `triangle.js` and `triangle.wasm`. It does **not** compile
-`triangle.c` with Emscripten. `make clean` removes these generated outputs.
+`triangle-wasm` lifts `triangle` into `triangle.bc` and links it with the
+host-import runtime to produce `triangle.js` and `triangle.wasm`. It does **not**
+compile `triangle.c` with Emscripten. The build directory includes the copied
+`index.html` used by the local server.
 
 The converted browser smoke has passed with center RGB `63,64,128`, a black
 background, exit status 0, and interactive Escape handling. SDL2 is supplied
 by Emscripten; legacy OpenGL calls use its immediate-mode emulation. The runtime
-adapts i386 stack arguments, opaque SDL handles, returned strings, varargs, and
-WebGL RGBA readback into desktop RGB/pack layout. Asyncify yields at buffer swaps
-so rendering and input remain responsive.
+adapts i386 stack arguments, opaque SDL handles, returned strings, varargs,
+WebGL RGBA readback into desktop RGB/pack layout, and Asyncify yields at buffer
+swaps so rendering and input remain responsive.
 
 This path handles the triangle's imported functions and relocations, not
 arbitrary Linux shared libraries or retail Portal. PIE, unsupported relocations,
 unknown host imports, unsupported pointer-bearing SDL events, and raw Linux
-i386 syscalls fail explicitly. The printf adapter accepts scalar `%s`, `%d`,
+i386 syscalls fail explicitly. The printf adapters accept scalar `%s`, `%d`,
 `%u`, `%c`, `%x`, `%X`, and `%%` conversions; floating-point/length-modified
 varargs are not implemented. Guest readback supports RGB/RGBA unsigned bytes.
+The SDL cube also resolves fortified printf, C23 `strtoul`, and stack-protector
+imports.
 
-For the isolated toolchains installed in this workspace, build from scratch with:
+If using a separate i386 sysroot, configure it through the normal CMake compiler
+flags and pkg-config environment:
 
 ```bash
-SYSROOT=\"$HOME/.local/opt/elfconv-i386-sysroot\"
-export PKG_CONFIG_SYSROOT_DIR=\"$SYSROOT\"
-export PKG_CONFIG_LIBDIR=\"$SYSROOT/usr/lib/i386-linux-gnu/pkgconfig:$SYSROOT/usr/share/pkgconfig\"
-export LD_LIBRARY_PATH=\"$HOME/.local/opt/dwarf-2021/usr/lib/x86_64-linux-gnu\"
-make wasm \\
-  CC=\"$HOME/.local/opt/llvm-16.0.4/bin/clang\" \\
-  ARCH_FLAGS=\"-m32 -fno-pie -no-pie --sysroot=$SYSROOT -I$SYSROOT/usr/include/i386-linux-gnu -B$SYSROOT/usr/lib/i386-linux-gnu\" \\
-  LDFLAGS=\"-L$SYSROOT/usr/lib/gcc/i686-linux-gnu/15\" \\
-  ELFLIFT=../../build-llvm16.0.4/lifter/elflift \\
-  EMXX=\"$HOME/emsdk/upstream/emscripten/em++\"
+SYSROOT=/path/to/i386-sysroot
+LLVM_ROOT=/path/to/llvm
+export PKG_CONFIG_SYSROOT_DIR="$SYSROOT"
+export PKG_CONFIG_LIBDIR="$SYSROOT/usr/lib/i386-linux-gnu/pkgconfig:$SYSROOT/usr/share/pkgconfig"
+cmake -S examples/sdl_triangle -B build/sdl_triangle \
+  -DCMAKE_C_COMPILER="$LLVM_ROOT/bin/clang" \
+  -DCMAKE_C_FLAGS="--sysroot=$SYSROOT -I$SYSROOT/usr/include/i386-linux-gnu -B$SYSROOT/usr/lib/i386-linux-gnu" \
+  -DCMAKE_EXE_LINKER_FLAGS="-L$SYSROOT/usr/lib/gcc/i686-linux-gnu/15" \
+  -DELFCONV_LIFTER="$PWD/build/lifter/elflift" \
+  -DELFCONV_EMCC="$HOME/emsdk/upstream/emscripten/em++"
+cmake --build build/sdl_triangle --target triangle-wasm
 ```
+
+## SDL / OpenGL cube
+
+`sdl_cube` uses the same i386 SDL2/OpenGL requirements and CMake pattern:
+
+```bash
+cmake -S examples/sdl_cube -B build/sdl_cube
+cmake --build build/sdl_cube --target cube
+cmake --build build/sdl_cube --target cube-smoke
+```
+
+To convert and serve it, configure with the lifter and Emscripten paths, then
+build `cube-wasm`:
+
+```bash
+cmake -S examples/sdl_cube -B build/sdl_cube \
+  -DELFCONV_LIFTER="$PWD/build/lifter/elflift" \
+  -DELFCONV_EMCC="$HOME/emsdk/upstream/emscripten/em++"
+cmake --build build/sdl_cube --target cube-wasm
+python3 -m http.server 8000 --bind 127.0.0.1 --directory build/sdl_cube
+```
+
+Open `http://127.0.0.1:8000/` to run the cube in a browser.
+The converted cube smoke passed in Chromium with `?frames=90`: both framebuffer
+readbacks passed, the center pixel changed between frames 1 and 90, the corner
+remained black, and the guest exited with status 0. It uses shader/VBO OpenGL
+calls without legacy GL emulation.
+
 
 [`examples-repos`](https://github.com/yomaytk/elfconv/tree/main/examples/examples-repos) has patch or config files that can be used to convert the third-party programs. You can convert those Linux/ELF binaries following the steps below.
 ## [mnist-neural-network-plain-c](https://github.com/AndrewCarterUK/mnist-neural-network-plain-c)
@@ -107,16 +142,21 @@ git submodule update --init examples/sm64ex
 The native build requires a user-supplied `baserom.us.z64` in that directory
 to extract game assets. Do not commit the ROM or extracted copyrighted assets.
 
-With the LLVM 16, i386 sysroot, and Emscripten toolchains described above:
+After configuring the repository build for `ELFCONV_ARCH=x86` and building its
+dependencies, set the local i386 sysroot and Emscripten compiler, then build the
+CMake targets from the repository root:
 
 ```bash
-bash scripts/sm64ex.sh native
-bash scripts/sm64ex.sh bitcode
-bash scripts/sm64ex.sh wasm
+cmake -S . -B build \
+  -DELFCONV_SM64EX_SYSROOT="$HOME/.local/opt/elfconv-i386-sysroot" \
+  -DELFCONV_EMCC="$HOME/emsdk/upstream/emscripten/em++"
+cmake --build build --target sm64ex-native
+cmake --build build --target sm64ex-bitcode
+cmake --build build --target sm64ex-wasm
 ```
 
-Run these commands from the repository root. Host asset tools are built with
-GCC before the game is compiled as a non-PIE i386 ELF. Outputs are under
+The CMake targets invoke the pinned upstream Makefiles to build SM64EX's asset
+tools and game. The game is compiled as a non-PIE i386 ELF; outputs are under
 `examples/sm64ex/build/us_pc/`.
 
 The native executable's `--help` command succeeds, and the lifted bitcode

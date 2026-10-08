@@ -1,20 +1,33 @@
 # How to use release packages
-This shows how to use the release packages.
 
 Release Page: https://github.com/yomaytk/elfconv/releases
 
 ## Quick Start
 
 ### Prerequisites
-- [Emscripten](https://github.com/emscripten-core/emscripten) (for browser target)
-- [WASI-SDK](https://github.com/WebAssembly/wasi-sdk) (for WASI target)
-- WASI runtimes (e.g., [WasmEdge](https://github.com/WasmEdge/WasmEdge), [wasmtime](https://github.com/bytecodealliance/wasmtime))
 
-### Command
+- CMake 3.21+
+- Emscripten for browser targets
+- WASI-SDK and a WASI runtime for WASI targets
+
+### Browser conversion
+
 ```bash
-$ tar -zxvf elfconv-<VERSION>-linux-<arch>.tar.gz
-$ cd outdir
-$ TARGET=aarch64-wasm INITWASM=1 ./elfconv.sh /path/to/elf
+tar -xzf elfconv-<VERSION>-linux-<arch>.tar.gz
+cd outdir
+cmake \
+  -DELFCONV_INPUT=/absolute/path/to/elf \
+  -DELFCONV_TARGET=aarch64-wasm \
+  -DELFCONV_OUTPUT_DIR="$PWD/out" \
+  -DELFCONV_LIFTER="$PWD/bin/elflift" \
+  -DELFCONV_EMCC=/path/to/emsdk/upstream/emscripten/em++ \
+  -DELFCONV_INIT_WASM=ON \
+  -P cmake/ConvertElf.cmake
 ```
 
-For more build options (WASI target, multi-process, directory mounting, etc.), see [scripts/README.md](https://github.com/yomaytk/elfconv/blob/main/scripts/README.md).
+To add binaries to the browser page, run conversion again with the same output
+directory and omit `ELFCONV_INIT_WASM`. To preload a host directory, set
+`ELFCONV_MOUNT_SETTINGS=/host/dir@/mount/point`.
+
+For WASI, set `ELFCONV_TARGET=aarch64-wasi32` and
+`ELFCONV_WASI_SDK=/path/to/wasi-sdk`; the output is in `out/`.

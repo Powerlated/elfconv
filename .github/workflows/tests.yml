@@ -74,5 +74,5 @@ jobs:
            cd tests/browser && \
            npm install && \
            npx playwright install --with-deps chromium && \
-           bash build.sh ${{ matrix.project }} && \
+           cmake --build build --target browser-${{ matrix.project }} && \
            npx playwright test --project=${{ matrix.project }}"

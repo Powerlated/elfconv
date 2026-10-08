@@ -149,6 +149,18 @@ int print(Call &call, FILE *stream, unsigned format_arg) {
   }
   return total;
 }
+void parse_unsigned(Call &call) {
+  const char *input = text(call.arena, call.word(0));
+  char *end;
+  errno = 0;
+  unsigned long value = strtoul(input, &end, call.word(2));
+  if (value > UINT32_MAX) { value = UINT32_MAX; errno = ERANGE; }
+  if (call.word(1)) {
+    uint32_t address = call.word(0) + (end - input);
+    memcpy(guest(call.arena, call.word(1), 4), &address, 4);
+  }
+  call.result(value);
+}
 }  // namespace
 
 #define IMPORT(name) extern "C" void __ecv_i386_##name(uint8_t *arena, State *state, uint32_t, RuntimeManager *runtime)
@@ -167,24 +179,16 @@ IMPORT(__libc_start_main) {
   exit(status);
 }
 IMPORT(strcmp) { CALL; call.result(strcmp(text(arena, call.word(0)), text(arena, call.word(1)))); }
-IMPORT(strtoul) {
-  CALL;
-  const char *input = text(arena, call.word(0));
-  char *end;
-  errno = 0;
-  unsigned long value = strtoul(input, &end, call.word(2));
-  if (value > UINT32_MAX) { value = UINT32_MAX; errno = ERANGE; }
-  if (call.word(1)) {
-    uint32_t address = call.word(0) + (end - input);
-    memcpy(guest(arena, call.word(1), 4), &address, 4);
-  }
-  call.result(value);
-}
+IMPORT(strtoul) { CALL; parse_unsigned(call); }
+IMPORT(__isoc23_strtoul) { CALL; parse_unsigned(call); }
 IMPORT(printf) { CALL; call.result(print(call, stdout, 0)); }
 IMPORT(fprintf) {
   CALL;
   call.result(print(call, stream(call.word(0)), 1));
 }
+IMPORT(__printf_chk) { CALL; call.result(print(call, stdout, 1)); }
+IMPORT(__fprintf_chk) { CALL; call.result(print(call, stream(call.word(0)), 2)); }
+IMPORT(__stack_chk_fail) { elfconv_runtime_error("Guest stack protector triggered.\n"); }
 IMPORT(puts) { CALL; call.result(puts(text(arena, call.word(0)))); }
 IMPORT(fwrite) {
   CALL;

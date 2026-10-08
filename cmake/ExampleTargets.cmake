@@ -1,0 +1,38 @@
+include_guard(GLOBAL)
+
+set(ELFCONV_AARCH64_SYSROOT "/usr/aarch64-linux-gnu" CACHE PATH "AArch64 Linux sysroot")
+set(ELFCONV_AMD64_SYSROOT "/usr/x86_64-linux-gnu" CACHE PATH "AMD64 Linux sysroot")
+
+function(elfconv_configure_arch_target target architecture)
+  if(architecture STREQUAL "aarch64")
+    if(CMAKE_HOST_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
+      if(NOT CMAKE_C_COMPILER_ID STREQUAL "Clang")
+        message(FATAL_ERROR "Cross-building AArch64 examples requires a Clang C compiler")
+      endif()
+      target_compile_options("${target}" PRIVATE
+        --target=aarch64-linux-gnu --gcc-toolchain=/usr "--sysroot=${ELFCONV_AARCH64_SYSROOT}")
+      target_link_options("${target}" PRIVATE
+        --target=aarch64-linux-gnu --gcc-toolchain=/usr "--sysroot=${ELFCONV_AARCH64_SYSROOT}" -fuse-ld=lld -static)
+    elseif(CMAKE_HOST_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
+      target_link_options("${target}" PRIVATE -static)
+    else()
+      message(FATAL_ERROR "Unsupported host architecture for AArch64 examples: ${CMAKE_HOST_SYSTEM_PROCESSOR}")
+    endif()
+  elseif(architecture STREQUAL "amd64")
+    if(CMAKE_HOST_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
+      target_link_options("${target}" PRIVATE -static)
+    elseif(CMAKE_HOST_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
+      if(NOT CMAKE_C_COMPILER_ID STREQUAL "Clang")
+        message(FATAL_ERROR "Cross-building AMD64 examples requires Clang")
+      endif()
+      target_compile_options("${target}" PRIVATE
+        --target=x86_64-linux-gnu --gcc-toolchain=/usr "--sysroot=${ELFCONV_AMD64_SYSROOT}")
+      target_link_options("${target}" PRIVATE
+        --target=x86_64-linux-gnu --gcc-toolchain=/usr "--sysroot=${ELFCONV_AMD64_SYSROOT}" -fuse-ld=lld -static)
+    else()
+      message(FATAL_ERROR "Unsupported host architecture for AMD64 examples: ${CMAKE_HOST_SYSTEM_PROCESSOR}")
+    endif()
+  else()
+    message(FATAL_ERROR "Unsupported example target architecture: ${architecture}")
+  endif()
+endfunction()

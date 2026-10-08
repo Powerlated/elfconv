@@ -18,7 +18,6 @@ list(APPEND PROJECT_LIBRARIES GTest::gtest)
 enable_testing()
 enable_language(ASM)
 
-include_directories("/usr/lib/llvm-16/include")
 
 add_executable(lift-aarch64-tests
   Lift.cpp
@@ -69,7 +68,7 @@ add_custom_command(
 
 add_custom_command(
   OUTPUT tests_aarch64.ll
-  COMMAND /usr/bin/llvm-dis-16 tests_aarch64.bc
+  COMMAND "${LLVM_TOOLS_BINARY_DIR}/llvm-dis" tests_aarch64.bc
           -o tests_aarch64.ll
   DEPENDS tests_aarch64.bc
   COMMENT "Disassembling tests_aarch64.bc to tests_aarch64.ll"

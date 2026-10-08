@@ -227,6 +227,7 @@ target_link_libraries(remill_settings INTERFACE
   gflags::gflags
 )
 
+add_custom_target(semantics)
 add_subdirectory(lib/Arch)
 add_subdirectory(lib/BC)
 add_subdirectory(lib/OS)
@@ -247,7 +248,6 @@ target_link_libraries(remill INTERFACE
 )
 
 # add semantics target
-add_custom_target(semantics)
 
 # # tests (no tests now)
 # if(REMILL_ENABLE_TESTING)

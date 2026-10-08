@@ -28,7 +28,6 @@ setting() {
   RUNTIME_DIR=${ELFCONV_DIR}/runtime
   UTILS_DIR=${ELFCONV_DIR}/utils
   BROWSER_DIR=${ELFCONV_DIR}/browser
-  SCRIPTS_DIR=${ELFCONV_DIR}/scripts
   OUTDIR=${RELEASE_DIR}/outdir
   BINDIR=${OUTDIR}/bin
   BITCODEDIR=${OUTDIR}/bitcode
@@ -42,20 +41,6 @@ setting() {
     *)       ARCH_LABEL="${HOST_ARCH}" ;;
   esac
 
-  # shared compiler options
-  OPTFLAGS="-O3"
-  
-  # emscripten
-  EMCXX=em++
-  EMAR=emar
-  EMCCFLAGS="${OPTFLAGS} -I${ELFCONV_DIR}/backend/remill/include -I${ELFCONV_DIR}"
-  EMCC_ELFCONV_MACROS=" -DELF_IS_AARCH64 -DTARGET_IS_BROWSER=1"
-  
-  # wasi-sdk
-  WASISDKCXX=${WASI_SDK_PATH}/bin/clang++
-  WASISDKAR=${WASI_SDK_PATH}/bin/ar
-  WASISDKFLAGS="${OPTFLAGS} --sysroot=${WASI_SDK_PATH}/share/wasi-sysroot -I${ELFCONV_DIR}/backend/remill/include -I${ELFCONV_DIR} -D_WASI_EMULATED_SIGNAL -D_WASI_EMULATED_PROCESS_CLOCKS -D_WASI_EMULATED_MMAN -fno-exceptions"
-  WASI_ELFCONV_MACROS="-DELF_IS_AARCH64 -DTARGET_IS_WASI=1"
 
 }
 
@@ -70,13 +55,16 @@ main() {
 
   # clean existing outdir/
   if [ "$1" = "clean" ]; then
-    rm -rf $BINDIR $BITCODEDIR $LIBDIR $OUTOUTDIR ${OUTDIR}/browser ${OUTDIR}/scripts *.tar.gz
+    rm -rf "$BINDIR" "$BITCODEDIR" "$LIBDIR" "$OUTOUTDIR" \
+      "${OUTDIR}/browser" "${OUTDIR}/cmake" "${OUTDIR}/runtime" \
+      "${OUTDIR}/utils" "${OUTDIR}/backend" "${OUTDIR}/thirdparty" \
+      "${OUTDIR}/scripts" "${OUTDIR}/elfconv.sh" "${OUTDIR}/xterm-pty" *.tar.gz
     exit 0
   fi
 
   # set elflift
   mkdir -p $BINDIR
-  cd "${BUILD_DIR}" && ninja
+  cmake --build "${BUILD_DIR}" --target elflift
   if file "${BUILD_DIR}/lifter/elflift" | grep -q "dynamically linked"; then
     echo -e "[${ORANGE}WARNING${NC}] elflift is dynamically linked file."
   fi
@@ -87,6 +75,7 @@ main() {
     echo -e "[${RED}ERROR${NC}] Faild to set elflift."
     exit 1
   fi
+  mkdir -p "${LIBDIR}"
 
   while IFS= read -r so_path; do
     if [[ -n "${so_path}" && -f "${so_path}" ]]; then
@@ -116,81 +105,18 @@ main() {
       ;;
   esac
   
-  # prepare elfconv-runtime program.
-  mkdir -p $LIBDIR
-  base_rt=(
-    Entry.cpp
-    Memory.cpp
-    VmIntrinsics.cpp
-    Runtime.cpp
-    "${UTILS_DIR}/Util.cpp"
-    "${UTILS_DIR}/elfconv.cpp"
-  )
-  
-  # for browser
-  cd "${RUNTIME_DIR}" || { echo "cd Failure"; exit 1; }
 
-  browser_rt_flags=( $EMCCFLAGS $EMCC_ELFCONV_MACROS )
-
-  browser_rt_objects=()
-  browser_rt=( "${base_rt[@]}" "syscalls/SyscallBrowser.cpp" )
-
-  for src in "${browser_rt[@]}"; do
-    base=$(basename "$src" .cpp)
-    obj="${base}.o"
-    "$EMCXX" -O3 "${browser_rt_flags[@]}" -o "$obj" -c "$src"
-    browser_rt_objects+=("$obj")
-  done
-
-  "$EMAR" rcs libelfconvbrowser.a "${browser_rt_objects[@]}"
-
-  if mv libelfconvbrowser.a "${LIBDIR}"; then
-    echo -e "[${GREEN}INFO${NC}] Set libelfconvbrowser.a."
-  else
-    echo -e "[${RED}ERROR${NC}] Failed to set libelfconvbrowser.a."
-    exit 1
-  fi
-
-  rm *.o
-
-  # for WASI
-  cd "${RUNTIME_DIR}" || { echo "cd Failure"; exit 1; }
-
-  wasi_rt_flags=( $WASISDKFLAGS $WASI_ELFCONV_MACROS )
-
-  wasi_rt_objects=()
-  wasi_rt=( "${base_rt[@]}" "syscalls/SyscallWasi.cpp" )
-
-  for src in "${wasi_rt[@]}"; do
-    base=$(basename "$src" .cpp)
-    obj="${base}.o"
-    "$WASISDKCXX" "${wasi_rt_flags[@]}" -o "$obj" -c "$src"
-    wasi_rt_objects+=("$obj")
-  done
-
-  "$WASISDKAR" rcs libelfconvwasi.a "${wasi_rt_objects[@]}"
-
-  if mv libelfconvwasi.a "${LIBDIR}"; then
-    echo -e "[${GREEN}INFO${NC}] Set libelfconvwasi.a."
-  else
-    echo -e "[${RED}ERROR${NC}] Failed to set libelfconvwasi.a."
-    exit 1
-  fi
-		
-  rm *.o
-
-  # library of xterm-pty
-  cp ${ELFCONV_DIR}/xterm-pty/emscripten-pty.js $LIBDIR
-
-  BROWSEROUTDIR=${OUTDIR}/browser
-  mkdir -p $BROWSEROUTDIR
-  cp ${BROWSER_DIR}/* $BROWSEROUTDIR
-  echo -e "[${GREEN}INFO${NC}] Set browser files."
-
-  SCRIPTSOUTDIR=${OUTDIR}/scripts
-  mkdir -p $SCRIPTSOUTDIR
-  cp ${SCRIPTS_DIR}/pack-preload.py $SCRIPTSOUTDIR
-  echo -e "[${GREEN}INFO${NC}] Set pack-preload.py."
+  # Package the CMake converter and runtime sources.
+  mkdir -p "${OUTDIR}/browser" "${OUTDIR}/cmake" "${OUTDIR}/runtime" \
+    "${OUTDIR}/utils" "${OUTDIR}/backend/remill/include" \
+    "${OUTDIR}/thirdparty/nlohmann" "${OUTDIR}/xterm-pty"
+  cp -R "${BROWSER_DIR}/." "${OUTDIR}/browser/"
+  cp -R "${ELFCONV_DIR}/cmake/." "${OUTDIR}/cmake/"
+  cp -R "${RUNTIME_DIR}/." "${OUTDIR}/runtime/"
+  cp -R "${UTILS_DIR}/." "${OUTDIR}/utils/"
+  cp -R "${ELFCONV_DIR}/backend/remill/include/." "${OUTDIR}/backend/remill/include/"
+  cp -R "${ELFCONV_DIR}/thirdparty/nlohmann/." "${OUTDIR}/thirdparty/nlohmann/"
+  cp "${ELFCONV_DIR}/xterm-pty/emscripten-pty.js" "${OUTDIR}/xterm-pty/"
 
   cp ${RELEASE_DIR}/README.md ${OUTDIR}/README.md
   echo -e "[${GREEN}INFO${NC}] Set README.md."

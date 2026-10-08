@@ -25,7 +25,7 @@
 #pragma clang diagnostic ignored "-Wswitch-enum"
 
 #include <llvm/ADT/SmallVector.h>
-#include <llvm/ADT/Triple.h>
+#include <remill/Triple.h>
 #include <llvm/IR/DataLayout.h>
 #include <llvm/IR/IRBuilder.h>
 #include <remill/BC/InstructionLifter.h>

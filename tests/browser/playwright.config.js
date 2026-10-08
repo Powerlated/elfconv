@@ -1,4 +1,9 @@
 const { defineConfig } = require('@playwright/test');
+const path = require('path');
+
+const browserBuildDir = path.resolve(
+  process.env.ELFCONV_BROWSER_BUILD_DIR || path.join(__dirname, '../../build/tests/browser'),
+);
 
 module.exports = defineConfig({
   testDir: '.',
@@ -14,7 +19,7 @@ module.exports = defineConfig({
       reuseExistingServer: false,
       env: {
         TEST_PORT: '3000',
-        SERVE_DIR: 'wasm-out',
+        SERVE_DIR: path.join(browserBuildDir, 'wasm-out'),
         TEST_HTML: 'test-main.html',
       },
     },
@@ -24,7 +29,7 @@ module.exports = defineConfig({
       reuseExistingServer: false,
       env: {
         TEST_PORT: '3001',
-        SERVE_DIR: 'wasm-out-bash',
+        SERVE_DIR: path.join(browserBuildDir, 'wasm-out-bash'),
         TEST_HTML: 'test-bash.html',
       },
     },
