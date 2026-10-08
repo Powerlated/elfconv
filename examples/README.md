@@ -124,8 +124,14 @@ passes LLVM verification. Lifting required fixes for `stdout` copy relocations,
 variable-length x86 instruction scanning in indirect-jump functions, i386
 indirect-branch PHI widths, and missing SIMD/NOP semantics.
 
-Wasm generation is blocked by Emscripten's LLVM backend: compiling the lifted
-x87 floating-point operations fails with `do not know how to soften fp_extend`
-and `unsupported library call operation`. No working Wasm game or browser
+x87 arithmetic now uses binary64 `double`, including math builtins and NaN
+classification. The ten-byte guest encoding and register layout remain intact,
+but arithmetic loses extended precision and range. Native sanitizer checks and
+a Wasm/Node arithmetic smoke run pass.
+
+The lifted game now compiles to a Wasm object without the previous
+`fp_extend` backend failure. Final linking is blocked by missing guest-ABI
+adapters, including `glDrawArrays`, `fread`, `calloc`, SDL window/audio/controller
+APIs, and libc character classification. No working Wasm game or browser
 runtime is verified. Upstream's `TARGET_WEB` build compiles source directly
 with Emscripten and is not ELF lifting.

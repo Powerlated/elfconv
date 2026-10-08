@@ -678,14 +678,7 @@ ALWAYS_INLINE bool issignaling(float64_t x) {
 }
 
 ALWAYS_INLINE bool issignaling(float80_t x) {
-#  if defined(__x86_64__) || defined(__i386__) || defined(_M_X86)
-  // On non-x86 architectures, native_float80_t is defined as a double,
-  // which is identical to the float64_t definition above
-  const nan80_t x_nan = {x};
-  return x_nan.exponent == 0x7FFFU && !x_nan.is_quiet_nan && x_nan.payload && x_nan.interger_bit;
-#  else
   return issignaling(static_cast<native_float80_t>(x));
-#  endif
 }
 
 #endif  // !defined(issignaling)
@@ -768,14 +761,7 @@ ALWAYS_INLINE static bool IsSignalingNaN(float64_t x) {
 }
 
 ALWAYS_INLINE static bool IsSignalingNaN(float80_t x) {
-#if defined(__x86_64__) || defined(__i386__) || defined(_M_X86)
-  // On non-x86 architectures, native_float80_t is defined as a double,
-  // which is identical to the float64_t definition above
-  const nan80_t x_nan = {x};
-  return x_nan.exponent == 0x7FFFU && !x_nan.is_quiet_nan && x_nan.payload && x_nan.interger_bit;
-#else
   return IsSignalingNaN(static_cast<native_float80_t>(x));
-#endif
 }
 
 template <typename T>
@@ -1675,17 +1661,10 @@ MAKE_BUILTIN(CountTrailingZeros, 64, 64, __builtin_ctzll, 0)
     return intrinsic_name(val); \
   }
 
-#if defined(__x86_64__) || defined(__i386__) || defined(_M_X86)
-#  define MAKE_BUILTIN(name, intrinsic_name) \
-    MAKE_BUILTIN_INTRINSIC(name, intrinsic_name##f, 32, float32_t) \
-    MAKE_BUILTIN_INTRINSIC(name, intrinsic_name, 64, float64_t) \
-    MAKE_BUILTIN_INTRINSIC(name, intrinsic_name##l, 80, float80_t)
-#else
-#  define MAKE_BUILTIN(name, intrinsic_name) \
-    MAKE_BUILTIN_INTRINSIC(name, intrinsic_name##f, 32, float32_t) \
-    MAKE_BUILTIN_INTRINSIC(name, intrinsic_name, 64, float64_t) \
-    MAKE_BUILTIN_INTRINSIC(name, intrinsic_name, 80, float80_t)
-#endif
+#define MAKE_BUILTIN(name, intrinsic_name) \
+  MAKE_BUILTIN_INTRINSIC(name, intrinsic_name##f, 32, float32_t) \
+  MAKE_BUILTIN_INTRINSIC(name, intrinsic_name, 64, float64_t) \
+  MAKE_BUILTIN_INTRINSIC(name, intrinsic_name, 80, float80_t)
 
 MAKE_BUILTIN(FAbs, __builtin_fabs);
 MAKE_BUILTIN(FCos, __builtin_cos)

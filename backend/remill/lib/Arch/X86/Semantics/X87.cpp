@@ -122,20 +122,8 @@ DEF_FPU_SEM(FLD, RF80W, T src1) {
   // Quietize if signaling NaN.
   if (state.sw.ie) {
 
-#if defined(__x86_64__) || defined(__i386__) || defined(_M_X86)
-    // On non-x86 architectures, native_float80_t is defined as a double (float64_t)
-    // On x86, it is a long double (80-bit of native representation).
-    // Handle these separate cases.
-    static_assert(sizeof(native_float80_t) >= sizeof(nan80_t), "Float/NaN size mismatch");
-    // It is resonable to have >= in the above test because
-    // on x86/amd64 a native_float80_t is a float80 + padding
-    nan80_t res_nan = {static_cast<native_float80_t>(res)};
-#else
     static_assert(sizeof(native_float80_t) == sizeof(nan64_t), "Float/NaN size mismatch");
-    // on non-x86 architectures, native_float80_t should be
-    // a 64-bit double, so the exact size of nan64_t
     nan64_t res_nan = {static_cast<native_float80_t>(res)};
-#endif
     res_nan.is_quiet_nan = 1;
     res = res_nan.d;
   }
@@ -210,13 +198,8 @@ DEF_FPU_SEM(DoFCHS) {
   Write(X87_ST0, res);
 }
 
-#if defined(__x86_64__) || defined(__i386__) || defined(_M_X86)
-#  define __builtin_fmod_f80 __builtin_fmodl
-#  define __builtin_remainder_f80 __builtin_remainderl
-#else
-#  define __builtin_fmod_f80 __builtin_fmod
-#  define __builtin_remainder_f80 __builtin_remainder
-#endif
+#define __builtin_fmod_f80 __builtin_fmod
+#define __builtin_remainder_f80 __builtin_remainder
 
 // NOTE(pag): This only sort of, but doesn't really make sense. That is, it's
 //            a reasonable guess-y way to say whether or not a given value can

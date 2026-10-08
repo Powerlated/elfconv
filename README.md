@@ -34,6 +34,9 @@ An ahead-of-time binary translator that converts Linux applications to WebAssemb
     [SDL/OpenGL triangle](examples/README.md#sdl--opengl-2-triangle) to Wasm.
     Browser framebuffer readback and interactive keyboard exit have passed.
     This does not establish compatibility with arbitrary i386 binaries or Portal.
+  - x87 arithmetic uses 64-bit `double`, not extended 80-bit precision.
+    The ten-byte guest encoding and register layout are retained, but values
+    are rounded to binary64 for arithmetic. Extended precision and range are lost.
 - **Linking**: No general Linux shared-object loader
   - AArch64 conversion requires statically linked binaries.
   - `i386-wasm` resolves the triangle's libc/SDL2/OpenGL imports to Emscripten

@@ -29,59 +29,16 @@ static_assert(8 == sizeof(float64_t), "Invalid `float64_t` size.");
 typedef double float128_t;
 static_assert(8 == sizeof(float128_t), "Invalid `float128_t` size.");
 
-// a long double can be anything from a 128-bit float (on AArch64/Linux) to a 64-bit double (AArch64 MacOS)
-// to an 80-bit precision wrapped with padding (x86/x86-64). We do not do a static assert on the size
-// since there are too  many options.
-
-// A "native_float80_t" is a native type that is closes to approximating
-// an x86 80-bit float.
-// when building against CUDA, default to 64-bit float80s
-#if !defined(__CUDACC__) && (defined(__x86_64__) || defined(__i386__) || defined(_M_X86))
-#  if defined(__float80)
-typedef __float80 native_float80_t;
-#  else
-typedef long double native_float80_t;
-#  endif
-static_assert(10 <= sizeof(native_float80_t), "Invalid `native_float80_t` size.");
-#else
+// x87 arithmetic is approximated with binary64 on every host, including x86.
+// Keep the ten-byte storage slot below to preserve lifted State offsets.
 typedef double native_float80_t;
 static_assert(8 == sizeof(native_float80_t), "Invalid `native_float80_t` size.");
-#endif
 
 static const int kEightyBitsInBytes = 10;
-union union_ld {
-  struct {
-    uint8_t data[kEightyBitsInBytes];
-    // when building against CUDA, default to 64-bit float80s
-#if !defined(__CUDACC__) && (defined(__x86_64__) || defined(__i386__) || defined(_M_X86))
-    // We are doing x86 on x86, so we have native x86 FP80s, but they
-    // are not available in raw 80-bit native form.
-    //
-    // To get to the internal FP80 representation, we have to use a
-    // `long double` which is (usually! but not always)
-    //  an FP80 padded to a 12 or 16 byte boundary
-    //
-    uint8_t padding[sizeof(native_float80_t) - kEightyBitsInBytes];
-#else
-    // The closest native FP type that we can easily deal with is a 64-bit double
-    // this is less than the size of an FP80, so the data variable above will already
-    // enclose it. No extra padding is needed
-#endif
-  } lds __attribute__((packed));
-  native_float80_t ld;
-} __attribute__((packed));
-
-static void *memset_impl(void *b, int c, std::size_t len) {
-  auto *p = static_cast<int *>(b);
-  for (std::size_t i = 0; i < len; ++i) {
-    p[i] = c;
-  }
-  return b;
-}
 
 static void *memcpy_impl(void *dst, const void *src, std::size_t n) {
-  auto *d = static_cast<int *>(dst);
-  const auto *s = static_cast<const int *>(src);
+  auto *d = static_cast<uint8_t *>(dst);
+  const auto *s = static_cast<const uint8_t *>(src);
   for (std::size_t i = 0; i < n; ++i) {
     d[i] = s[i];
   }
@@ -100,23 +57,48 @@ struct float80_t final {
   float80_t(const float80_t &) = default;
   float80_t &operator=(const float80_t &) = default;
 
-  inline float80_t(native_float80_t ld) {
-    union_ld ldu;
-    memset_impl(&ldu, 0,
-                sizeof(ldu));  // zero out ldu to make padding consistent
-    ldu.ld = ld;  // assign native value
-    // copy the representation to this object
-    memcpy_impl(&data[0], &ldu.lds.data[0], sizeof(data));
+  inline float80_t(native_float80_t value) {
+    uint64_t bits;
+    memcpy_impl(&bits, &value, sizeof(bits));
+    uint16_t sign_exp = static_cast<uint16_t>((bits >> 48) & 0x8000);
+    unsigned exponent = static_cast<unsigned>((bits >> 52) & 0x7ff);
+    uint64_t significand = bits & 0x000fffffffffffffULL;
+    if (exponent == 0x7ff) {
+      sign_exp |= 0x7fff;
+      significand = (significand << 11) | 0x8000000000000000ULL;
+    } else if (exponent) {
+      sign_exp |= static_cast<uint16_t>(exponent + 15360);
+      significand = (significand << 11) | 0x8000000000000000ULL;
+    } else if (significand) {
+      unsigned shift = 0;
+      while (!(significand & 0x0010000000000000ULL)) {
+        significand <<= 1;
+        ++shift;
+      }
+      sign_exp |= static_cast<uint16_t>(15361 - shift);
+      significand <<= 11;
+    }
+    memcpy_impl(data, &significand, sizeof(significand));
+    memcpy_impl(data + 8, &sign_exp, sizeof(sign_exp));
   }
 
   operator native_float80_t() {
-    union_ld ldu;
-    memset_impl(&ldu, 0,
-                sizeof(ldu));  // zero out ldu to make padding consistent
-    // copy the internal representation into the union
-    memcpy_impl(&ldu.lds.data[0], &data[0], sizeof(data));
-    // extract the native backing type from it
-    return ldu.ld;
+    uint64_t significand;
+    uint16_t sign_exp;
+    memcpy_impl(&significand, data, sizeof(significand));
+    memcpy_impl(&sign_exp, data + 8, sizeof(sign_exp));
+    unsigned exponent = sign_exp & 0x7fff;
+    if (exponent == 0x7fff) {
+      uint64_t bits = (uint64_t(sign_exp & 0x8000) << 48) | 0x7ff0000000000000ULL;
+      uint64_t payload = significand & 0x7fffffffffffffffULL;
+      if (payload) bits |= (payload >> 11) | 1;
+      double value;
+      memcpy_impl(&value, &bits, sizeof(value));
+      return value;
+    }
+    double value = __builtin_ldexp(static_cast<double>(significand),
+                                  int(exponent ? exponent : 1) - 16383 - 63);
+    return sign_exp & 0x8000 ? -value : value;
   }
 } __attribute__((packed));
 
@@ -145,19 +127,6 @@ union nan64_t {
 } __attribute__((packed));
 
 static_assert(sizeof(float64_t) == sizeof(nan64_t), "Invalid packing of `nan64_t`.");
-
-union nan80_t {
-  float80_t d;
-  struct {
-    uint64_t payload : 62;
-    uint64_t is_quiet_nan : 1;
-    uint64_t interger_bit : 1;
-    uint64_t exponent : 15;
-    uint64_t is_negative : 1;
-  } __attribute__((packed));
-} __attribute__((packed));
-
-static_assert(sizeof(float80_t) == sizeof(nan80_t), "Invalid packing of `nan80_t`.");
 
 #if __has_include(<cmath>)
 #  include <cmath>
