@@ -41,6 +41,14 @@ if(NOT result EQUAL 0)
   message(FATAL_ERROR "Building SM64EX asset tools failed with exit code ${result}")
 endif()
 
+set(elf "${game}/build/us_pc/sm64.us.f3dex2e")
+set(link_map)
+if(ELFCONV_SM64EX_MODE STREQUAL "wasm")
+  set(link_map "${elf}.map")
+  if(NOT EXISTS "${link_map}")
+    file(REMOVE "${elf}")
+  endif()
+endif()
 set(sysroot "${ELFCONV_SM64EX_SYSROOT}")
 set(platform_cflags
   "-fno-pie --sysroot=${sysroot} -I${sysroot}/usr/include/i386-linux-gnu -B${sysroot}/usr/lib/i386-linux-gnu -Wno-unused-command-line-argument"
@@ -50,16 +58,24 @@ set(ld_library_path "${ELFCONV_SM64EX_DWARF_LIBRARY_DIR}")
 if(DEFINED ENV{LD_LIBRARY_PATH} AND NOT "$ENV{LD_LIBRARY_PATH}" STREQUAL "")
   string(APPEND ld_library_path ":$ENV{LD_LIBRARY_PATH}")
 endif()
+set(sm64ex_make_args
+  "${make_program}" -C "${game}" "-j${ELFCONV_SM64EX_JOBS}"
+  TARGET_BITS=32 TARGET_ARCH=i686 NO_PIE=1
+  "CC=${ELFCONV_SM64EX_CLANG}" "PLATFORM_CFLAGS=${platform_cflags}"
+  "SDLCONFIG=pkg-config sdl2"
+)
+if(link_map)
+  set(link_map_makefile "${CMAKE_CURRENT_BINARY_DIR}/sm64ex-link-map.mk")
+  file(WRITE "${link_map_makefile}" "LDFLAGS += -Wl,-Map,${link_map}\n")
+  list(APPEND sm64ex_make_args -f "${game}/Makefile" -f "${link_map_makefile}")
+endif()
 execute_process(
   COMMAND "${CMAKE_COMMAND}" -E env
     "SYSROOT=${sysroot}"
     "PKG_CONFIG_SYSROOT_DIR=${sysroot}"
     "PKG_CONFIG_LIBDIR=${pkg_config_libdir}"
     "LD_LIBRARY_PATH=${ld_library_path}"
-    "${make_program}" -C "${game}" "-j${ELFCONV_SM64EX_JOBS}"
-    TARGET_BITS=32 TARGET_ARCH=i686 NO_PIE=1
-    "CC=${ELFCONV_SM64EX_CLANG}" "PLATFORM_CFLAGS=${platform_cflags}"
-    "SDLCONFIG=pkg-config sdl2"
+    ${sm64ex_make_args}
   RESULT_VARIABLE result
   COMMAND_ECHO STDOUT
 )
@@ -67,7 +83,6 @@ if(NOT result EQUAL 0)
   message(FATAL_ERROR "Building the SM64EX i386 ELF failed with exit code ${result}")
 endif()
 
-set(elf "${game}/build/us_pc/sm64.us.f3dex2e")
 if(NOT EXISTS "${elf}")
   message(FATAL_ERROR "SM64EX build did not produce ${elf}")
 endif()
@@ -94,7 +109,12 @@ else()
       "-DELFCONV_OUTPUT_DIR=${game}/build/us_pc"
       "-DELFCONV_LIFTER=${ELFCONV_LIFTER}"
       "-DELFCONV_EMCC=${ELFCONV_EMCC}"
+      "-DELFCONV_WASM_OPT_LEVEL=${ELFCONV_SM64EX_WASM_OPT_LEVEL}"
+      "-DELFCONV_WASM_JSPI=${ELFCONV_SM64EX_JSPI}"
       -DELFCONV_LEGACY_GL=0
+      -DELFCONV_INCREMENTAL_UNITS=ON
+      "-DELFCONV_LINK_MAP=${link_map}"
+      "-DELFCONV_OBJECT_BASE=${game}"
       -P "${ELFCONV_ROOT}/cmake/ConvertElf.cmake"
     RESULT_VARIABLE result
     COMMAND_ECHO STDOUT

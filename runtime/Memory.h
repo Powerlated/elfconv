@@ -93,6 +93,18 @@ extern "C" const uint64_t _ecv_block_address_size_array[];
 extern "C" const uint64_t _ecv_block_address_fn_vma_array[];
 extern "C" const uint64_t _ecv_block_address_array_size;
 
+struct EcvLiftedUnit {
+  const uint64_t *function_vmas;
+  const LiftedFunc *function_ptrs;
+  uint64_t ***block_address_ptrs;
+  const uint64_t **block_address_vmas;
+  const uint64_t *block_address_sizes;
+  const uint64_t *block_address_fn_vmas;
+  uint64_t block_address_count;
+};
+extern "C" const EcvLiftedUnit _ecv_lifted_units[];
+extern "C" const uint64_t _ecv_lifted_unit_count;
+
 enum class MemoryAreaType : uint8_t {
   STACK,
   HEAP,

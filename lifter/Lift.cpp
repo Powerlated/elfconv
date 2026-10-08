@@ -54,6 +54,13 @@ DEFINE_uint64(dbg_fun_vma, 0, "Function Address of the debug target");
 DEFINE_string(bitcode_path, "", "Function Name of the debug target");
 DEFINE_string(target_arch, "", "Target Architecture for conversion");
 DEFINE_string(float_exception, "0", "Whether the floating-point exception status is set or not");
+DEFINE_string(linker_map, "", "Linker map for final-ELF incremental unit ownership.");
+DEFINE_string(object_base, "", "Base directory for relative object paths in the linker map.");
+DEFINE_string(unit_manifest_out, "", "Write unit owners and content fingerprints, then exit.");
+DEFINE_string(metadata_fingerprint_out, "", "Write the process-wide ELF metadata fingerprint.");
+DEFINE_string(unit_owner, "", "Lift only functions owned by this linker-map object.");
+DEFINE_string(unit_id, "", "Stable suffix used for this incremental unit's metadata symbols.");
+DEFINE_bool(metadata_only, false, "Emit only process-wide ELF metadata.");
 DEFINE_string(
     norm_mode, "0",
     "Whether the test mode is on or off");  // We use `test_mode` for not only test mode but also `no VRP` mode.
@@ -86,8 +93,20 @@ int main(int argc, char *argv[]) {
   google::InitGoogleLogging(argv[0]);
 
   AArch64TraceManager manager(FLAGS_target_elf);
+  if (!FLAGS_linker_map.empty()) manager.LoadLinkerMap(FLAGS_linker_map, FLAGS_object_base);
   manager.SetELFData();
+  if (!FLAGS_unit_manifest_out.empty()) {
+    if (FLAGS_metadata_fingerprint_out.empty()) {
+      elfconv_runtime_error("--unit_manifest_out requires --metadata_fingerprint_out.\n");
+    }
+    manager.WriteIncrementalManifest(FLAGS_unit_manifest_out, FLAGS_metadata_fingerprint_out);
+    return 0;
+  }
   manager.target_arch = FLAGS_target_arch;
+  const bool unit_mode = !FLAGS_unit_owner.empty();
+  if (unit_mode != !FLAGS_unit_id.empty() || (unit_mode && FLAGS_metadata_only)) {
+    elfconv_runtime_error("Incremental unit owner/id and metadata-only options are inconsistent.\n");
+  }
 
   llvm::LLVMContext context;
   auto os_name = remill::GetOSName(REMILL_OS);
@@ -103,6 +122,12 @@ int main(int argc, char *argv[]) {
   auto module = FLAGS_bitcode_path.empty()
                     ? remill::LoadArchSemantics(arch.get())
                     : remill::LoadArchSemantics(arch.get(), {FLAGS_bitcode_path.c_str()});
+  llvm::Module external_declarations("incremental-unit-declarations", context);
+  if (unit_mode) {
+    external_declarations.setDataLayout(module->getDataLayout());
+    external_declarations.setTargetTriple(module->getTargetTriple());
+    manager.EnableUnitMode(FLAGS_unit_owner, arch.get(), &external_declarations);
+  }
 
   // Set wasm32-unknown-wasi and wasm32 data layout if necessary.
   if (manager.target_arch == "wasi32") {
@@ -132,11 +157,22 @@ int main(int argc, char *argv[]) {
   remill::IntrinsicTable intrinsics(module.get());
   MainLifter main_lifter(arch.get(), &manager, lift_config);
 
-  // Set various common metadata not depending on whether the ELF binary is not stripped or not.
-  // entry point, program header, every data sections, etc.
-  main_lifter.SetCommonMetaData(lift_config);
+  if (FLAGS_metadata_only) {
+    main_lifter.SetCommonMetaData(lift_config);
+    arch->DeclareLiftedFunction(manager.entry_func_lifted_name, module.get());
+    main_lifter.SetEntryPoint(manager.entry_func_lifted_name);
+  } else if (unit_mode) {
+    main_lifter.SetRuntimeManagerClass();
+    main_lifter.DeclareHelperFunction();
+    main_lifter.SetOptMode(manager.elf_obj.able_vrp_opt, lift_config.norm_mode);
+    main_lifter.SetUnitOutputSuffix(FLAGS_unit_id);
+  } else {
+    main_lifter.SetCommonMetaData(lift_config);
+  }
 
   for (const auto &[address, name] : manager.elf_obj.i386_imports) {
+    if (FLAGS_metadata_only ||
+        (unit_mode && !manager.IsSelectedUnitAddress(address))) continue;
     auto *wrapper = arch->DeclareLiftedFunction(manager.GetLiftedFuncName(address), module.get());
     auto callee = module->getOrInsertFunction("__ecv_i386_" + name, wrapper->getFunctionType());
     auto *block = llvm::BasicBlock::Create(context, "import", wrapper);
@@ -147,7 +183,7 @@ int main(int argc, char *argv[]) {
     ir.CreateRetVoid();
     manager.SetLiftedTraceDefinition(address, wrapper);
   }
-  if (arch_name == remill::kArchX86) {
+  if (!unit_mode && arch_name == remill::kArchX86) {
     auto emit_functions = [&](const char *name, std::vector<uint32_t> addresses) {
       addresses.push_back(0);
       auto *data = llvm::ConstantDataArray::get(context, addresses);
@@ -158,9 +194,10 @@ int main(int argc, char *argv[]) {
     emit_functions("_ecv_i386_finalizers", manager.elf_obj.i386_finalizers);
   }
 
-  // Lift every function.
   std::unordered_map<uint64_t, const char *> addr_fun_name_map;
   std::set<uint64_t> fin_addrs;
+  if (!FLAGS_metadata_only) {
+    // Lift every function.
 
   do {
     manager.rest_disasm_funcs.clear();
@@ -168,6 +205,7 @@ int main(int argc, char *argv[]) {
       if (fin_addrs.contains(addr)) {
         continue;
       }
+      if (unit_mode && !manager.IsSelectedUnitAddress(addr)) continue;
       addr_fun_name_map[addr] = dasm_func.func_name.c_str();
       auto &lifted_fun_name = addr_fun_name_map[addr];
       if (!main_lifter.Lift(dasm_func.vma, lifted_fun_name)) {
@@ -179,7 +217,9 @@ int main(int argc, char *argv[]) {
       fin_addrs.insert(addr);
     }
     for (auto &[rest_addr, disasm_func] : manager.rest_disasm_funcs) {
-      manager.disasm_funcs.insert({rest_addr, disasm_func});
+      if (!unit_mode || manager.IsSelectedUnitAddress(rest_addr)) {
+        manager.disasm_funcs.insert({rest_addr, disasm_func});
+      }
     }
   } while (!manager.rest_disasm_funcs.empty());
 
@@ -187,7 +227,9 @@ int main(int argc, char *argv[]) {
   manager.elf_obj.able_vrp_opt = !lift_config.norm_mode;
 
   // Subsequence process of lifting.
-  if (manager.elf_obj.able_vrp_opt) {
+  if (unit_mode) {
+    main_lifter.SubseqForIncrementalUnit(addr_fun_name_map);
+  } else if (manager.elf_obj.able_vrp_opt) {
     main_lifter.SubseqOfLifting(addr_fun_name_map);
   } else {
     main_lifter.SubseqForNoOptLifting(addr_fun_name_map);
@@ -202,6 +244,7 @@ int main(int argc, char *argv[]) {
     }
 #endif
   }
+  }
 
   // Prepare and validate the LLVM Module.
   auto host_arch = remill::Arch::Build(&context, os_name, remill::GetArchName(REMILL_ARCH));
@@ -214,8 +257,14 @@ int main(int argc, char *argv[]) {
                         global->getName().startswith("COND_"));
     });
     llvm::legacy::PassManager passes;
-    passes.add(llvm::createInternalizePass([](const llvm::GlobalValue &global) {
-      return global.getName().startswith("_ecv_");
+    std::set<std::string> unit_exports;
+    if (unit_mode) {
+      for (const auto &[_, function_name] : addr_fun_name_map) {
+        unit_exports.insert(function_name);
+      }
+    }
+    passes.add(llvm::createInternalizePass([&](const llvm::GlobalValue &global) {
+      return global.getName().startswith("_ecv_") || unit_exports.contains(global.getName().str());
     }));
     passes.add(llvm::createGlobalDCEPass());
     passes.run(*module);

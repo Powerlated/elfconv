@@ -20,6 +20,9 @@
 #include <remill/OS/OS.h>
 #include <sstream>
 #include <string>
+#include <filesystem>
+#include <llvm/IR/Module.h>
+#include <vector>
 
 class DisasmFunc {
  public:
@@ -38,8 +41,7 @@ class AArch64TraceManager : public remill::TraceManager {
  public:
   virtual ~AArch64TraceManager(void) = default;
   AArch64TraceManager(std::string target_elf_file_name)
-      : elf_obj(BinaryLoader::ELFObject(target_elf_file_name)),
-        unique_i64(0) {}
+      : elf_obj(BinaryLoader::ELFObject(target_elf_file_name)) {}
 
   void SetLiftedTraceDefinition(uint64_t addr, llvm::Function *lifted_func);
   std::string AddRestDisasmFunc(uint64_t addr);
@@ -54,6 +56,12 @@ class AArch64TraceManager : public remill::TraceManager {
   uint64_t GetFuncNums();
 
   void SetELFData();
+  void LoadLinkerMap(const std::string &path, const std::string &object_base);
+  void EnableUnitMode(const std::string &owner, const remill::Arch *arch,
+                      llvm::Module *external_declarations);
+  bool IsSelectedUnitAddress(uint64_t address) const;
+  void WriteIncrementalManifest(const std::string &manifest_path,
+                                const std::string &metadata_fingerprint_path) const;
 
   void SetCommonVariousData();
 
@@ -72,5 +80,17 @@ class AArch64TraceManager : public remill::TraceManager {
   std::string target_arch;
 
  private:
-  uint64_t unique_i64;
+  struct CodeOwnerRange {
+    uint64_t begin;
+    uint64_t end;
+    std::string owner;
+  };
+  std::vector<CodeOwnerRange> code_owner_ranges;
+  std::string object_base;
+  bool unit_mode = false;
+  std::string unit_owner;
+  const remill::Arch *unit_arch = nullptr;
+  llvm::Module *external_declarations = nullptr;
+  std::unordered_map<uint64_t, std::string> external_func_names;
+  std::string GetObjectOwner(uint64_t address) const;
 };

@@ -57,6 +57,21 @@ void MainLifter::SetLiftedNoOptFunPtrTable(
       ->SetLiftedNoOptFunPtrTable(addr_noopt_fun_name_map, able_vrp_opt);
 }
 
+void MainLifter::WrapImpl::SetUnitOutputSuffix(const std::string &suffix) {
+  const auto unit_suffix = "_" + suffix;
+  ecv_fun_vmas_name += unit_suffix;
+  ecv_fun_ptrs_name += unit_suffix;
+  ecv_block_address_ptrs_array_name += unit_suffix;
+  ecv_block_address_vmas_array_name += unit_suffix;
+  ecv_block_address_size_array_name += unit_suffix;
+  ecv_block_address_fn_vma_array_name += unit_suffix;
+  ecv_block_address_array_size_name += unit_suffix;
+}
+
+void MainLifter::SetUnitOutputSuffix(const std::string &suffix) {
+  static_cast<WrapImpl *>(impl.get())->SetUnitOutputSuffix(suffix);
+}
+
 /* Set block address data */
 void MainLifter::SetBlockAddressData(std::vector<llvm::Constant *> &block_address_ptrs_array,
                                      std::vector<llvm::Constant *> &block_address_vmas_array,
@@ -167,6 +182,17 @@ void MainLifter::SubseqForNoOptLifting(
 #if defined(LIFT_CALLSTACK_DEBUG) || defined(LIFT_FUNC_SYMBOLS) || defined(CALLED_FUNC_NAME)
   SetFuncSymbolNameTable(addr_noopt_fun_name_map);
 #endif
+}
+
+void MainLifter::SubseqForIncrementalUnit(
+    std::unordered_map<uint64_t, const char *> &addr_fun_name_map) {
+  auto *target_manager = static_cast<AArch64TraceManager *>(&impl.get()->manager);
+  CHECK(!addr_fun_name_map.empty());
+  SetLiftedFunPtrTable(addr_fun_name_map);
+  if (target_manager->elf_obj.able_vrp_opt) Optimize();
+  SetBlockAddressData(
+      target_manager->g_block_address_ptrs_array, target_manager->g_block_address_vmas_array,
+      target_manager->g_block_address_size_array, target_manager->g_block_address_fn_vma_array);
 }
 
 /* Set entry function pointer */
@@ -306,9 +332,10 @@ void MainLifter::WrapImpl::SetLiftedFunPtrTable(
   }
   /* insert guard */
   addr_list.push_back(llvm::ConstantInt::get(llvm::Type::getInt64Ty(context), 0));
+  fn_ptr_list.push_back(llvm::Constant::getNullValue(llvm::Type::getInt64PtrTy(context)));
   /* define global fn ptr table */
-  SetGblArrayIr(llvm::Type::getInt64Ty(context), addr_list, "_ecv_fun_vmas");
-  SetGblArrayIr(llvm::Type::getInt64PtrTy(context), fn_ptr_list, "_ecv_fun_ptrs");
+  SetGblArrayIr(llvm::Type::getInt64Ty(context), addr_list, ecv_fun_vmas_name);
+  SetGblArrayIr(llvm::Type::getInt64PtrTy(context), fn_ptr_list, ecv_fun_ptrs_name);
 }
 
 // is not used now.

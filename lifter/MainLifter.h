@@ -25,6 +25,8 @@ class MainLifter : public TraceLifter {
           ecv_e_phnum_name("_ecv_e_phnum"),
           ecv_e_ph_name("_ecv_e_ph"),
           ecv_platform_name("_ecv_platform_name"),
+          ecv_fun_vmas_name("_ecv_fun_vmas"),
+          ecv_fun_ptrs_name("_ecv_fun_ptrs"),
           ecv_block_address_ptrs_array_name("_ecv_block_address_ptrs_array"),
           ecv_block_address_vmas_array_name("_ecv_block_address_vmas_array"),
           ecv_block_address_size_array_name("_ecv_block_address_size_array"),
@@ -54,6 +56,8 @@ class MainLifter : public TraceLifter {
     std::string ecv_e_phnum_name;
     std::string ecv_e_ph_name;
     std::string ecv_platform_name;
+    std::string ecv_fun_vmas_name;
+    std::string ecv_fun_ptrs_name;
     std::string ecv_block_address_ptrs_array_name;
     std::string ecv_block_address_vmas_array_name;
     std::string ecv_block_address_size_array_name;
@@ -70,6 +74,8 @@ class MainLifter : public TraceLifter {
     std::string debug_reach_name;
     std::string debug_string_name;
     std::string debug_vma_and_registers_name;
+
+    void SetUnitOutputSuffix(const std::string &suffix);
 
     // Set RuntimeManager class to global context
     void SetRuntimeManagerClass();
@@ -158,6 +164,7 @@ class MainLifter : public TraceLifter {
                            std::vector<llvm::Constant *> &block_address_vmas_array,
                            std::vector<llvm::Constant *> &block_address_size_array,
                            std::vector<llvm::Constant *> &block_address_fn_vma_array);
+  void SetUnitOutputSuffix(const std::string &suffix);
   void SetOptMode(bool able_vrp_opt, bool norm_mode);
   virtual void DeclareHelperFunction();
 
@@ -171,6 +178,7 @@ class MainLifter : public TraceLifter {
 
   void SubseqOfLifting(std::unordered_map<uint64_t, const char *> &addr_opt_fun_name_map);
   void SubseqForNoOptLifting(std::unordered_map<uint64_t, const char *> &addr_noopt_fun_name_map);
+  void SubseqForIncrementalUnit(std::unordered_map<uint64_t, const char *> &addr_fun_name_map);
 
   /* Debug */
   // Declare debug function

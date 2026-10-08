@@ -76,7 +76,9 @@ cmake --build build/sdl_triangle --target triangle-wasm
 
 ## SDL / OpenGL cube
 
-`sdl_cube` uses the same i386 SDL2/OpenGL requirements and CMake pattern:
+`sdl_cube` uses the same i386 SDL2/OpenGL requirements. Its executable is split
+across `cube.c`, `cube_geometry.c`, `cube_shader.c`, and `cube_render.c` so
+`cube-wasm` exercises per-object incremental lifting and compilation.
 
 ```bash
 cmake -S examples/sdl_cube -B build/sdl_cube
@@ -100,6 +102,16 @@ The converted cube smoke passed in Chromium with `?frames=90`: both framebuffer
 readbacks passed, the center pixel changed between frames 1 and 90, the corner
 remained black, and the guest exited with status 0. It uses shader/VBO OpenGL
 calls without legacy GL emulation.
+
+The cube target emits a GNU linker map, then partitions the final relocated ELF
+by input-object code ranges. It caches each object's lifted bitcode and
+independently optimized Wasm object under
+`build/sdl_cube/.elfconv-incremental/`; shared ELF metadata and runtime objects
+have separate cache entries. A no-op rebuild skips lifting, compilation, and
+linking. Changing one source object rebuilds its unit, plus any units whose
+VMAs move because of link layout changes. This uses final linked code rather
+than raw relocatable `.o` files, preserving linker-applied relocations. The
+final Wasm link remains whole-program and does not perform cross-unit LTO.
 
 
 [`examples-repos`](https://github.com/yomaytk/elfconv/tree/main/examples/examples-repos) has patch or config files that can be used to convert the third-party programs. You can convert those Linux/ELF binaries following the steps below.
@@ -175,9 +187,19 @@ classification. The ten-byte guest encoding and register layout remain intact,
 but arithmetic loses extended precision and range. Native sanitizer checks and
 a Wasm/Node arithmetic smoke run pass.
 
-The lifted game now compiles to a Wasm object without the previous
-`fp_extend` backend failure. Final linking is blocked by missing guest-ABI
-adapters, including `glDrawArrays`, `fread`, `calloc`, SDL window/audio/controller
-APIs, and libc character classification. No working Wasm game or browser
-runtime is verified. Upstream's `TARGET_WEB` build compiles source directly
+`sm64ex-wasm` now partitions the final linked i386 ELF by linker-map object
+ownership, lifts each code unit to its own bitcode file, optimizes each Wasm
+object at `-O1`, and links those units with cached shared metadata and runtime
+objects. Its cache is under
+`examples/sm64ex/build/us_pc/.elfconv-incremental/`; the first build produced
+116 units, and the next unchanged build skipped conversion and linking. This
+uses linker-resolved code, not raw relocatable `.o` files. VMA/layout changes
+can invalidate additional units, and the final Wasm link remains whole-program
+without cross-unit LTO.
+
+The browser build boots through the intro to the title screen, where Mario and
+the `SUPER MARIO 64` text are visible. The earlier splash intentionally shows
+only the `64` logo. The title background is still visibly tiled, and gameplay
+beyond the title screen has not been verified; this is not yet a complete
+playable-browser claim. Upstream's `TARGET_WEB` build compiles source directly
 with Emscripten and is not ELF lifting.

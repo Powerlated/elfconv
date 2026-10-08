@@ -10,6 +10,13 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cctype>
+#include <cmath>
+#include <dirent.h>
+#include <sys/stat.h>
+#include <string>
+#include <vector>
+#include <map>
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
 #endif
@@ -110,44 +117,171 @@ void invoke(uint8_t *arena, State *state, RuntimeManager *runtime, uint32_t targ
   state->gpr.rip.dword = saved_pc;
 }
 
+struct Allocation { uint32_t size; bool free; };
+std::map<uint32_t, Allocation> allocations;
+uint32_t allocate(uint32_t size) {
+  if (size > UINT32_MAX - 15) return 0;
+  size = (std::max(size, 1u) + 15) & ~15u;
+  if (allocations.empty()) {
+    uint32_t end = BRK_END_VMA;
+    for (uint64_t i = 0; i < _ecv_data_sec_num; ++i) {
+      uint64_t start = _ecv_data_sec_vma_array[i], length = _ecv_data_sec_size_array[i];
+      if (start <= BRK_START_VMA && length > BRK_START_VMA - start)
+        elfconv_runtime_error("ELF overlaps guest import heap.\n");
+      if (start >= BRK_START_VMA && start < end) end = start & ~15u;
+    }
+    allocations.emplace(BRK_START_VMA, Allocation{end - uint32_t(BRK_START_VMA), true});
+  }
+  for (auto it = allocations.begin(); it != allocations.end(); ++it) {
+    if (!it->second.free || it->second.size < size) continue;
+    uint32_t address = it->first, remaining = it->second.size - size;
+    it->second = {size, false};
+    if (remaining) allocations.emplace(address + size, Allocation{remaining, true});
+    return address;
+  }
+  errno = ENOMEM;
+  return 0;
+}
+void release(uint32_t address) {
+  if (!address) return;
+  auto it = allocations.find(address);
+  if (it == allocations.end() || it->second.free)
+    elfconv_runtime_error("Invalid guest free: 0x%x.\n", address);
+  it->second.free = true;
+  auto next = std::next(it);
+  if (next != allocations.end() && next->second.free) {
+    it->second.size += next->second.size;
+    allocations.erase(next);
+  }
+  if (it != allocations.begin()) {
+    auto prev = std::prev(it);
+    if (prev->second.free) {
+      prev->second.size += it->second.size;
+      allocations.erase(it);
+    }
+  }
+}
+uint32_t owned_string(uint8_t *arena, const char *value) {
+  if (!value) return 0;
+  size_t length = strlen(value) + 1;
+  if (length > UINT32_MAX) return 0;
+  uint32_t address = allocate(length);
+  if (address) memcpy(guest(arena, address, length), value, length);
+  return address;
+}
+std::map<uint32_t, FILE *> files;
+uint32_t next_file = 0x1000;
 FILE *stream(uint32_t handle) {
   if (handle == 1) return stdout;
   if (handle == 2) return stderr;
+  if (handle == 3) return stdin;
+  auto it = files.find(handle);
+  if (it != files.end()) return it->second;
   elfconv_runtime_error("Unsupported guest FILE handle.\n");
 }
 
-int print(Call &call, FILE *stream, unsigned format_arg) {
-  const char *format = text(call.arena, call.word(format_arg));
-  unsigned argument = format_arg + 1;
-  int total = 0;
-  for (const char *p = format; *p;) {
-    if (*p != '%') {
-      const char *start = p;
-      while (*p && *p != '%') ++p;
-      size_t length = p - start;
-      if (fwrite(start, 1, length, stream) != length) return -1;
-      total += length;
-      continue;
-    }
-    const char *start = p++;
-    if (*p == '%') { if (fputc('%', stream) == EOF) return -1; ++p; ++total; continue; }
-    while (*p && strchr("-+ #0.0123456789", *p)) ++p;
-    char conversion = *p;
-    if (!conversion || !strchr("sducxX", conversion) || p - start >= 30)
-      elfconv_runtime_error("Unsupported i386 printf conversion near %s.\n", start);
-    char spec[32];
-    size_t size = ++p - start;
-    memcpy(spec, start, size);
-    spec[size] = 0;
-    uint32_t value = call.word(argument++);
-    int written;
-    if (conversion == 's') written = fprintf(stream, spec, text(call.arena, value));
-    else if (conversion == 'd' || conversion == 'c') written = fprintf(stream, spec, int32_t(value));
-    else written = fprintf(stream, spec, value);
-    if (written < 0 || written > INT_MAX - total) return -1;
-    total += written;
+struct Arguments {
+  uint8_t *arena;
+  uint32_t address;
+  uint32_t word() {
+    uint32_t value;
+    memcpy(&value, guest(arena, address, 4), 4);
+    address += 4;
+    return value;
   }
-  return total;
+  uint64_t wide() { uint64_t lo = word(); return lo | (uint64_t(word()) << 32); }
+};
+template<typename T>
+void append_format(std::string &out, const std::string &spec, T value) {
+  char buffer[256];
+  int size = snprintf(buffer, sizeof(buffer), spec.c_str(), value);
+  if (size < 0) elfconv_runtime_error("Invalid guest printf format.\n");
+  if (size < int(sizeof(buffer))) out.append(buffer, size);
+  else {
+    std::vector<char> large(size_t(size) + 1);
+    snprintf(large.data(), large.size(), spec.c_str(), value);
+    out.append(large.data(), size);
+  }
+}
+std::string format(uint8_t *arena, const char *input, Arguments args) {
+  std::string out;
+  for (const char *p = input; *p;) {
+    if (*p != '%') { out += *p++; continue; }
+    ++p;
+    if (*p == '%') { out += *p++; continue; }
+    std::string spec = "%";
+    while (*p && strchr("-+ #0", *p)) spec += *p++;
+    if (*p == '*') {
+      int32_t width = args.word();
+      if (width == INT32_MIN) elfconv_runtime_error("Guest printf width overflow.\n");
+      if (width < 0) { spec += '-'; width = -width; }
+      spec += std::to_string(width);
+      ++p;
+    } else while (isdigit(static_cast<unsigned char>(*p))) spec += *p++;
+    if (*p == '.') {
+      ++p;
+      if (*p == '*') {
+        int32_t precision = args.word();
+        if (precision >= 0) spec += "." + std::to_string(precision);
+        ++p;
+      } else {
+        spec += '.';
+        while (isdigit(static_cast<unsigned char>(*p))) spec += *p++;
+      }
+    }
+    char length = 0;
+    if (*p && strchr("hljztL", *p)) {
+      length = *p++;
+      if (*p == length && (length == 'h' || length == 'l')) {
+        ++p;
+        length = length == 'l' ? 'q' : 'H';
+      }
+    }
+    char conversion = *p++;
+    if (!conversion) elfconv_runtime_error("Incomplete guest printf format.\n");
+    if (strchr("diuoxX", conversion)) {
+      bool wide = length == 'q' || length == 'j';
+      uint64_t value = wide ? args.wide() : args.word();
+      if (length == 'h') value = uint16_t(value);
+      if (length == 'H') value = uint8_t(value);
+      spec += "ll";
+      spec += conversion;
+      if (conversion == 'd' || conversion == 'i') {
+        int64_t signed_value = wide ? int64_t(value) : int32_t(value);
+        if (length == 'h') signed_value = int16_t(value);
+        if (length == 'H') signed_value = int8_t(value);
+        append_format(out, spec, static_cast<long long>(signed_value));
+      } else append_format(out, spec, static_cast<unsigned long long>(value));
+    } else if (strchr("aAeEfFgG", conversion) && length != 'L') {
+      uint64_t bits = args.wide();
+      double value;
+      memcpy(&value, &bits, 8);
+      spec += conversion;
+      append_format(out, spec, value);
+    } else if (conversion == 's' && !length) {
+      uint32_t address = args.word();
+      spec += 's';
+      append_format(out, spec, address ? text(arena, address) : "(null)");
+    } else if (conversion == 'c' && !length) {
+      spec += 'c';
+      append_format(out, spec, int(args.word()));
+    } else if (conversion == 'p' && !length) {
+      spec += "llx";
+      append_format(out, spec, static_cast<unsigned long long>(args.word()));
+    } else if (conversion == 'n') {
+      uint32_t address = args.word();
+      uint64_t count = out.size();
+      size_t size = length == 'q' || length == 'j' ? 8 : length == 'h' ? 2 : length == 'H' ? 1 : 4;
+      memcpy(guest(arena, address, size), &count, size);
+    } else elfconv_runtime_error("Unsupported guest printf conversion: %c.\n", conversion);
+    if (out.size() > INT_MAX) elfconv_runtime_error("Guest printf output overflow.\n");
+  }
+  return out;
+}
+int print(Call &call, FILE *stream, unsigned format_arg) {
+  auto out = format(call.arena, text(call.arena, call.word(format_arg)),
+                    {call.arena, call.stack + 4 * (format_arg + 2)});
+  return fwrite(out.data(), 1, out.size(), stream) == out.size() ? int(out.size()) : -1;
 }
 void parse_unsigned(Call &call) {
   const char *input = text(call.arena, call.word(0));
@@ -198,6 +332,350 @@ IMPORT(fwrite) {
   if (length > MEMORY_ARENA_SIZE) elfconv_runtime_error("Guest fwrite buffer is too large.\n");
   call.result(fwrite(guest(arena, call.word(0), length), size, count, stream(call.word(3))));
 }
+IMPORT(malloc) { CALL; call.result(allocate(call.word(0))); }
+IMPORT(free) { CALL; release(call.word(0)); }
+IMPORT(calloc) {
+  CALL;
+  uint64_t size = uint64_t(call.word(0)) * call.word(1);
+  if (size > UINT32_MAX) { errno = ENOMEM; call.result(0); return; }
+  uint32_t address = allocate(size);
+  if (address) memset(guest(arena, address, size), 0, size);
+  call.result(address);
+}
+IMPORT(realloc) {
+  CALL;
+  uint32_t old = call.word(0), size = call.word(1);
+  if (!old) { call.result(allocate(size)); return; }
+  if (!size) { release(old); call.result(0); return; }
+  auto it = allocations.find(old);
+  if (it == allocations.end() || it->second.free) elfconv_runtime_error("Invalid guest realloc.\n");
+  if (size <= it->second.size) { call.result(old); return; }
+  uint32_t address = allocate(size);
+  if (address) {
+    memcpy(guest(arena, address, size), guest(arena, old, it->second.size), it->second.size);
+    release(old);
+  }
+  call.result(address);
+}
+IMPORT(memcpy) {
+  CALL;
+  uint32_t length = call.word(2);
+  if (length) memcpy(guest(arena, call.word(0), length), guest(arena, call.word(1), length), length);
+  call.result(call.word(0));
+}
+IMPORT(memmove) {
+  CALL;
+  uint32_t length = call.word(2);
+  if (length) memmove(guest(arena, call.word(0), length), guest(arena, call.word(1), length), length);
+  call.result(call.word(0));
+}
+IMPORT(memset) {
+  CALL;
+  if (call.word(2)) memset(guest(arena, call.word(0), call.word(2)), call.word(1), call.word(2));
+  call.result(call.word(0));
+}
+IMPORT(strlen) { CALL; call.result(strlen(text(arena, call.word(0)))); }
+IMPORT(strcpy) {
+  CALL;
+  const char *src = text(arena, call.word(1));
+  memcpy(guest(arena, call.word(0), strlen(src) + 1), src, strlen(src) + 1);
+  call.result(call.word(0));
+}
+IMPORT(strncpy) {
+  CALL;
+  uint32_t size = call.word(2);
+  if (size) strncpy(static_cast<char *>(guest(arena, call.word(0), size)),
+                    static_cast<const char *>(guest(arena, call.word(1), size)), size);
+  call.result(call.word(0));
+}
+IMPORT(strncmp) {
+  CALL;
+  uint32_t size = call.word(2);
+  // Either input may terminate before n; a terminated string need not own n bytes.
+  if (!size) { call.result(0); return; }
+  const char *a = text(arena, call.word(0)), *b = text(arena, call.word(1));
+  call.result(strncmp(a, b, size));
+}
+IMPORT(strrchr) {
+  CALL;
+  const char *start = text(arena, call.word(0)), *found = strrchr(start, call.word(1));
+  call.result(found ? call.word(0) + (found - start) : 0);
+}
+IMPORT(strcspn) { CALL; call.result(strcspn(text(arena, call.word(0)), text(arena, call.word(1)))); }
+IMPORT(fopen) {
+  CALL;
+  FILE *file = fopen(text(arena, call.word(0)), text(arena, call.word(1)));
+  if (!file) { call.result(0); return; }
+  uint32_t handle = next_file++;
+  files.emplace(handle, file);
+  call.result(handle);
+}
+IMPORT(fclose) {
+  CALL;
+  uint32_t handle = call.word(0);
+  FILE *file = stream(handle);
+  call.result(fclose(file));
+  files.erase(handle);
+}
+IMPORT(fread) {
+  CALL;
+  uint32_t size = call.word(1), count = call.word(2);
+  if (!size || !count) { call.result(0); return; }
+  uint64_t length = uint64_t(size) * count;
+  call.result(fread(guest(arena, call.word(0), length), size, count, stream(call.word(3))));
+}
+IMPORT(fseek) { CALL; call.result(fseek(stream(call.word(0)), int32_t(call.word(1)), call.word(2))); }
+IMPORT(ftell) { CALL; call.result(ftell(stream(call.word(0)))); }
+IMPORT(feof) { CALL; call.result(feof(stream(call.word(0)))); }
+IMPORT(rewind) { CALL; rewind(stream(call.word(0))); }
+IMPORT(fflush) { CALL; call.result(fflush(call.word(0) ? stream(call.word(0)) : nullptr)); }
+IMPORT(fputc) { CALL; call.result(fputc(call.word(0), stream(call.word(1)))); }
+IMPORT(putchar) { CALL; call.result(putchar(call.word(0))); }
+IMPORT(exit) { CALL; exit(call.word(0)); }
+IMPORT(usleep) {
+  CALL;
+#ifdef __EMSCRIPTEN__
+  emscripten_sleep((uint64_t(call.word(0)) + 999) / 1000);
+  call.result(0);
+#else
+  call.result(usleep(call.word(0)));
+#endif
+}
+IMPORT(__assert_fail) {
+  CALL;
+  elfconv_runtime_error("Guest assertion %s failed at %s:%u (%s).\n",
+      text(arena, call.word(0)), text(arena, call.word(1)), call.word(2), text(arena, call.word(3)));
+}
+namespace {
+void float_result(State *state, float value) {
+  for (unsigned i = 7; i; --i) state->st.elems[i].val = state->st.elems[i - 1].val;
+  state->st.elems[0].val = float80_t(double(value));
+  state->x87.fxsave.swd.top = (state->x87.fxsave.swd.top + 7) % 8;
+}
+void buffer_format(Call &call, bool bounded, bool va_list) {
+  unsigned format_arg = bounded ? 2 : 1;
+  uint32_t args = va_list ? call.word(format_arg + 1) : call.stack + 4 * (format_arg + 2);
+  auto out = format(call.arena, text(call.arena, call.word(format_arg)), {call.arena, args});
+  uint32_t capacity = bounded ? call.word(1) : uint32_t(out.size() + 1);
+  if (capacity) {
+    size_t length = std::min(out.size(), size_t(capacity - 1));
+    auto *dst = static_cast<char *>(guest(call.arena, call.word(0), length + 1));
+    memcpy(dst, out.data(), length);
+    dst[length] = 0;
+  }
+  call.result(out.size());
+}
+}
+IMPORT(floorf) { CALL; float_result(state, floorf(call.real(0))); }
+IMPORT(ceilf) { CALL; float_result(state, ceilf(call.real(0))); }
+IMPORT(sqrtf) { CALL; float_result(state, sqrtf(call.real(0))); }
+IMPORT(sinf) { CALL; float_result(state, sinf(call.real(0))); }
+IMPORT(cosf) { CALL; float_result(state, cosf(call.real(0))); }
+IMPORT(sprintf) { CALL; buffer_format(call, false, false); }
+IMPORT(snprintf) { CALL; buffer_format(call, true, false); }
+IMPORT(vsnprintf) { CALL; buffer_format(call, true, true); }
+IMPORT(mkdir) { CALL; call.result(mkdir(text(arena, call.word(0)), call.word(1))); }
+IMPORT(stat) {
+  CALL;
+  struct stat host;
+  int result = stat(text(arena, call.word(0)), &host);
+  if (!result) {
+    if (host.st_size > INT32_MAX || host.st_size < INT32_MIN ||
+        uint64_t(host.st_ino) > UINT32_MAX) { errno = EOVERFLOW; call.result(-1); return; }
+    // Linux i386 stat (time32, off32): 88 bytes, four-byte member alignment.
+    uint8_t data[88] = {};
+    auto put = [&](unsigned offset, uint64_t value, unsigned size = 4) { memcpy(data + offset, &value, size); };
+    put(0, host.st_dev, 8); put(12, host.st_ino); put(16, host.st_mode);
+    put(20, host.st_nlink); put(24, host.st_uid); put(28, host.st_gid);
+    put(32, host.st_rdev, 8); put(44, host.st_size); put(48, host.st_blksize);
+    put(52, host.st_blocks); put(56, host.st_atim.tv_sec); put(60, host.st_atim.tv_nsec);
+    put(64, host.st_mtim.tv_sec); put(68, host.st_mtim.tv_nsec);
+    put(72, host.st_ctim.tv_sec); put(76, host.st_ctim.tv_nsec);
+    memcpy(guest(arena, call.word(1), sizeof(data)), data, sizeof(data));
+  }
+  call.result(result);
+}
+namespace {
+struct Directory { DIR *host; uint32_t entry; };
+std::map<uint32_t, Directory> directories;
+uint32_t next_directory = 0x2000;
+}
+IMPORT(opendir) {
+  CALL;
+  DIR *dir = opendir(text(arena, call.word(0)));
+  if (!dir) { call.result(0); return; }
+  uint32_t entry = allocate(268);
+  if (!entry) { closedir(dir); call.result(0); return; }
+  uint32_t handle = next_directory++;
+  directories.emplace(handle, Directory{dir, entry});
+  call.result(handle);
+}
+IMPORT(readdir) {
+  CALL;
+  auto it = directories.find(call.word(0));
+  if (it == directories.end()) elfconv_runtime_error("Invalid guest DIR handle.\n");
+  auto *entry = readdir(it->second.host);
+  if (!entry) { call.result(0); return; }
+  if (uint64_t(entry->d_ino) > UINT32_MAX) { errno = EOVERFLOW; call.result(0); return; }
+  uint8_t data[268] = {};
+  uint32_t ino = entry->d_ino, offset = entry->d_off;
+  uint16_t length = 11 + strlen(entry->d_name) + 1;
+  memcpy(data, &ino, 4); memcpy(data + 4, &offset, 4); memcpy(data + 8, &length, 2);
+  data[10] = entry->d_type;
+  memcpy(data + 11, entry->d_name, strlen(entry->d_name) + 1);
+  memcpy(guest(arena, it->second.entry, sizeof(data)), data, sizeof(data));
+  call.result(it->second.entry);
+}
+IMPORT(closedir) {
+  CALL;
+  auto it = directories.find(call.word(0));
+  if (it == directories.end()) elfconv_runtime_error("Invalid guest DIR handle.\n");
+  call.result(closedir(it->second.host));
+  release(it->second.entry);
+  directories.erase(it);
+}
+IMPORT(qsort) {
+  CALL;
+  uint32_t base = call.word(0), count = call.word(1), size = call.word(2), comparator = call.word(3);
+  if (count < 2 || !size) return;
+  guest(arena, base, uint64_t(count) * size);
+  // Heapsort keeps callback pointers inside the original guest array and avoids
+  // host qsort's temporary storage escaping through the guest comparator.
+  auto less = [&](uint32_t a, uint32_t b) {
+    uint32_t args[] = {base + a * size, base + b * size};
+    invoke(arena, state, runtime, comparator, args, 2);
+    return int32_t(state->gpr.rax.dword) < 0;
+  };
+  auto swap = [&](uint32_t a, uint32_t b) {
+    for (uint32_t i = 0; i < size; ++i) std::swap(arena[base + a * size + i], arena[base + b * size + i]);
+  };
+  auto sift = [&](uint32_t root, uint32_t end) {
+    while (uint64_t(root) * 2 + 1 < end) {
+      uint32_t child = root * 2 + 1;
+      if (child + 1 < end && less(child, child + 1)) ++child;
+      if (!less(root, child)) break;
+      swap(root, child);
+      root = child;
+    }
+  };
+  for (uint32_t i = count / 2; i; --i) sift(i - 1, count);
+  for (uint32_t end = count - 1; end; --end) { swap(0, end); sift(0, end); }
+}
+
+IMPORT(__isoc99_sscanf) {
+  CALL;
+  const char *input = text(arena, call.word(0)), *start = input;
+  const char *fmt = text(arena, call.word(1));
+  unsigned argument = 2;
+  int assigned = 0;
+  for (const char *p = fmt; *p;) {
+    if (isspace(static_cast<unsigned char>(*p))) {
+      while (isspace(static_cast<unsigned char>(*p))) ++p;
+      while (isspace(static_cast<unsigned char>(*input))) ++input;
+      continue;
+    }
+    if (*p != '%') { if (*p++ != *input) break; ++input; continue; }
+    ++p;
+    if (*p == '%') { ++p; if (*input != '%') break; ++input; continue; }
+    bool suppress = *p == '*';
+    if (suppress) ++p;
+    uint32_t width = 0;
+    while (isdigit(static_cast<unsigned char>(*p))) {
+      if (width > (UINT32_MAX - 9) / 10) elfconv_runtime_error("Guest scanf width overflow.\n");
+      width = width * 10 + (*p++ - '0');
+    }
+    char length = 0;
+    if (*p && strchr("hljztL", *p)) {
+      length = *p++;
+      if (*p == length && (length == 'h' || length == 'l')) { ++p; length = length == 'l' ? 'q' : 'H'; }
+    }
+    char conversion = *p++;
+    if (!conversion) elfconv_runtime_error("Incomplete guest scanf format.\n");
+    uint32_t address = suppress ? 0 : call.word(argument++);
+    size_t size = length == 'q' || length == 'j' ? 8 : length == 'h' ? 2 : length == 'H' ? 1 : 4;
+    if (conversion == 'n') {
+      uint64_t count = input - start;
+      if (!suppress) memcpy(guest(arena, address, size), &count, size);
+      continue;
+    }
+    if (conversion != 'c' && conversion != '[')
+      while (isspace(static_cast<unsigned char>(*input))) ++input;
+    if (!*input) { if (!assigned) assigned = EOF; break; }
+    if (conversion == 's' || conversion == 'c') {
+      size_t count = 0, limit = width ? width : conversion == 'c' ? 1 : UINT32_MAX;
+      while (count < limit && input[count] &&
+             (conversion == 'c' || !isspace(static_cast<unsigned char>(input[count])))) ++count;
+      if (!count || (conversion == 'c' && count < limit)) break;
+      if (!suppress) {
+        auto *dst = static_cast<char *>(guest(arena, address, count + (conversion == 's')));
+        memcpy(dst, input, count);
+        if (conversion == 's') dst[count] = 0;
+        ++assigned;
+      }
+      input += count;
+      continue;
+    }
+    std::string bounded;
+    const char *number = input;
+    if (width && strlen(input) > width) { bounded.assign(input, width); number = bounded.c_str(); }
+    char *end = nullptr;
+    if (strchr("diuoxXp", conversion)) {
+      int base = conversion == 'i' ? 0 : conversion == 'o' ? 8 :
+                 conversion == 'x' || conversion == 'X' || conversion == 'p' ? 16 : 10;
+      uint64_t value = conversion == 'd' || conversion == 'i' ?
+          uint64_t(strtoll(number, &end, base)) : strtoull(number, &end, base);
+      if (end == number) break;
+      if (!suppress) { memcpy(guest(arena, address, size), &value, size); ++assigned; }
+    } else if (strchr("aAeEfFgG", conversion) && length != 'L') {
+      double value = strtod(number, &end);
+      if (end == number) break;
+      if (!suppress) {
+        if (length == 'l') memcpy(guest(arena, address, 8), &value, 8);
+        else { float single = value; memcpy(guest(arena, address, 4), &single, 4); }
+        ++assigned;
+      }
+    } else elfconv_runtime_error("Unsupported guest scanf conversion: %c.\n", conversion);
+    input += end - number;
+  }
+  call.result(assigned);
+}
+namespace {
+uint32_t ctype_table(uint8_t *arena, bool lower) {
+  // glibc exposes a pointer-to-table biased by 128 for signed char indexing.
+  uint32_t slot = lower ? 0x41000 : 0x40000;
+  uint32_t table = slot + 16, pointer = table + 128 * (lower ? 4 : 2);
+  memcpy(guest(arena, slot, 4), &pointer, 4);
+  for (int c = -128; c < 256; ++c) {
+    int value = c < -1 ? c + 256 : c;
+    if (lower) {
+      int32_t mapped = value == -1 ? -1 : tolower(value);
+      memcpy(guest(arena, table + (c + 128) * 4, 4), &mapped, 4);
+    } else {
+      uint16_t bits = 0;
+      if (value != -1) {
+        // glibc stores its classification flags in network byte order.
+        if (isupper(value)) bits |= 0x0100;
+        if (islower(value)) bits |= 0x0200;
+        if (isalpha(value)) bits |= 0x0400;
+        if (isdigit(value)) bits |= 0x0800;
+        if (isxdigit(value)) bits |= 0x1000;
+        if (isspace(value)) bits |= 0x2000;
+        if (isprint(value)) bits |= 0x4000;
+        if (isgraph(value)) bits |= 0x8000;
+        if (isblank(value)) bits |= 0x0001;
+        if (iscntrl(value)) bits |= 0x0002;
+        if (ispunct(value)) bits |= 0x0004;
+        if (isalnum(value)) bits |= 0x0008;
+      }
+      memcpy(guest(arena, table + (c + 128) * 2, 2), &bits, 2);
+    }
+  }
+  return slot;
+}
+}
+IMPORT(__ctype_b_loc) { CALL; call.result(ctype_table(arena, false)); }
+IMPORT(__ctype_tolower_loc) { CALL; call.result(ctype_table(arena, true)); }
+
 IMPORT(SDL_Init) { CALL; call.result(SDL_Init(call.word(0))); }
 IMPORT(SDL_Quit) {
   CALL;
@@ -212,6 +690,7 @@ IMPORT(SDL_CreateWindow) {
   unsigned slot = 0;
   while (slot < 16 && windows[slot]) ++slot;
   if (slot == 16) elfconv_runtime_error("Guest SDL window handle table exhausted.\n");
+  fprintf(stderr, "Window diagnostic: guest size %u x %u\n", call.word(3), call.word(4));
   windows[slot] = SDL_CreateWindow(text(arena, call.word(0)), call.word(1), call.word(2),
                                   call.word(3), call.word(4), call.word(5));
   call.result(windows[slot] ? 0x100 + slot : 0);
@@ -232,7 +711,23 @@ IMPORT(SDL_GL_DeleteContext) {
   CALL;
   if (call.word(0)) { SDL_GL_DeleteContext(context(call.word(0))); contexts[call.word(0) - 0x200] = nullptr; }
 }
-IMPORT(SDL_GL_SetSwapInterval) { CALL; call.result(SDL_GL_SetSwapInterval(call.word(0))); }
+#ifdef __EMSCRIPTEN__
+static int browser_swap_interval = 1;
+EM_ASYNC_JS(void, wait_browser_frame, (), {
+  await new Promise(requestAnimationFrame);
+});
+#endif
+IMPORT(SDL_GL_SetSwapInterval) {
+  CALL;
+#ifdef __EMSCRIPTEN__
+  int32_t interval = call.word(0);
+  if (interval < 0) { call.result(SDL_SetError("Adaptive swap intervals are unsupported in WebGL")); return; }
+  browser_swap_interval = interval;
+  call.result(0);
+#else
+  call.result(SDL_GL_SetSwapInterval(call.word(0)));
+#endif
+}
 IMPORT(SDL_GL_GetDrawableSize) {
   CALL;
   int width, height;
@@ -240,10 +735,90 @@ IMPORT(SDL_GL_GetDrawableSize) {
   if (call.word(1)) memcpy(guest(arena, call.word(1), 4), &width, 4);
   if (call.word(2)) memcpy(guest(arena, call.word(2), 4), &height, 4);
 }
+IMPORT(SDL_GL_SwapWindow) {
+  CALL;
+  SDL_GL_SwapWindow(window(call.word(0)));
+#ifdef __EMSCRIPTEN__
+  // Present at the requested browser frame boundary without requiring SDL's
+  // Emscripten main-loop API; the lifted guest owns its synchronous loop.
+  if (browser_swap_interval) {
+    for (int i = 0; i < browser_swap_interval; ++i) wait_browser_frame();
+  } else emscripten_sleep(0);
+#endif
+}
+static SDL_GameController *guest_controllers[32] = {};
+static SDL_Haptic *guest_haptics[32] = {};
+static SDL_RWops *guest_rwops[32] = {};
+static uint32_t guest_keyboard_state;
+static int guest_keyboard_count;
+static uint32_t opaque_handle(unsigned slot, uint32_t base, unsigned count) {
+  if (slot >= count) elfconv_runtime_error("Guest SDL handle table exhausted.\n");
+  return base + slot;
+}
+static SDL_GameController *game_controller(uint32_t handle) {
+  if (!handle) return nullptr;
+  if (handle < 0x300 || handle >= 0x320 || !guest_controllers[handle - 0x300])
+    elfconv_runtime_error("Invalid guest SDL controller handle.\n");
+  return guest_controllers[handle - 0x300];
+}
+static SDL_Haptic *haptic(uint32_t handle) {
+  if (!handle) return nullptr;
+  if (handle < 0x400 || handle >= 0x420 || !guest_haptics[handle - 0x400])
+    elfconv_runtime_error("Invalid guest SDL haptic handle.\n");
+  return guest_haptics[handle - 0x400];
+}
+static SDL_RWops *rwops(uint32_t handle) {
+  if (!handle) return nullptr;
+  if (handle < 0x500 || handle >= 0x520 || !guest_rwops[handle - 0x500])
+    elfconv_runtime_error("Invalid guest SDL RWops handle.\n");
+  return guest_rwops[handle - 0x500];
+}
+IMPORT(SDL_SetWindowPosition) { CALL; SDL_SetWindowPosition(window(call.word(0)), int(call.word(1)), int(call.word(2))); }
+IMPORT(SDL_GetWindowSize) {
+  CALL; int w, h; SDL_GetWindowSize(window(call.word(0)), &w, &h);
+  if (call.word(1)) memcpy(guest(arena, call.word(1), 4), &w, 4);
+  if (call.word(2)) memcpy(guest(arena, call.word(2), 4), &h, 4);
+}
+IMPORT(SDL_SetWindowSize) { CALL; SDL_SetWindowSize(window(call.word(0)), int(call.word(1)), int(call.word(2))); }
+IMPORT(SDL_SetWindowFullscreen) { CALL; call.result(SDL_SetWindowFullscreen(window(call.word(0)), call.word(1))); }
+IMPORT(SDL_GetWindowFlags) { CALL; call.result(SDL_GetWindowFlags(window(call.word(0)))); }
+IMPORT(SDL_ShowCursor) { CALL; call.result(SDL_ShowCursor(call.word(0))); }
+IMPORT(SDL_ShowSimpleMessageBox) {
+  CALL; call.result(SDL_ShowSimpleMessageBox(call.word(0), text(arena, call.word(1)),
+      text(arena, call.word(2)), call.word(3) ? window(call.word(3)) : nullptr));
+}
+IMPORT(SDL_memset) {
+  CALL; uint32_t address = call.word(0), value = call.word(1), length = call.word(2);
+  memset(guest(arena, address, length), int(value), length); call.result(address);
+}
+IMPORT(SDL_GetPerformanceFrequency) {
+  CALL; uint64_t value = SDL_GetPerformanceFrequency();
+  state->gpr.rax.dword = uint32_t(value); state->gpr.rdx.dword = uint32_t(value >> 32);
+}
+IMPORT(SDL_GetPerformanceCounter) {
+  CALL; uint64_t value = SDL_GetPerformanceCounter();
+  state->gpr.rax.dword = uint32_t(value); state->gpr.rdx.dword = uint32_t(value >> 32);
+}
+IMPORT(SDL_GetKeyboardState) {
+  CALL; int count = 0; const Uint8 *keys = SDL_GetKeyboardState(&count);
+  if (!guest_keyboard_state || guest_keyboard_count != count) {
+    if (guest_keyboard_state) release(guest_keyboard_state);
+    guest_keyboard_state = allocate(count);
+    guest_keyboard_count = guest_keyboard_state ? count : 0;
+  }
+  if (guest_keyboard_state && count) memcpy(guest(arena, guest_keyboard_state, count), keys, count);
+  if (call.word(0)) memcpy(guest(arena, call.word(0), 4), &count, 4);
+  call.result(guest_keyboard_state);
+}
 IMPORT(SDL_PollEvent) {
   CALL;
   SDL_Event event;
   int found = SDL_PollEvent(call.word(0) ? &event : nullptr);
+  if (guest_keyboard_state) {
+    int count = 0; const Uint8 *keys = SDL_GetKeyboardState(&count);
+    if (count == guest_keyboard_count && count)
+      memcpy(guest(arena, guest_keyboard_state, count), keys, count);
+  }
   if (found && call.word(0)) {
     if (event.type == SDL_SYSWMEVENT || event.type == SDL_DROPFILE || event.type == SDL_DROPTEXT ||
         event.type == SDL_TEXTEDITING_EXT || event.type >= SDL_USEREVENT)
@@ -253,14 +828,113 @@ IMPORT(SDL_PollEvent) {
   }
   call.result(found);
 }
-IMPORT(SDL_GL_SwapWindow) {
-  CALL;
-  SDL_GL_SwapWindow(window(call.word(0)));
-#ifdef __EMSCRIPTEN__
-  // Yield lifted synchronous guest code so the browser can present and dispatch input.
-  emscripten_sleep(16);
-#endif
+IMPORT(SDL_GetRelativeMouseState) {
+  CALL; int x, y; Uint32 buttons = SDL_GetRelativeMouseState(&x, &y);
+  if (call.word(0)) memcpy(guest(arena, call.word(0), 4), &x, 4);
+  if (call.word(1)) memcpy(guest(arena, call.word(1), 4), &y, 4);
+  call.result(buttons);
 }
+IMPORT(SDL_NumJoysticks) { CALL; call.result(SDL_NumJoysticks()); }
+IMPORT(SDL_IsGameController) { CALL; call.result(SDL_IsGameController(int(call.word(0)))); }
+IMPORT(SDL_GameControllerOpen) {
+  CALL; unsigned slot = 0; while (slot < 32 && guest_controllers[slot]) ++slot;
+  if (slot == 32) elfconv_runtime_error("Guest SDL controller handle table exhausted.\n");
+  SDL_GameController *p = SDL_GameControllerOpen(int(call.word(0)));
+  if (!p) { call.result(0); return; }
+  guest_controllers[slot] = p; call.result(opaque_handle(slot, 0x300, 32));
+}
+IMPORT(SDL_GameControllerClose) {
+  CALL; uint32_t h = call.word(0); if (h) { SDL_GameControllerClose(game_controller(h)); guest_controllers[h - 0x300] = nullptr; }
+}
+IMPORT(SDL_GameControllerGetAttached) { CALL; call.result(SDL_GameControllerGetAttached(game_controller(call.word(0)))); }
+IMPORT(SDL_GameControllerUpdate) { CALL; SDL_GameControllerUpdate(); }
+IMPORT(SDL_GameControllerGetAxis) {
+  CALL; Sint16 axis = SDL_GameControllerGetAxis(game_controller(call.word(0)), SDL_GameControllerAxis(call.word(1)));
+  call.result(uint32_t(int32_t(axis)));
+}
+IMPORT(SDL_GameControllerGetButton) {
+  CALL; call.result(SDL_GameControllerGetButton(game_controller(call.word(0)), SDL_GameControllerButton(call.word(1))));
+}
+IMPORT(SDL_GameControllerHasRumble) { CALL; call.result(SDL_GameControllerHasRumble(game_controller(call.word(0)))); }
+IMPORT(SDL_GameControllerRumble) {
+  CALL; call.result(SDL_GameControllerRumble(game_controller(call.word(0)), call.word(1), call.word(2), call.word(3)));
+}
+IMPORT(SDL_HapticOpen) {
+  CALL; unsigned slot = 0; while (slot < 32 && guest_haptics[slot]) ++slot;
+  if (slot == 32) elfconv_runtime_error("Guest SDL haptic handle table exhausted.\n");
+  SDL_Haptic *p = SDL_HapticOpen(int(call.word(0)));
+  if (!p) { call.result(0); return; }
+  guest_haptics[slot] = p; call.result(opaque_handle(slot, 0x400, 32));
+}
+IMPORT(SDL_HapticClose) {
+  CALL; uint32_t h = call.word(0); if (h) { SDL_HapticClose(haptic(h)); guest_haptics[h - 0x400] = nullptr; }
+}
+IMPORT(SDL_HapticRumbleSupported) { CALL; call.result(SDL_HapticRumbleSupported(haptic(call.word(0)))); }
+IMPORT(SDL_HapticRumbleInit) { CALL; call.result(SDL_HapticRumbleInit(haptic(call.word(0)))); }
+IMPORT(SDL_HapticRumblePlay) { CALL; call.result(SDL_HapticRumblePlay(haptic(call.word(0)), call.real(1), call.word(2))); }
+IMPORT(SDL_HapticRumbleStop) { CALL; call.result(SDL_HapticRumbleStop(haptic(call.word(0)))); }
+IMPORT(SDL_JoystickNameForIndex) { CALL; call.result(copy_string(arena, SDL_JoystickNameForIndex(int(call.word(0))), 8)); }
+IMPORT(SDL_RWFromConstMem) {
+  CALL; unsigned slot = 0; while (slot < 32 && guest_rwops[slot]) ++slot;
+  if (slot == 32) elfconv_runtime_error("Guest SDL RWops handle table exhausted.\n");
+  uint32_t length = call.word(1);
+  if (length > INT_MAX) elfconv_runtime_error("SDL_RWFromConstMem data is too large.\n");
+  SDL_RWops *p = SDL_RWFromConstMem(guest(arena, call.word(0), length), int(length));
+  if (!p) { call.result(0); return; }
+  guest_rwops[slot] = p; call.result(opaque_handle(slot, 0x500, 32));
+}
+IMPORT(SDL_GameControllerAddMappingsFromRW) {
+  CALL; uint32_t h = call.word(0);
+  int result = SDL_GameControllerAddMappingsFromRW(rwops(h), call.word(1));
+  if (call.word(1)) guest_rwops[h - 0x500] = nullptr;
+  call.result(result);
+}
+IMPORT(SDL_OpenAudioDevice) {
+  CALL;
+  uint32_t name_addr = call.word(0), want_addr = call.word(2), have_addr = call.word(3);
+  SDL_AudioSpec want = {}, have = {};
+  SDL_AudioSpec *wp = nullptr;
+  if (want_addr) {
+    auto *p = static_cast<uint8_t *>(guest(arena, want_addr, 24));
+    uint32_t callback, userdata;
+    memcpy(&want.freq, p, 4); memcpy(&want.format, p + 4, 2);
+    want.channels = p[6]; want.silence = p[7]; memcpy(&want.samples, p + 8, 2);
+    memcpy(&want.size, p + 12, 4);
+    memcpy(&callback, p + 16, 4); memcpy(&userdata, p + 20, 4);
+    if (callback) elfconv_runtime_error("SDL audio callbacks are unsupported (SM64 requires queued audio).\n");
+    if (userdata) elfconv_runtime_error("SDL audio userdata requires callback mode, which SM64 does not use.\n");
+    wp = &want;
+  }
+  SDL_AudioDeviceID dev = SDL_OpenAudioDevice(name_addr ? text(arena, name_addr) : nullptr,
+      call.word(1), wp, have_addr ? &have : nullptr, call.word(4));
+  if (dev && have_addr) {
+    auto *p = static_cast<uint8_t *>(guest(arena, have_addr, 24));
+    memset(p, 0, 24); memcpy(p, &have.freq, 4); memcpy(p + 4, &have.format, 2);
+    p[6] = have.channels; p[7] = have.silence; memcpy(p + 8, &have.samples, 2);
+    memcpy(p + 12, &have.size, 4);
+    if (have.callback || have.userdata) elfconv_runtime_error("SDL returned unsupported guest audio callback state.\n");
+  }
+  call.result(dev);
+}
+IMPORT(SDL_CloseAudioDevice) { CALL; SDL_CloseAudioDevice(call.word(0)); }
+IMPORT(SDL_PauseAudioDevice) { CALL; SDL_PauseAudioDevice(call.word(0), call.word(1)); }
+IMPORT(SDL_QueueAudio) {
+  CALL; uint32_t length = call.word(2);
+  call.result(SDL_QueueAudio(call.word(0), guest(arena, call.word(1), length), length));
+}
+IMPORT(SDL_GetQueuedAudioSize) { CALL; call.result(SDL_GetQueuedAudioSize(call.word(0))); }
+IMPORT(SDL_GetBasePath) {
+  CALL; char *p = SDL_GetBasePath(); uint32_t address = owned_string(arena, p);
+  if (p) SDL_free(p); call.result(address);
+}
+IMPORT(SDL_GetPrefPath) {
+  CALL; char *p = SDL_GetPrefPath(text(arena, call.word(0)), text(arena, call.word(1)));
+  uint32_t address = owned_string(arena, p); if (p) SDL_free(p); call.result(address);
+}
+IMPORT(SDL_free) { CALL; release(call.word(0)); }
+IMPORT(SDL_WasInit) { CALL; call.result(SDL_WasInit(call.word(0))); }
+IMPORT(SDL_InitSubSystem) { CALL; call.result(SDL_InitSubSystem(call.word(0))); }
+IMPORT(SDL_QuitSubSystem) { CALL; SDL_QuitSubSystem(call.word(0)); }
 IMPORT(glGetString) {
   CALL;
   unsigned slot;
@@ -394,6 +1068,29 @@ IMPORT(glShaderSource) {
     sources[i] = lengths && lengths[i] >= 0
         ? static_cast<const GLchar *>(guest(arena, address, lengths[i])) : text(arena, address);
   }
+#ifdef __EMSCRIPTEN__
+  // GLSL 1.20 and GLSL ES 1.00 share the attribute/varying shader model.
+  // Translate the version/precision declarations, leaving unsupported desktop
+  // features to the shader compiler rather than silently changing semantics.
+  std::string combined;
+  for (int32_t i = 0; i < count; ++i)
+    combined.append(sources[i], lengths && lengths[i] >= 0 ? size_t(lengths[i]) : strlen(sources[i]));
+  size_t version = combined.find("#version 120");
+  if (version != std::string::npos) {
+    size_t end = combined.find('\n', version);
+    if (end == std::string::npos) end = combined.size();
+    GLint kind;
+    glGetShaderiv(call.word(0), GL_SHADER_TYPE, &kind);
+    GLint range[2], precision = 0;
+    glGetShaderPrecisionFormat(kind, GL_HIGH_FLOAT, range, &precision);
+    std::string prelude = precision ? "#version 100\nprecision highp float;\n" :
+                                    "#version 100\nprecision mediump float;\n";
+    combined.replace(version, end - version, prelude);
+    const GLchar *translated = combined.c_str();
+    glShaderSource(call.word(0), 1, &translated, nullptr);
+    return;
+  }
+#endif
   glShaderSource(call.word(0), count, sources, lengths);
 }
 IMPORT(glGetShaderiv) {
@@ -463,3 +1160,67 @@ IMPORT(glDrawElements) {
   glDrawElements(call.word(0), call.word(1), call.word(2),
                  reinterpret_cast<const void *>(uintptr_t(call.word(3))));
 }
+IMPORT(glDrawArrays) { CALL; glDrawArrays(call.word(0), call.word(1), call.word(2)); }
+IMPORT(glGenTextures) {
+  CALL;
+  int32_t count = call.word(0);
+  if (count < 0 || uint64_t(count) * sizeof(GLuint) > MEMORY_ARENA_SIZE)
+    elfconv_runtime_error("Invalid guest GL texture count.\n");
+  auto *textures = count ? static_cast<GLuint *>(guest(arena, call.word(1), count * sizeof(GLuint))) : nullptr;
+  glGenTextures(count, textures);
+}
+IMPORT(glBindTexture) { CALL; glBindTexture(call.word(0), call.word(1)); }
+IMPORT(glTexImage2D) {
+  CALL;
+  int32_t width = call.word(3), height = call.word(4);
+  if (width < 0 || height < 0)
+    elfconv_runtime_error("Negative guest glTexImage2D extent.\n");
+  uint32_t format = call.word(6), type = call.word(7);
+  uint32_t bytes_per_pixel;
+  if (type == GL_UNSIGNED_BYTE && format == GL_RGBA) bytes_per_pixel = 4;
+  else if (type == GL_UNSIGNED_BYTE && format == GL_RGB) bytes_per_pixel = 3;
+  else elfconv_runtime_error("Unsupported guest glTexImage2D format or type.\n");
+  GLint alignment, row_length = 0, skip_rows = 0, skip_pixels = 0;
+  glGetIntegerv(GL_UNPACK_ALIGNMENT, &alignment);
+#ifndef __EMSCRIPTEN__
+  glGetIntegerv(GL_UNPACK_ROW_LENGTH, &row_length);
+  glGetIntegerv(GL_UNPACK_SKIP_ROWS, &skip_rows);
+  glGetIntegerv(GL_UNPACK_SKIP_PIXELS, &skip_pixels);
+#endif
+  if (alignment != 1 && alignment != 2 && alignment != 4 && alignment != 8)
+    elfconv_runtime_error("Invalid GL_UNPACK_ALIGNMENT state.\n");
+  if (row_length < 0 || skip_rows < 0 || skip_pixels < 0)
+    elfconv_runtime_error("Invalid guest GL unpack state.\n");
+  uint64_t row_pixels = row_length ? uint64_t(row_length) : uint64_t(width);
+  uint64_t row_bytes = row_pixels * bytes_per_pixel;
+  uint64_t stride = (row_bytes + alignment - 1) & ~uint64_t(alignment - 1);
+  uint64_t rows_before_last = width && height
+      ? uint64_t(skip_rows) + uint64_t(height) - 1 : 0;
+  uint64_t last_row_bytes = width && height
+      ? (uint64_t(skip_pixels) + uint64_t(width)) * bytes_per_pixel : 0;
+  if (rows_before_last && stride > MEMORY_ARENA_SIZE / rows_before_last)
+    elfconv_runtime_error("Guest glTexImage2D buffer overflow.\n");
+  uint64_t length = rows_before_last * stride + last_row_bytes;
+  if (length > MEMORY_ARENA_SIZE)
+    elfconv_runtime_error("Guest glTexImage2D buffer overflow.\n");
+  const void *pixels = call.word(8) ? guest(arena, call.word(8), length) : nullptr;
+  glTexImage2D(call.word(0), call.word(1), call.word(2), width, height,
+               call.word(5), format, type, pixels);
+}
+IMPORT(glTexParameteri) { CALL; glTexParameteri(call.word(0), call.word(1), call.word(2)); }
+IMPORT(glTexParameterf) { CALL; glTexParameterf(call.word(0), call.word(1), call.real(2)); }
+IMPORT(glDepthFunc) { CALL; glDepthFunc(call.word(0)); }
+IMPORT(glDepthMask) { CALL; glDepthMask(call.word(0)); }
+IMPORT(glBlendFunc) { CALL; glBlendFunc(call.word(0), call.word(1)); }
+IMPORT(glScissor) { CALL; glScissor(call.word(0), call.word(1), call.word(2), call.word(3)); }
+IMPORT(glPolygonOffset) { CALL; glPolygonOffset(call.real(0), call.real(1)); }
+IMPORT(glUniform1f) { CALL; glUniform1f(call.word(0), call.real(1)); }
+IMPORT(glUniform1i) { CALL; glUniform1i(call.word(0), call.word(1)); }
+IMPORT(glUniform2f) { CALL; glUniform2f(call.word(0), call.real(1), call.real(2)); }
+IMPORT(glGetAttribLocation) {
+  CALL;
+  call.result(glGetAttribLocation(call.word(0), text(arena, call.word(1))));
+}
+IMPORT(glDisableVertexAttribArray) { CALL; glDisableVertexAttribArray(call.word(0)); }
+IMPORT(glDisable) { CALL; glDisable(call.word(0)); }
+IMPORT(glActiveTexture) { CALL; glActiveTexture(call.word(0)); }

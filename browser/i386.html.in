@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lifted @ELFCONV_NAME@</title>
+<style>
+  body { background: #202020; color: #eee; font: 16px monospace; margin: 24px; }
+  canvas { display: block; max-width: 100%; outline: 1px solid #666; }
+  pre { white-space: pre-wrap; }
+</style>
+<h1>Lifted @ELFCONV_NAME@</h1>
+<button id="start">Start</button>
+<button id="fullscreen">Fullscreen</button>
+<canvas id="canvas" width="640" height="480" tabindex="0"></canvas>
+<p id="status">Ready. Start enables browser audio.</p>
+<pre id="output"></pre>
+<script>
+  var Module = {
+    canvas: document.getElementById('canvas'),
+    arguments: new URLSearchParams(location.search).getAll('arg'),
+    print: function (line) { document.getElementById('output').textContent += line + '\n'; },
+    printErr: function (line) { document.getElementById('output').textContent += line + '\n'; },
+    onRuntimeInitialized: function () {
+      document.getElementById('status').textContent = 'Running lifted i386 code';
+      Module.canvas.focus();
+    },
+    onExit: function (code) {
+      document.getElementById('status').textContent = 'Exited with status ' + code;
+      document.body.dataset.exitCode = String(code);
+    },
+    onAbort: function (reason) {
+      document.getElementById('status').textContent = 'Aborted: ' + reason;
+      document.body.dataset.abort = String(reason);
+    }
+  };
+  document.getElementById('start').addEventListener('click', function () {
+    this.disabled = true;
+    if (@ELFCONV_BROWSER_JSPI@ && (typeof WebAssembly.Suspending !== 'function' ||
+                                 typeof WebAssembly.promising !== 'function')) {
+      Module.onAbort('This build requires a browser with WebAssembly JSPI support');
+      return;
+    }
+    document.getElementById('status').textContent = 'Loading Wasm…';
+    var script = document.createElement('script');
+    script.src = '@ELFCONV_NAME@.js';
+    script.onerror = function () { Module.onAbort('Unable to load runtime'); };
+    document.body.appendChild(script);
+  }, { once: true });
+  document.getElementById('fullscreen').addEventListener('click', function () {
+    Module.canvas.requestFullscreen().catch(function (error) { Module.printErr(error.message); });
+    Module.canvas.focus();
+  });
+  Module.canvas.addEventListener('click', function () { Module.canvas.focus(); });
+</script>
+</html>

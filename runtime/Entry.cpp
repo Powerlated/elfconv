@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <cstring>
 #include <map>
+#include <utility>
 #include <remill/Arch/Runtime/Intrinsics.h>
 #include <remill/BC/HelperMacro.h>
 #include <stdio.h>
@@ -29,6 +30,41 @@ const char *ORG_ELF_NAME = "app";
 #if defined(ELF_IS_AMD64) || defined(ELF_IS_I386)
 uint8_t *MemoryArenaPtr = nullptr;
 #endif
+
+static void RegisterLiftedFunctions(RuntimeManager *rt_m) {
+  auto register_blocks = [&](uint64_t count, uint64_t ***block_ptrs,
+                             const uint64_t **block_vmas, const uint64_t *block_sizes,
+                             const uint64_t *block_fn_vmas) {
+    for (uint64_t i = 0; i < count; ++i) {
+      const auto block_count = block_sizes[i];
+      std::map<uint64_t, uint64_t *> vma_block_map;
+      for (uint64_t j = 0; j < block_count; ++j) {
+        vma_block_map.insert({block_vmas[i][j], block_ptrs[i][j]});
+      }
+      rt_m->fun_bb_addr_map.insert({block_fn_vmas[i], std::move(vma_block_map)});
+    }
+  };
+
+#if defined(ELFCONV_INCREMENTAL_UNITS)
+  for (uint64_t unit_index = 0; unit_index < _ecv_lifted_unit_count; ++unit_index) {
+    const auto &unit = _ecv_lifted_units[unit_index];
+    for (size_t i = 0; unit.function_vmas[i] && unit.function_ptrs[i]; ++i) {
+      rt_m->addr_funptr_srt_list.push_back({unit.function_vmas[i], unit.function_ptrs[i]});
+    }
+    register_blocks(unit.block_address_count, unit.block_address_ptrs,
+                    unit.block_address_vmas, unit.block_address_sizes,
+                    unit.block_address_fn_vmas);
+  }
+#else
+  for (size_t i = 0; _ecv_fun_vmas[i] && _ecv_fun_ptrs[i]; ++i) {
+    rt_m->addr_funptr_srt_list.push_back({_ecv_fun_vmas[i], _ecv_fun_ptrs[i]});
+  }
+  register_blocks(_ecv_block_address_array_size, _ecv_block_address_ptrs_array,
+                  _ecv_block_address_vmas_array, _ecv_block_address_size_array,
+                  _ecv_block_address_fn_vma_array);
+#endif
+  std::sort(rt_m->addr_funptr_srt_list.begin(), rt_m->addr_funptr_srt_list.end());
+}
 
 #if defined(__EMSCRIPTEN__) && !defined(ELF_IS_I386)
 
@@ -103,21 +139,7 @@ void fork_main(uint8_t *memory_arena_bytes, uint8_t *shared_data) {
   // RuntimeManager
   auto rt_m = new RuntimeManager(main_ecv_pr);
 
-  // Set lifted function pointer table
-  for (size_t i = 0; _ecv_fun_vmas[i] && _ecv_fun_ptrs[i]; i++) {
-    rt_m->addr_funptr_srt_list.push_back({_ecv_fun_vmas[i], _ecv_fun_ptrs[i]});
-  }
-  std::sort(rt_m->addr_funptr_srt_list.begin(), rt_m->addr_funptr_srt_list.end());
-
-  //  Set global block address data array
-  for (size_t i = 0; i < _ecv_block_address_array_size; i++) {
-    auto bb_num = _ecv_block_address_size_array[i];
-    std::map<uint64_t, uint64_t *> vma_bb_map;
-    for (size_t j = 0; j < bb_num; j++) {
-      vma_bb_map.insert({_ecv_block_address_vmas_array[i][j], _ecv_block_address_ptrs_array[i][j]});
-    }
-    rt_m->fun_bb_addr_map.insert({_ecv_block_address_fn_vma_array[i], vma_bb_map});
-  }
+  RegisterLiftedFunctions(rt_m);
 
   /// execute functions.
   LiftedFunc t_func;
@@ -284,21 +306,7 @@ int main(int argc, char *argv[], char *envp[]) {
       new EcvProcess(this_ecv_pid, par_ecv_pid, this_ecv_pgid, memory_arena, cpu_state, {});
   auto rt_m = new RuntimeManager(main_ecv_pr);
 
-  // Set lifted function pointer table
-  for (size_t i = 0; _ecv_fun_vmas[i] && _ecv_fun_ptrs[i]; i++) {
-    rt_m->addr_funptr_srt_list.push_back({_ecv_fun_vmas[i], _ecv_fun_ptrs[i]});
-  }
-  std::sort(rt_m->addr_funptr_srt_list.begin(), rt_m->addr_funptr_srt_list.end());
-
-  //  Set global block address data array
-  for (size_t i = 0; i < _ecv_block_address_array_size; i++) {
-    auto bb_num = _ecv_block_address_size_array[i];
-    std::map<uint64_t, uint64_t *> vma_bb_map;
-    for (size_t j = 0; j < bb_num; j++) {
-      vma_bb_map.insert({_ecv_block_address_vmas_array[i][j], _ecv_block_address_ptrs_array[i][j]});
-    }
-    rt_m->fun_bb_addr_map.insert({_ecv_block_address_fn_vma_array[i], vma_bb_map});
-  }
+  RegisterLiftedFunctions(rt_m);
 
 #if defined(LIFT_FUNC_SYMBOLS) || defined(CALLED_FUNC_NAME)
   // Set symbol table.

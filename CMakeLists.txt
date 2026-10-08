@@ -93,7 +93,7 @@ if(ELFCONV_INPUT)
   )
 endif()
 
-if(BUILD_TESTING AND CMAKE_ELFCONV_AARCH64_BUILD)
+if(BUILD_TESTING)
   add_subdirectory(tests/elfconv)
 endif()
 if(BUILD_TESTING)

@@ -13,19 +13,27 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(googletest)
 
 enable_testing()
+include(GoogleTest)
 
-add_executable(
-  elfconv_test
-  ../../utils/Util.cpp
-  Run.cpp
-)
+if(CMAKE_ELFCONV_AARCH64_BUILD)
+  add_executable(elfconv_test ../../utils/Util.cpp Run.cpp)
+  target_link_libraries(elfconv_test PRIVATE GTest::gtest_main)
+  gtest_discover_tests(elfconv_test)
+endif()
+
+add_executable(i386_imports_test I386ImportsTests.cpp)
 
 target_link_libraries(
-  elfconv_test
+  i386_imports_test
   GTest::gtest_main
 )
 
-target_include_directories(elfconv_test PRIVATE ${CMAKE_SOURCE_DIR})
+target_include_directories(i386_imports_test PRIVATE
+  ${CMAKE_SOURCE_DIR}
+  ${CMAKE_SOURCE_DIR}/backend/remill/include
+)
+target_compile_definitions(i386_imports_test PRIVATE ELF_IS_I386 ADDRESS_SIZE_BITS=32)
+target_compile_options(i386_imports_test PRIVATE -ffunction-sections -fdata-sections)
+target_link_options(i386_imports_test PRIVATE -Wl,--gc-sections)
 
-include(GoogleTest)
-gtest_discover_tests(elfconv_test)
+gtest_discover_tests(i386_imports_test)

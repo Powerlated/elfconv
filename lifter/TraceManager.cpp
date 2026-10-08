@@ -14,12 +14,288 @@
 #include <functional>
 #include <utils/Util.h>
 
+#include <cctype>
+#include <filesystem>
+#include <fstream>
+#include <limits>
+
+namespace {
+constexpr const char *kImportUnitOwner = "__elfconv_imports__";
+constexpr const char *kUnmappedUnitOwner = "__elfconv_unmapped__";
+
+std::string Trim(std::string value) {
+  const auto first = value.find_first_not_of(" \t\r\n");
+  if (first == std::string::npos) return {};
+  const auto last = value.find_last_not_of(" \t\r\n");
+  return value.substr(first, last - first + 1);
+}
+
+bool ParseMapHex(const std::string &text, uint64_t &value) {
+  try {
+    size_t parsed = 0;
+    value = std::stoull(text, &parsed, 0);
+    return parsed == text.size();
+  } catch (...) {
+    return false;
+  }
+}
+
+bool IsCodeMapSection(const std::string &section) {
+  return section == ".text" || section.rfind(".text.", 0) == 0 ||
+         section == ".init" || section == ".fini";
+}
+
+std::string NormalizeMapOwner(std::string owner, const std::string &object_base) {
+  owner = Trim(std::move(owner));
+  const auto section_suffix = owner.find(":(");
+  if (section_suffix != std::string::npos) owner.resize(section_suffix);
+  if (owner.find(".o") == std::string::npos && owner.find(".a") == std::string::npos) return {};
+
+  const auto archive_member = owner.find(".a(");
+  if (archive_member != std::string::npos) {
+    auto archive = std::filesystem::path(owner.substr(0, archive_member + 2));
+    if (archive.is_relative()) archive = std::filesystem::path(object_base) / archive;
+    return archive.lexically_normal().generic_string() + owner.substr(archive_member + 2);
+  }
+
+  auto path = std::filesystem::path(owner);
+  if (path.is_relative()) path = std::filesystem::path(object_base) / path;
+  return path.lexically_normal().generic_string();
+}
+
+template <typename T>
+void WriteScalar(std::ofstream &out, const T &value) {
+  out.write(reinterpret_cast<const char *>(&value), sizeof(value));
+}
+
+void WriteString(std::ofstream &out, const std::string &value) {
+  const uint64_t size = value.size();
+  WriteScalar(out, size);
+  out.write(value.data(), static_cast<std::streamsize>(value.size()));
+}
+}  // namespace
+
+void AArch64TraceManager::LoadLinkerMap(const std::string &path,
+                                       const std::string &object_base_path) {
+  if (path.empty()) elfconv_runtime_error("Incremental Wasm builds require a linker map.\n");
+  object_base = std::filesystem::absolute(object_base_path).lexically_normal().generic_string();
+  std::ifstream input(path);
+  if (!input) elfconv_runtime_error("Cannot open SM64 linker map: %s\n", path.c_str());
+
+  std::string line;
+  while (std::getline(input, line)) {
+    std::istringstream fields(line);
+    std::string first, second;
+    if (!(fields >> first >> second)) continue;
+
+    std::string section;
+    std::string address_text;
+    std::string size_text;
+    std::string owner;
+    if (!first.empty() && first.front() == '.') {
+      section = first;
+      address_text = second;
+      if (!(fields >> size_text)) continue;
+      std::getline(fields, owner);
+    } else {
+      address_text = first;
+      size_text = second;
+      std::getline(fields, owner);
+      const auto suffix = owner.find(":(");
+      if (suffix == std::string::npos) continue;
+      const auto section_begin = suffix + 2;
+      const auto section_end = owner.find(')', section_begin);
+      if (section_end == std::string::npos) continue;
+      section = owner.substr(section_begin, section_end - section_begin);
+      owner.resize(suffix);
+    }
+    if (!IsCodeMapSection(section)) continue;
+
+    uint64_t begin = 0;
+    uint64_t size = 0;
+    if (!ParseMapHex(address_text, begin) || !ParseMapHex(size_text, size) || size == 0) continue;
+    auto normalized_owner = NormalizeMapOwner(std::move(owner), object_base);
+    if (normalized_owner.empty() || begin > std::numeric_limits<uint64_t>::max() - size) continue;
+    code_owner_ranges.push_back({begin, begin + size, std::move(normalized_owner)});
+  }
+  std::sort(code_owner_ranges.begin(), code_owner_ranges.end(),
+            [](const CodeOwnerRange &lhs, const CodeOwnerRange &rhs) {
+              if (lhs.begin != rhs.begin) return lhs.begin < rhs.begin;
+              return lhs.end < rhs.end;
+            });
+  if (code_owner_ranges.empty()) {
+    LOG(WARNING) << "No object code ranges found in linker map " << path
+                 << "; functions will share one fallback unit.";
+  }
+}
+
+void AArch64TraceManager::EnableUnitMode(const std::string &owner, const remill::Arch *arch,
+                                        llvm::Module *external_module) {
+  if (owner.empty() || !arch || !external_module) {
+    elfconv_runtime_error("Invalid incremental unit configuration.\n");
+  }
+  unit_mode = true;
+  unit_owner = owner;
+  unit_arch = arch;
+  external_declarations = external_module;
+}
+
+std::string AArch64TraceManager::GetObjectOwner(uint64_t address) const {
+  if (elf_obj.i386_imports.count(address)) return kImportUnitOwner;
+  const CodeOwnerRange *best = nullptr;
+  auto range = std::upper_bound(
+      code_owner_ranges.begin(), code_owner_ranges.end(), address,
+      [](uint64_t value, const CodeOwnerRange &candidate) { return value < candidate.begin; });
+  while (range != code_owner_ranges.begin()) {
+    --range;
+    if (address >= range->begin && address < range->end &&
+        (!best || range->end - range->begin < best->end - best->begin)) {
+      best = &*range;
+    }
+  }
+  return best ? best->owner : kUnmappedUnitOwner;
+}
+
+bool AArch64TraceManager::IsSelectedUnitAddress(uint64_t address) const {
+  return !unit_mode || GetObjectOwner(address) == unit_owner;
+}
+
+void AArch64TraceManager::WriteIncrementalManifest(
+    const std::string &manifest_path, const std::string &metadata_fingerprint_path) const {
+  std::map<std::string, std::vector<const DisasmFunc *>> units;
+  for (const auto &[address, function] : disasm_funcs) {
+    units[GetObjectOwner(address)].push_back(&function);
+  }
+
+  std::filesystem::create_directories(std::filesystem::path(manifest_path).parent_path());
+  std::ofstream manifest(manifest_path, std::ios::trunc);
+  if (!manifest) elfconv_runtime_error("Cannot write incremental unit manifest: %s\n",
+                                      manifest_path.c_str());
+
+  size_t unit_index = 0;
+  for (const auto &[owner, functions] : units) {
+    const auto fingerprint_path =
+        manifest_path + ".unit-" + std::to_string(unit_index++) + ".fingerprint";
+    std::ofstream fingerprint(fingerprint_path, std::ios::binary | std::ios::trunc);
+    if (!fingerprint) elfconv_runtime_error("Cannot write unit fingerprint: %s\n",
+                                            fingerprint_path.c_str());
+    WriteString(fingerprint, owner);
+    const uint64_t function_count = functions.size();
+    WriteScalar(fingerprint, function_count);
+    uint64_t owner_range_count = 0;
+    for (const auto &range : code_owner_ranges) {
+      if (range.owner == owner) ++owner_range_count;
+    }
+    WriteScalar(fingerprint, owner_range_count);
+    for (const auto &range : code_owner_ranges) {
+      if (range.owner != owner) continue;
+      const uint64_t range_size = range.end - range.begin;
+      WriteScalar(fingerprint, range.begin);
+      WriteScalar(fingerprint, range_size);
+      for (uint64_t offset = 0; offset < range_size; ++offset) {
+        const auto byte = memory.find(range.begin + offset);
+        if (byte == memory.end()) {
+          elfconv_runtime_error("Missing executable byte for owner range at 0x%lx.\n",
+                                range.begin + offset);
+        }
+        fingerprint.put(static_cast<char>(byte->second));
+      }
+    }
+    if (owner == kUnmappedUnitOwner) {
+      const auto code_section_count = std::count_if(
+          elf_obj.sections.begin(), elf_obj.sections.end(), [](const auto &section) {
+            return section.sec_type == BinaryLoader::ELFSection::SEC_TYPE_CODE;
+          });
+      const uint64_t count = static_cast<uint64_t>(code_section_count);
+      WriteScalar(fingerprint, count);
+      for (const auto &section : elf_obj.sections) {
+        if (section.sec_type != BinaryLoader::ELFSection::SEC_TYPE_CODE) continue;
+        WriteString(fingerprint, section.sec_name);
+        WriteScalar(fingerprint, section.vma);
+        WriteScalar(fingerprint, section.size);
+        if (section.size) {
+          fingerprint.write(reinterpret_cast<const char *>(section.bytes),
+                            static_cast<std::streamsize>(section.size));
+        }
+      }
+    }
+    for (const auto *function : functions) {
+      const uint64_t address = function->vma;
+      const uint64_t size = function->func_size;
+      WriteScalar(fingerprint, address);
+      WriteScalar(fingerprint, size);
+      WriteString(fingerprint, function->func_name);
+      for (uint64_t offset = 0; offset < size; ++offset) {
+        const auto byte = memory.find(address + offset);
+        if (byte == memory.end()) {
+          elfconv_runtime_error("Missing executable byte for function at 0x%lx.\n",
+                                address + offset);
+        }
+        fingerprint.put(static_cast<char>(byte->second));
+      }
+    }
+    if (!fingerprint) elfconv_runtime_error("Failed writing unit fingerprint: %s\n",
+                                            fingerprint_path.c_str());
+    manifest << owner << '\t' << fingerprint_path << '\n';
+  }
+
+  std::ofstream metadata(metadata_fingerprint_path, std::ios::binary | std::ios::trunc);
+  if (!metadata) elfconv_runtime_error("Cannot write metadata fingerprint: %s\n",
+                                      metadata_fingerprint_path.c_str());
+  WriteScalar(metadata, entry_point);
+  WriteString(metadata, entry_func_lifted_name);
+  WriteScalar(metadata, elf_obj.is_stripped);
+  WriteScalar(metadata, elf_obj.able_vrp_opt);
+  WriteScalar(metadata, elf_obj.e_phent);
+  WriteScalar(metadata, elf_obj.e_phnum);
+  const uint64_t ph_size = elf_obj.e_phent * elf_obj.e_phnum;
+  WriteScalar(metadata, ph_size);
+  if (ph_size) metadata.write(reinterpret_cast<const char *>(elf_obj.e_ph),
+                              static_cast<std::streamsize>(ph_size));
+  const auto metadata_section_count = std::count_if(
+      elf_obj.sections.begin(), elf_obj.sections.end(), [](const auto &section) {
+        return section.sec_type != BinaryLoader::ELFSection::SEC_TYPE_CODE &&
+               section.sec_type != BinaryLoader::ELFSection::SEC_TYPE_UNKNOWN;
+      });
+  const uint64_t section_count = static_cast<uint64_t>(metadata_section_count);
+  WriteScalar(metadata, section_count);
+  for (const auto &section : elf_obj.sections) {
+    if (section.sec_type == BinaryLoader::ELFSection::SEC_TYPE_CODE ||
+        section.sec_type == BinaryLoader::ELFSection::SEC_TYPE_UNKNOWN) continue;
+    WriteString(metadata, section.sec_name);
+    WriteScalar(metadata, section.vma);
+    WriteScalar(metadata, section.size);
+    if (section.size) {
+      metadata.write(reinterpret_cast<const char *>(section.bytes),
+                     static_cast<std::streamsize>(section.size));
+    }
+  }
+  const uint64_t initializer_count = elf_obj.i386_initializers.size();
+  WriteScalar(metadata, initializer_count);
+  for (const auto address : elf_obj.i386_initializers) WriteScalar(metadata, address);
+  const uint64_t finalizer_count = elf_obj.i386_finalizers.size();
+  WriteScalar(metadata, finalizer_count);
+  for (const auto address : elf_obj.i386_finalizers) WriteScalar(metadata, address);
+  const uint64_t import_count = elf_obj.i386_imports.size();
+  WriteScalar(metadata, import_count);
+  for (const auto &[address, name] : elf_obj.i386_imports) {
+    WriteScalar(metadata, address);
+    WriteString(metadata, name);
+  }
+  if (!metadata) elfconv_runtime_error("Failed writing metadata fingerprint: %s\n",
+                                      metadata_fingerprint_path.c_str());
+}
+
 void AArch64TraceManager::SetLiftedTraceDefinition(uint64_t addr, llvm::Function *lifted_func) {
   traces[addr] = lifted_func;
 }
 
 std::string AArch64TraceManager::AddRestDisasmFunc(uint64_t addr) {
   auto rest_fun_name = GetUniqueLiftedFuncName("_ecv_rest_fun", addr);
+  if (unit_mode && !IsSelectedUnitAddress(addr)) {
+    external_func_names[addr] = rest_fun_name;
+    return rest_fun_name;
+  }
   auto upper_addr_1 = disasm_funcs.upper_bound(addr);
   auto upper_addr_2 = rest_disasm_funcs.upper_bound(addr);
   uint64_t end_addr;
@@ -46,6 +322,14 @@ llvm::Function *AArch64TraceManager::GetLiftedTraceDeclaration(uint64_t addr) {
 }
 
 llvm::Function *AArch64TraceManager::GetLiftedTraceDefinition(uint64_t addr) {
+  if (unit_mode && !IsSelectedUnitAddress(addr)) {
+    if (!unit_arch || !external_declarations) {
+      elfconv_runtime_error("External unit declarations are not configured.\n");
+    }
+    const auto name = GetLiftedFuncName(addr);
+    auto *declaration = external_declarations->getFunction(name);
+    return declaration ? declaration : unit_arch->DeclareLiftedFunction(name, external_declarations);
+  }
   return GetLiftedTraceDeclaration(addr);
 }
 
@@ -62,9 +346,11 @@ bool AArch64TraceManager::TryReadExecutableByte(uint64_t addr, uint8_t *byte) {
 
 std::string AArch64TraceManager::GetLiftedFuncName(uint64_t addr) {
   if (disasm_funcs.count(addr) == 1) {
-    return disasm_funcs[addr].func_name;
+    return disasm_funcs.at(addr).func_name;
   } else if (rest_disasm_funcs.count(addr) == 1) {
-    return rest_disasm_funcs[addr].func_name;
+    return rest_disasm_funcs.at(addr).func_name;
+  } else if (external_func_names.count(addr) == 1) {
+    return external_func_names.at(addr);
   } else {
     elfconv_runtime_error("[ERROR] addr (0x%lx) doesn't indicate the entry of function.\n", addr);
   }
@@ -76,8 +362,7 @@ bool AArch64TraceManager::isFunctionEntry(uint64_t addr) {
 
 std::string AArch64TraceManager::GetUniqueLiftedFuncName(std::string func_name, uint64_t vma_s) {
   std::stringstream lifted_fn_name;
-  lifted_fn_name << func_name << "_____" << std::to_string(unique_i64++) << "_" << std::hex
-                 << vma_s;
+  lifted_fn_name << func_name << "_____" << std::hex << vma_s;
   return lifted_fn_name.str();
 }
 

@@ -150,6 +150,14 @@ endif()
 if(NOT DEFINED ELFCONV_BITCODE_PATH AND IS_DIRECTORY "${ELFCONV_ROOT}/bitcode")
   set(ELFCONV_BITCODE_PATH "${ELFCONV_ROOT}/bitcode")
 endif()
+
+if(ELFCONV_INCREMENTAL_UNITS)
+  if(NOT ELFCONV_TARGET STREQUAL "i386-wasm")
+    message(FATAL_ERROR "Incremental unit conversion currently supports i386-wasm only")
+  endif()
+  include("${ELFCONV_ROOT}/cmake/IncrementalWasm.cmake")
+  return()
+endif()
 if(NOT ELFCONV_NO_LIFTED)
   if(NOT EXISTS "${ELFCONV_LIFTER}")
     message(FATAL_ERROR "ELF lifter not found: ${ELFCONV_LIFTER}")
@@ -251,15 +259,44 @@ if(ELFCONV_TARGET STREQUAL "i386-wasm")
   if(NOT DEFINED ELFCONV_LEGACY_GL OR ELFCONV_LEGACY_GL STREQUAL "")
     set(ELFCONV_LEGACY_GL 1)
   endif()
+  if(NOT DEFINED ELFCONV_WASM_OPT_LEVEL OR ELFCONV_WASM_OPT_LEVEL STREQUAL "")
+    set(ELFCONV_WASM_OPT_LEVEL 3)
+  endif()
+  if(NOT ELFCONV_WASM_OPT_LEVEL MATCHES "^[0123sz]$")
+    message(FATAL_ERROR "ELFCONV_WASM_OPT_LEVEL must be 0, 1, 2, 3, s, or z")
+  endif()
+  set(main_object "${ELFCONV_OUTPUT_DIR}/${ELFCONV_NAME}.wasm.o")
+  if(NOT ELFCONV_NO_COMPILED AND
+     (NOT EXISTS "${main_object}" OR "${main_ir}" IS_NEWER_THAN "${main_object}" OR
+      "${ELFCONV_EMCC}" IS_NEWER_THAN "${main_object}"))
+    _elfconv_execute("i386 bitcode compilation"
+      "${ELFCONV_EMCC}" "-O${ELFCONV_WASM_OPT_LEVEL}" -c "${main_ir}" -o "${main_object}")
+  endif()
+  if(NOT EXISTS "${main_object}")
+    message(FATAL_ERROR "Missing compiled Wasm object: ${main_object}")
+  endif()
+  if(ELFCONV_WASM_JSPI)
+    set(ELFCONV_BROWSER_JSPI true)
+    set(suspension_flags -sJSPI=1)
+  else()
+    set(ELFCONV_BROWSER_JSPI false)
+    set(suspension_flags -sASYNCIFY=1)
+  endif()
+  set(debug_flags)
+  if(ELFCONV_WASM_OPT_LEVEL STREQUAL "0")
+    set(debug_flags -g2)
+  endif()
   _elfconv_execute("i386 browser link"
-    "${ELFCONV_EMCC}" -O3 ${ELFCONV_RUNTIME_INCLUDE_FLAGS} -std=c++17
+    "${ELFCONV_EMCC}" "-O${ELFCONV_WASM_OPT_LEVEL}" ${debug_flags} ${ELFCONV_RUNTIME_INCLUDE_FLAGS} -std=c++17
     ${ELFCONV_RUNTIME_DEFINITIONS} -DELF_IS_I386 -DADDRESS_SIZE_BITS=32
     -sUSE_SDL=2 "-sLEGACY_GL_EMULATION=${ELFCONV_LEGACY_GL}"
-    "-DECV_LEGACY_GL=${ELFCONV_LEGACY_GL}" -sASYNCIFY=1
-    -sALLOW_MEMORY_GROWTH=1 -sINITIAL_MEMORY=335544320 -sEXIT_RUNTIME=1
-    "${main_ir}" ${ELFCONV_COMMON_RUNTIME_SOURCES} "${ELFCONV_RUNTIME_DIR}/I386Imports.cpp"
+    "-DECV_LEGACY_GL=${ELFCONV_LEGACY_GL}" ${suspension_flags}
+    -sALLOW_MEMORY_GROWTH=1 -sINITIAL_MEMORY=335544320 -sSTACK_SIZE=1048576 -sEXIT_RUNTIME=1
+    "${main_object}" ${ELFCONV_COMMON_RUNTIME_SOURCES} "${ELFCONV_RUNTIME_DIR}/I386Imports.cpp"
     -o "${ELFCONV_OUTPUT_DIR}/${ELFCONV_NAME}.js"
   )
+  configure_file("${ELFCONV_ROOT}/browser/i386.html.in"
+    "${ELFCONV_OUTPUT_DIR}/${ELFCONV_NAME}.html" @ONLY)
   return()
 endif()
 

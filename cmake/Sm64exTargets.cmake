@@ -16,6 +16,8 @@ if(NOT ELFCONV_SM64EX_CLANG)
 endif()
 set(ELFCONV_SM64EX_DWARF_LIBRARY_DIR "$ENV{HOME}/.local/opt/dwarf-2021/usr/lib/x86_64-linux-gnu" CACHE PATH "Host libdwarf directory used by SM64EX tools")
 set(ELFCONV_SM64EX_JOBS 8 CACHE STRING "Parallel jobs for the SM64EX upstream Makefile")
+set(ELFCONV_SM64EX_WASM_OPT_LEVEL 1 CACHE STRING "Wasm optimization level for SM64EX (1 for development, 3 for release; 0 can exceed browser Wasm limits)")
+option(ELFCONV_SM64EX_JSPI "Use native Wasm stack switching for SM64EX (requires a JSPI-capable browser)" ON)
 set(sm64ex_lifter "${ELFCONV_LIFTER}")
 if(TARGET elflift)
   set(sm64ex_lifter "$<TARGET_FILE:elflift>")
@@ -30,6 +32,8 @@ foreach(mode IN ITEMS native bitcode wasm)
       "-DELFCONV_SM64EX_CLANG=${ELFCONV_SM64EX_CLANG}"
       "-DELFCONV_SM64EX_DWARF_LIBRARY_DIR=${ELFCONV_SM64EX_DWARF_LIBRARY_DIR}"
       "-DELFCONV_SM64EX_JOBS=${ELFCONV_SM64EX_JOBS}"
+      "-DELFCONV_SM64EX_WASM_OPT_LEVEL=${ELFCONV_SM64EX_WASM_OPT_LEVEL}"
+      "-DELFCONV_SM64EX_JSPI=${ELFCONV_SM64EX_JSPI}"
       "-DELFCONV_LIFTER=${sm64ex_lifter}"
       "-DELFCONV_EMCC=${ELFCONV_EMCC}"
       "-DELFCONV_ROOT=${ELFCONV_ROOT}"
