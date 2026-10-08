@@ -42,8 +42,8 @@ if(NOT result EQUAL 0)
 endif()
 
 set(sysroot "${ELFCONV_SM64EX_SYSROOT}")
-set(compiler_command
-  "${ELFCONV_SM64EX_CLANG} -m32 -fno-pie --sysroot=${sysroot} -I${sysroot}/usr/include/i386-linux-gnu -B${sysroot}/usr/lib/i386-linux-gnu -Wno-unused-command-line-argument -L${sysroot}/usr/lib/gcc/i686-linux-gnu/15"
+set(platform_cflags
+  "-fno-pie --sysroot=${sysroot} -I${sysroot}/usr/include/i386-linux-gnu -B${sysroot}/usr/lib/i386-linux-gnu -Wno-unused-command-line-argument"
 )
 set(pkg_config_libdir "${sysroot}/usr/lib/i386-linux-gnu/pkgconfig:${sysroot}/usr/share/pkgconfig")
 set(ld_library_path "${ELFCONV_SM64EX_DWARF_LIBRARY_DIR}")
@@ -57,7 +57,9 @@ execute_process(
     "PKG_CONFIG_LIBDIR=${pkg_config_libdir}"
     "LD_LIBRARY_PATH=${ld_library_path}"
     "${make_program}" -C "${game}" "-j${ELFCONV_SM64EX_JOBS}"
-    TARGET_BITS=32 TARGET_ARCH=i686 NO_PIE=1 "CC=${compiler_command}" "SDLCONFIG=pkg-config sdl2"
+    TARGET_BITS=32 TARGET_ARCH=i686 NO_PIE=1
+    "CC=${ELFCONV_SM64EX_CLANG}" "PLATFORM_CFLAGS=${platform_cflags}"
+    "SDLCONFIG=pkg-config sdl2"
   RESULT_VARIABLE result
   COMMAND_ECHO STDOUT
 )

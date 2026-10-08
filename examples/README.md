@@ -155,6 +155,12 @@ cmake --build build --target sm64ex-bitcode
 cmake --build build --target sm64ex-wasm
 ```
 
+On Debian/Ubuntu with the i386 development libraries installed on the host,
+use `-DELFCONV_SM64EX_SYSROOT=/` instead of a separate sysroot. The native
+build requires the i386 SDL2 and OpenGL development packages. CMake passes the
+compiler path through `CC` and the sysroot flags through `PLATFORM_CFLAGS`;
+upstream's recursive tool build requires `CC` to contain only the executable.
+
 The CMake targets invoke the pinned upstream Makefiles to build SM64EX's asset
 tools and game. The game is compiled as a non-PIE i386 ELF; outputs are under
 `examples/sm64ex/build/us_pc/`.
