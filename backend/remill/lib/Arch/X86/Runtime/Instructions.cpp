@@ -209,6 +209,7 @@ DEF_HELPER(SquareRoot32, float32_t src_float)->float32_t {
 #include "lib/Arch/X86/Semantics/CMOV.cpp"
 #include "lib/Arch/X86/Semantics/COND_BR.cpp"
 #include "lib/Arch/X86/Semantics/CONVERT.cpp"
+#include "lib/Arch/X86/Semantics/CRYPTO.cpp"
 #include "lib/Arch/X86/Semantics/DATAXFER.cpp"
 #include "lib/Arch/X86/Semantics/DECIMAL.cpp"
 #include "lib/Arch/X86/Semantics/FLAGOP.cpp"
