@@ -52,6 +52,10 @@ IF_64BIT(DEF_ISEL(LEA_GPRv_AGEN_64) = LEA<R64W, M8, uint64_t>;)
 DEF_ISEL(LEAVE_16) = LEAVE_16BIT;
 DEF_ISEL_RI32or64(LEAVE, LEAVE_FULL);
 
+#if ADDRESS_SIZE_BITS == 32
+extern "C" void __ecv_i386_cpuid(State *);
+#endif
+
 namespace {
 
 // TODO(pag): Handle the case where the operand size and address size disagree.
@@ -134,7 +138,11 @@ DEF_SEM(DoXLAT) {
 }
 
 DEF_SEM(DoCPUID) {
+#if ADDRESS_SIZE_BITS == 32
+  __ecv_i386_cpuid(&state);
+#else
   __remill_sync_hyper_call(state, rt_m, SyncHyperCall::kX86CPUID);
+#endif
 }
 }  // namespace
 

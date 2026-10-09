@@ -14,14 +14,29 @@
  * limitations under the License.
  */
 
+#if ADDRESS_SIZE_BITS == 32
+extern "C" uint64_t __ecv_i386_read_tsc();
+#endif
+
 namespace {
 
 DEF_SEM(DoRDTSC) {
+#if ADDRESS_SIZE_BITS == 32
+  const uint64_t counter = __ecv_i386_read_tsc();
+  Write(REG_EAX, uint32_t(counter));
+  Write(REG_EDX, uint32_t(counter >> 32));
+#else
   __remill_sync_hyper_call(state, rt_m, SyncHyperCall::kX86ReadTSC);
+#endif
 }
 
 DEF_SEM(DoRDTSCP) {
+#if ADDRESS_SIZE_BITS == 32
+  DoRDTSC(rt_m, state);
+  Write(REG_ECX, uint32_t(0));  // One virtual processor; TSC_AUX is its ID.
+#else
   __remill_sync_hyper_call(state, rt_m, SyncHyperCall::kX86ReadTSCP);
+#endif
 }
 
 DEF_SEM(LGDT, M32 src) {

@@ -18,6 +18,7 @@
 #include <cstdlib>
 #include <cerrno>
 #include <unistd.h>
+#include <time.h>
 #include <iomanip>
 #include <iostream>
 #include <remill/Arch/Runtime/Intrinsics.h>
@@ -53,6 +54,52 @@ extern "C" uint64_t __ecv_i386_random32() {
   errno = saved_errno;
   return success ? (uint64_t(1) << 32) | value : uint64_t(0);
 }
+#if defined(ELF_IS_I386)
+extern "C" void __ecv_i386_cpuid(State *state) {
+  const uint32_t leaf = state->gpr.rax.dword;
+  uint32_t a = 0, b = 0, c = 0, d = 0;
+  switch (leaf) {
+    case 0:
+      a = 1;
+      b = 0x756e6547; d = 0x49656e69; c = 0x6c65746e;  // GenuineIntel
+      break;
+    case 1:
+      a = 0x000006f1;
+      b = 1u << 16;  // One logical processor.
+      c = 1u << 31;  // Hypervisor, not the host CPU's feature set.
+      d = (1u << 0) | (1u << 4) | (1u << 8) | (1u << 15) |
+          (1u << 23) | (1u << 24) | (1u << 25) | (1u << 26);
+      break;
+    case 0x40000000:
+      a = 0x40000000;
+      b = 0x63666c65; c = 0x20766e6f; d = 0x20202020;  // elfconv
+      break;
+    case 0x80000000: a = 0x80000007; break;
+    case 0x80000001: d = 1u << 27; break;  // RDTSCP
+    case 0x80000002:
+    case 0x80000003:
+    case 0x80000004: {
+      static constexpr char brand[48] = "elfconv virtual i386 CPU, 1 GHz TSC";
+      uint32_t words[4];
+      memcpy(words, brand + (leaf - 0x80000002) * 16, sizeof(words));
+      a = words[0]; b = words[1]; c = words[2]; d = words[3];
+      break;
+    }
+    case 0x80000007: d = 1u << 8; break;  // Invariant virtual TSC.
+  }
+  state->gpr.rax.dword = a; state->gpr.rbx.dword = b;
+  state->gpr.rcx.dword = c; state->gpr.rdx.dword = d;
+}
+extern "C" uint64_t __ecv_i386_read_tsc() {
+  struct timespec now;
+  const int saved_errno = errno;
+  if (clock_gettime(CLOCK_MONOTONIC, &now))
+    elfconv_runtime_error("Cannot read the virtual i386 timestamp counter.\n");
+  errno = saved_errno;
+  // Nanoseconds define a stable 1 GHz guest counter independent of host CPU speed.
+  return uint64_t(now.tv_sec) * 1000000000 + uint64_t(now.tv_nsec);
+}
+#endif
 
 #define UNDEFINED_INTRINSICS(intrinsics) \
   printf("[ERROR] undefined intrinsics: %s\n", intrinsics); \
