@@ -300,6 +300,20 @@ void parse_unsigned(Call &call) {
 #define IMPORT(name) extern "C" void __ecv_i386_##name(uint8_t *arena, State *state, uint32_t, RuntimeManager *runtime)
 #define CALL Call call(arena, state)
 
+extern "C" int __ecv_i386_run_function_entry(uint8_t *arena, State *state,
+                                           uint32_t entry, RuntimeManager *runtime) {
+  uint32_t argc;
+  const uint32_t argv = state->gpr.rsp.dword + 4;
+  memcpy(&argc, guest(arena, state->gpr.rsp.dword, 4), 4);
+  const uint32_t args[] = {argc, argv, argv + 4 * (argc + 1)};
+  for (auto *p = _ecv_i386_initializers; *p; ++p)
+    invoke(arena, state, runtime, *p, args, 3);
+  invoke(arena, state, runtime, entry, args, 3);
+  const int status = state->gpr.rax.dword;
+  for (auto *p = _ecv_i386_finalizers; *p; ++p)
+    invoke(arena, state, runtime, *p, nullptr, 0);
+  return status;
+}
 IMPORT(__libc_start_main) {
   CALL;
   uint32_t main = call.word(0), argc = call.word(1), argv = call.word(2);

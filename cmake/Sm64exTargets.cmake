@@ -18,6 +18,7 @@ set(ELFCONV_SM64EX_DWARF_LIBRARY_DIR "$ENV{HOME}/.local/opt/dwarf-2021/usr/lib/x
 set(ELFCONV_SM64EX_JOBS 8 CACHE STRING "Parallel jobs for the SM64EX upstream Makefile")
 set(ELFCONV_SM64EX_WASM_OPT_LEVEL 1 CACHE STRING "Wasm optimization level for SM64EX (1 for development, 3 for release; 0 can exceed browser Wasm limits)")
 option(ELFCONV_SM64EX_JSPI "Use native Wasm stack switching for SM64EX (requires a JSPI-capable browser)" ON)
+option(ELFCONV_SM64EX_SHARED "Build SM64EX as a shared library with a native dlopen runner" OFF)
 set(sm64ex_lifter "${ELFCONV_LIFTER}")
 if(TARGET elflift)
   set(sm64ex_lifter "$<TARGET_FILE:elflift>")
@@ -27,6 +28,7 @@ foreach(mode IN ITEMS native bitcode wasm)
   add_custom_target(sm64ex-${mode}
     COMMAND "${CMAKE_COMMAND}"
       "-DELFCONV_SM64EX_MODE=${mode}"
+      "-DELFCONV_SM64EX_SHARED=${ELFCONV_SM64EX_SHARED}"
       "-DELFCONV_SM64EX_SOURCE=${ELFCONV_SM64EX_SOURCE}"
       "-DELFCONV_SM64EX_SYSROOT=${ELFCONV_SM64EX_SYSROOT}"
       "-DELFCONV_SM64EX_CLANG=${ELFCONV_SM64EX_CLANG}"

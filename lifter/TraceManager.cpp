@@ -116,6 +116,7 @@ void AArch64TraceManager::LoadLinkerMap(const std::string &path,
     if (!ParseMapHex(address_text, begin) || !ParseMapHex(size_text, size) || size == 0) continue;
     auto normalized_owner = NormalizeMapOwner(std::move(owner), object_base);
     if (normalized_owner.empty() || begin > std::numeric_limits<uint64_t>::max() - size) continue;
+    begin += elf_obj.load_bias;
     code_owner_ranges.push_back({begin, begin + size, std::move(normalized_owner)});
   }
   std::sort(code_owner_ranges.begin(), code_owner_ranges.end(),
@@ -244,6 +245,7 @@ void AArch64TraceManager::WriteIncrementalManifest(
                                       metadata_fingerprint_path.c_str());
   WriteScalar(metadata, entry_point);
   WriteString(metadata, entry_func_lifted_name);
+  WriteString(metadata, elf_obj.entry_symbol);
   WriteScalar(metadata, elf_obj.is_stripped);
   WriteScalar(metadata, elf_obj.able_vrp_opt);
   WriteScalar(metadata, elf_obj.e_phent);
@@ -307,6 +309,9 @@ std::string AArch64TraceManager::AddRestDisasmFunc(uint64_t addr) {
     end_addr = upper_addr_2->first;
   } else {
     LOG(FATAL) << "[Bug] does not handle the pattern of having last rest_disasm_func.";
+  }
+  if (auto *section = elf_obj.GetIncludedSection(addr)) {
+    end_addr = std::min<uint64_t>(end_addr, bfd_section_vma(section) + bfd_section_size(section));
   }
   rest_disasm_funcs.insert({addr, DisasmFunc(rest_fun_name, addr, end_addr - addr)});
   return rest_fun_name;

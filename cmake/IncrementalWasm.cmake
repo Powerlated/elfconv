@@ -82,7 +82,7 @@ set(pipeline_material
   "${runtime_source_hashes_text}|${runtime_headers_hash}|${runtime_definitions_text}|"
   "${runtime_includes_text}|${ELFCONV_WASM_OPT_LEVEL}|${ELFCONV_WASM_JSPI}|"
   "${ELFCONV_LEGACY_GL}|${ELFCONV_FLOAT_EXCEPTION}|${ELFCONV_DEBUG}|"
-  "${ELFCONV_RUNTIME_DIR}/I386Imports.cpp"
+  "${ELFCONV_RUNTIME_DIR}/I386Imports.cpp|${ELFCONV_ENTRY_SYMBOL}"
 )
 string(SHA256 pipeline_key "${pipeline_material}")
 set(cache_dir "${ELFCONV_OUTPUT_DIR}/.elfconv-incremental")
@@ -107,6 +107,7 @@ _elfconv_execute("Incremental unit scan" "${ELFCONV_LIFTER}"
   --linker_map "${ELFCONV_LINK_MAP}" --object_base "${ELFCONV_OBJECT_BASE}"
   --unit_manifest_out "${manifest}" --metadata_fingerprint_out "${metadata_fingerprint}"
   --norm_mode 1 --fork_emulation 0 --float_exception "${ELFCONV_FLOAT_EXCEPTION}"
+  ${elfconv_entry_args}
 )
 file(SHA256 "${metadata_fingerprint}" metadata_fingerprint_hash)
 set(metadata_lift_key
@@ -129,6 +130,7 @@ if(NOT previous_metadata_lift_key STREQUAL metadata_lift_key OR NOT EXISTS "${me
     --arch i386 --target_arch emscripten32 --target_elf "${ELFCONV_INPUT}"
     --metadata_only --bc_out "${metadata_bc}" --norm_mode 1 --fork_emulation 0
     --float_exception "${ELFCONV_FLOAT_EXCEPTION}"
+    ${elfconv_entry_args}
   )
   file(WRITE "${metadata_lift_key_file}" "${metadata_lift_key}")
   set(metadata_lifted TRUE)
@@ -162,6 +164,7 @@ set(unit_compile_keys)
 set(unit_lift_flags --arch i386 --target_arch emscripten32 --target_elf "${ELFCONV_INPUT}"
   --linker_map "${ELFCONV_LINK_MAP}" --object_base "${ELFCONV_OBJECT_BASE}"
   --norm_mode 1 --fork_emulation 0 --float_exception "${ELFCONV_FLOAT_EXCEPTION}"
+  ${elfconv_entry_args}
 )
 foreach(line IN LISTS unit_lines)
   string(FIND "${line}" "\t" owner_end)

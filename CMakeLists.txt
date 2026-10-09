@@ -33,6 +33,7 @@ include(cmake/ElfconvTargets.cmake)
 include(cmake/Sm64exTargets.cmake)
 set(ELFCONV_INPUT "" CACHE FILEPATH "Optional ELF to convert with the convert-elf target")
 set(ELFCONV_CONVERT_TARGET "" CACHE STRING "Conversion target for ELFCONV_INPUT")
+set(ELFCONV_ENTRY_SYMBOL "" CACHE STRING "Exported i386 shared-library entry with int(int,char**) ABI")
 set(ELFCONV_OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}" CACHE PATH "Output directory for convert-elf")
 set(ELFCONV_MOUNT_SETTINGS "" CACHE STRING "Semicolon-separated host_dir@/mount/path values")
 set(ELFCONV_LEGACY_GL "1" CACHE STRING "Legacy OpenGL emulation for i386 browser builds")
@@ -79,6 +80,7 @@ if(ELFCONV_INPUT)
   elfconv_add_conversion_target(convert-elf
     INPUT "${ELFCONV_INPUT}"
     TARGET "${ELFCONV_CONVERT_TARGET}"
+    ENTRY_SYMBOL "${ELFCONV_ENTRY_SYMBOL}"
     OUTPUT_DIR "${ELFCONV_OUTPUT_DIR}"
     LEGACY_GL "${ELFCONV_LEGACY_GL}"
     DEBUG_FUNC_ADDR "${ELFCONV_DEBUG_FUNC_ADDR}"

@@ -50,6 +50,7 @@ DEFINE_string(arch, REMILL_ARCH,
               "Valid architectures: x86, amd64 (with or without "
               "`_avx` or `_avx512` appended), aarch64, aarch32");
 DEFINE_string(target_elf, "DUMMY_ELF", "Name of the target ELF binary");
+DEFINE_string(entry_symbol, "", "Exported i386 shared-library entry with int(int,char**) ABI.");
 DEFINE_uint64(dbg_fun_vma, 0, "Function Address of the debug target");
 DEFINE_string(bitcode_path, "", "Function Name of the debug target");
 DEFINE_string(target_arch, "", "Target Architecture for conversion");
@@ -93,8 +94,9 @@ int main(int argc, char *argv[]) {
   google::InitGoogleLogging(argv[0]);
 
   AArch64TraceManager manager(FLAGS_target_elf);
-  if (!FLAGS_linker_map.empty()) manager.LoadLinkerMap(FLAGS_linker_map, FLAGS_object_base);
+  manager.elf_obj.entry_symbol = FLAGS_entry_symbol;
   manager.SetELFData();
+  if (!FLAGS_linker_map.empty()) manager.LoadLinkerMap(FLAGS_linker_map, FLAGS_object_base);
   if (!FLAGS_unit_manifest_out.empty()) {
     if (FLAGS_metadata_fingerprint_out.empty()) {
       elfconv_runtime_error("--unit_manifest_out requires --metadata_fingerprint_out.\n");
@@ -168,6 +170,13 @@ int main(int argc, char *argv[]) {
     main_lifter.SetUnitOutputSuffix(FLAGS_unit_id);
   } else {
     main_lifter.SetCommonMetaData(lift_config);
+  }
+  if (!unit_mode && arch_name == remill::kArchX86) {
+    new llvm::GlobalVariable(*module, llvm::Type::getInt32Ty(context), true,
+                            llvm::GlobalValue::ExternalLinkage,
+                            llvm::ConstantInt::get(llvm::Type::getInt32Ty(context),
+                                                  !FLAGS_entry_symbol.empty()),
+                            "_ecv_i386_function_entry");
   }
 
   for (const auto &[address, name] : manager.elf_obj.i386_imports) {

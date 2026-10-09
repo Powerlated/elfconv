@@ -20,6 +20,10 @@
 State *CPUState;
 
 extern void *TranslateVMA(RuntimeManager *rt_m, uint8_t *arena_ptr, addr_t vma_addr);
+#if defined(ELF_IS_I386)
+extern "C" const uint32_t _ecv_i386_function_entry;
+extern "C" int __ecv_i386_run_function_entry(uint8_t *, State *, uint32_t, RuntimeManager *);
+#endif
 
 #ifdef ELFNAME
 const char *ORG_ELF_NAME = ELFNAME;
@@ -316,10 +320,17 @@ int main(int argc, char *argv[], char *envp[]) {
   }
 #endif
 
-  //  Go to the entry function (_ecv_entry_func is injected by lifted LLVM IR)
-  _ecv_entry_func(memory_arena->bytes, CPUState, _ecv_entry_pc, rt_m);
+  // Shared-library exports use the guest SysV function ABI, not ELF _start.
+  int status = 0;
+#if defined(ELF_IS_I386)
+  if (_ecv_i386_function_entry)
+    status = __ecv_i386_run_function_entry(memory_arena->bytes, CPUState,
+                                          static_cast<uint32_t>(_ecv_entry_pc), rt_m);
+  else
+#endif
+    _ecv_entry_func(memory_arena->bytes, CPUState, _ecv_entry_pc, rt_m);
 
   delete (rt_m);
 
-  return 0;
+  return status;
 }

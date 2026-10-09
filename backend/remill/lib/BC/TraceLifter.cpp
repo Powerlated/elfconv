@@ -879,7 +879,8 @@ bool TraceLifter::Impl::Lift(uint64_t addr, const char *fn_name,
         }
         if (arch->IsX86() || arch->IsAMD64()) {
           Instruction decoded;
-          CHECK(ReadInstructionBytes(insn_vma));
+          CHECK(ReadInstructionBytes(insn_vma)) << " at 0x" << std::hex << insn_vma
+                                               << " in trace 0x" << trace_addr;
           CHECK(arch->DecodeInstruction(insn_vma, inst_bytes, decoded,
                                         arch->CreateInitialContext()));
           CHECK_GT(decoded.next_pc, insn_vma);

@@ -16,6 +16,9 @@ def main():
     parser.add_argument('--cmake', default='cmake')
     parser.add_argument('--output-dir', type=Path, required=True)
     parser.add_argument('--profile', choices=('core', 'full'), default='core')
+    linkage = parser.add_mutually_exclusive_group()
+    linkage.add_argument('--pie', action='store_true', help='Build a position-independent executable')
+    linkage.add_argument('--shared', action='store_true', help='Build and invoke an i386 shared library')
     parser.add_argument('--source', type=Path,
                         help='Run a standalone instruction regression instead of an upstream profile')
     args = parser.parse_args()
@@ -42,7 +45,9 @@ def main():
         print(f'{stage}: exit {result.returncode}')
         return result
 
-    command = [args.cc, '-m32', '-O2', '-fno-pie', '-no-pie',
+    linkage_flags = ['-fPIC', '-shared'] if args.shared else (
+        ['-fPIE', '-pie'] if args.pie else ['-fno-pie', '-no-pie'])
+    command = [args.cc, '-m32', '-O2', *linkage_flags,
                '-fno-stack-protector', '-ffunction-sections', '-fdata-sections',
                '-Wl,--gc-sections', str(args.source.resolve() if args.source else source / 'runner.c')]
     if not args.source and args.profile == 'full':
@@ -52,7 +57,15 @@ def main():
     if compiled is None or compiled.returncode:
         print(f'Compilation failed; see {output}/compile.stderr')
         return 1
-    native = run('native', [str(binary)], 120)
+    native_command = [str(binary)]
+    if args.shared:
+        runner = output / 'shared-runner'
+        compiled_runner = run('runner', [args.cc, '-m32',
+            str(root / 'examples/sm64-shared-runner.c'), '-ldl', '-o', str(runner)], 120)
+        if compiled_runner is None or compiled_runner.returncode:
+            return 1
+        native_command = [str(runner), str(binary), 'guest-argument']
+    native = run('native', native_command, 120)
     if native is None or native.returncode:
         print(f'Native reference failed; logs: {output}')
         return 1
@@ -60,6 +73,7 @@ def main():
         f'-DELFCONV_INPUT={binary}', '-DELFCONV_TARGET=i386-wasm',
         f'-DELFCONV_OUTPUT_DIR={output / "wasm"}',
         f'-DELFCONV_LIFTER={args.lifter}', f'-DELFCONV_EMCC={args.emcc}',
+        *(['-DELFCONV_ENTRY_SYMBOL=main'] if args.shared else []),
         '-DELFCONV_LEGACY_GL=0', '-P', str(root / 'cmake/ConvertElf.cmake')], 600)
     if converted is None or converted.returncode:
         print(f'Conversion failed; logs: {output}/convert.stdout and convert.stderr')
@@ -68,7 +82,8 @@ def main():
                    if 'Unsupported instruction' in line]
     if unsupported:
         print(f'Unsupported instruction sites: {len(unsupported)} (see conversion logs)')
-    lifted = run('lifted', [args.node, str(output / 'wasm' / (binary.name + '.js'))], 120)
+    lifted = run('lifted', [args.node, str(output / 'wasm' / (binary.name + '.js')),
+                          *(['guest-argument'] if args.shared else [])], 120)
     if lifted is None:
         return 1
     expected = native.stdout.splitlines(keepends=True)
@@ -82,6 +97,9 @@ def main():
     if differences:
         print(''.join(differences[:80]), end='')
     print(f'Complete stdout, stderr, and diff: {output}')
+    if args.pie and lifted.stderr != native.stderr:
+        print('PIE stderr differs from native reference')
+        return 1
     # Unsupported instructions cannot count as a successful conformance run,
     # even if the lifter emits a no-op and the output happens to match.
     return int(bool(lifted.returncode or unsupported or differences))

@@ -124,6 +124,8 @@ class ELFObject {
   std::string bin_arch_str;
   uint32_t bits;
   uintptr_t entry;
+  uint32_t load_bias = 0;
+  std::string entry_symbol;
   std::vector<ELFSection> sections;
   std::unordered_map<uint64_t, ELFSymbol> func_symbols_map;
   std::vector<ELFSymbol> func_symbols;

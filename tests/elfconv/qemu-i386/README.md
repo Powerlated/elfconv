@@ -10,6 +10,17 @@ The harness compiles a non-PIE 32-bit Linux ELF, runs it natively, lifts that sa
 ELF to Emscripten Wasm, executes it with Node, and compares stdout. No downloaded
 sources or QEMU emulator are needed when running the fixture.
 
+The project-owned `pie.c` fixture uses `--pie` (`-fPIE -pie`) and checks relocated
+data pointers, indirect function calls, constructor/destructor order, mutation,
+and imported stdout/stderr variables against native execution. Run just this
+regression with `ctest --test-dir build/llvm16 -R '^qemu_i386_pie$' --output-on-failure`.
+
+The `shared.c` fixture uses `--shared` (`-fPIC -shared`). A native `dlopen`
+runner provides the reference; Wasm invokes the same exported `main`.
+It checks exported data/function relocations, local PLT calls, constructor and
+destructor execution, guest argv, and mutation. Run it with
+`ctest --test-dir build/llvm16 -R '^qemu_i386_shared$' --output-on-failure`.
+
 ## Run
 
 Prerequisites: an x86 Linux host that can execute i386 ELF files, GCC with 32-bit

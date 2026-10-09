@@ -43,7 +43,14 @@ An ahead-of-time binary translator that converts Linux applications to WebAssemb
   - AArch64 conversion requires statically linked binaries.
   - `i386-wasm` resolves the documented samples' libc/SDL2/OpenGL imports to
     Emscripten guest-ABI adapters. It does not load the corresponding Linux
-    libraries. PIE, unsupported relocations, and unknown imports are rejected.
+    libraries. i386 PIE executables use a fixed guest load bias of `0x08000000`
+    (no ASLR), with relative relocations and GOT/PLT import resolution.
+    Standalone i386 shared libraries can select an exported `int(int,char**)`
+    entry with `ELFCONV_ENTRY_SYMBOL` (lifter: `--entry_symbol`). Constructors
+    run before the entry and finalizers after it returns. Defined symbols bind
+    within that ELF; dependencies still use host ABI adapters, not loaded Linux
+    libraries. Runtime `dlopen`, multi-library symbol interposition, TLS,
+    unsupported relocations, and unknown imports are not supported.
     Raw i386 syscalls are rejected explicitly by the runtime.
 - **System Calls**: Partial Linux syscall implementation
   - See [`runtime/syscalls/`](https://github.com/yomaytk/elfconv/blob/main/runtime/syscalls) for currently supported syscalls

@@ -49,7 +49,7 @@ WebGL RGBA readback into desktop RGB/pack layout, and Asyncify yields at buffer
 swaps so rendering and input remain responsive.
 
 This path handles the triangle's imported functions and relocations, not
-arbitrary Linux shared libraries or retail Portal. PIE, unsupported relocations,
+arbitrary Linux shared libraries or retail Portal. Unsupported relocations,
 unknown host imports, unsupported pointer-bearing SDL events, and raw Linux
 i386 syscalls fail explicitly. The printf adapters accept scalar `%s`, `%d`,
 `%u`, `%c`, `%x`, `%X`, and `%%` conversions; floating-point/length-modified
@@ -174,8 +174,44 @@ compiler path through `CC` and the sysroot flags through `PLATFORM_CFLAGS`;
 upstream's recursive tool build requires `CC` to contain only the executable.
 
 The CMake targets invoke the pinned upstream Makefiles to build SM64EX's asset
-tools and game. The game is compiled as a non-PIE i386 ELF; outputs are under
-`examples/sm64ex/build/us_pc/`.
+tools and game. The game is compiled as an i386 PIE ELF with `-fPIE -pie`;
+outputs are under `examples/sm64ex/build/us_pc_pie/`, separate from old non-PIE objects.
+The lifter applies a fixed `0x08000000` guest load bias to sections, function
+addresses, initializer pointers, relative relocations, and linker-map ranges.
+This is AOT PIE support, not ASLR or a general shared-library loader.
+
+### Shared-library configuration
+
+Enable `ELFCONV_SM64EX_SHARED` to build the main game as a PIC i386 `.so`
+(`-fPIC -shared -Wl,-z,defs`) instead of a PIE executable:
+
+```sh
+cmake -S . -B build/llvm16 -DELFCONV_SM64EX_SHARED=ON
+cmake --build build/llvm16 --target sm64ex-native
+examples/sm64ex/build/us_pc_shared/sm64-runner \
+  "$PWD/examples/sm64ex/build/us_pc_shared/sm64.us.f3dex2e.so" --help
+cmake --build build/llvm16 --target sm64ex-wasm
+python3 -m http.server 8080 --directory examples/sm64ex/build/us_pc_shared
+```
+
+Open `/sm64.us.f3dex2e.so.html` and click Start. The native runner uses
+`dlopen`/`dlsym` to invoke exported `main`; conversion lifts the `.so` itself
+with `ELFCONV_ENTRY_SYMBOL=main`, not the runner or source. Outputs and
+incremental caches are isolated under `build/us_pc_shared/`.
+Set `ELFCONV_SM64EX_SHARED=OFF` to return to the PIE configuration.
+
+The shared-library build was lifted into 115 incremental units and exercised
+in Chromium: Mario and the “PRESS START” title screen rendered with no browser
+errors. The native `dlopen` runner also passed `--help`.
+
+Shared-object conversion resolves `R_386_RELATIVE`, defined-symbol `R_386_32`,
+`R_386_GLOB_DAT`, and `R_386_JMP_SLOT` at a fixed guest bias. ELF initializers
+are read after relocation. Exported entries must have `int(int,char**)` ABI;
+guest argc/argv are passed on the i386 stack and the return value becomes the
+program exit status. This does not implement runtime Linux `dlopen`, dependency
+loading, symbol interposition, TLS, or arbitrary host-facing export signatures.
+
+### Runtime and incremental conversion
 
 The native executable's `--help` command succeeds, and the lifted bitcode
 passes LLVM verification. Lifting required fixes for `stdout` copy relocations,
@@ -189,10 +225,10 @@ a Wasm/Node arithmetic smoke run pass.
 
 `sm64ex-wasm` now partitions the final linked i386 ELF by linker-map object
 ownership, lifts each code unit to its own bitcode file, optimizes each Wasm
-object at `-O1`, and links those units with cached shared metadata and runtime
+object at `ELFCONV_SM64EX_WASM_OPT_LEVEL`, and links those units with cached shared metadata and runtime
 objects. Its cache is under
-`examples/sm64ex/build/us_pc/.elfconv-incremental/`; the first build produced
-116 units, and the next unchanged build skipped conversion and linking. This
+`examples/sm64ex/build/us_pc_pie/.elfconv-incremental/`. Unchanged units skip
+lifting and compilation; changed lifter inputs invalidate cached units. This
 uses linker-resolved code, not raw relocatable `.o` files. VMA/layout changes
 can invalidate additional units, and the final Wasm link remains whole-program
 without cross-unit LTO.
@@ -209,8 +245,8 @@ Browser swap waits are subtracted, and the final frame-rate sleep is excluded.
 This is CPU-side elapsed time, not a GPU timer. The display resets when the tab
 changes visibility or the program exits/aborts.
 
-The browser build boots through the intro to the title screen, where Mario and
-the `SUPER MARIO 64` text are visible. The earlier splash intentionally shows
+The PIE browser build was exercised in Chromium and reaches the title screen,
+with Mario, `PRESS START`, and the `SUPER MARIO 64` background visible. The earlier splash intentionally shows
 only the `64` logo. The title background is still visibly tiled, and gameplay
 beyond the title screen has not been verified; this is not yet a complete
 playable-browser claim. Upstream's `TARGET_WEB` build compiles source directly

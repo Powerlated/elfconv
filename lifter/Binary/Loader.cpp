@@ -182,6 +182,21 @@ void ELFObject::OpenELF() {
 
   /* get ELF header info */
   GetEhdr();
+  int fd = open(file_name.c_str(), O_RDONLY);
+  Elf *elf = fd < 0 ? nullptr : elf_begin(fd, ELF_C_READ, nullptr);
+  GElf_Ehdr header;
+  if (!elf || !gelf_getehdr(elf, &header)) elfconv_runtime_error("Invalid ELF header.\n");
+  if (header.e_machine == EM_386 && header.e_type == ET_DYN) {
+    load_bias = 0x08000000;
+    for (auto *section = bfd_h->sections; section; section = section->next) {
+      if (!(bfd_section_flags(section) & SEC_ALLOC)) continue;
+      const uint64_t end = bfd_section_vma(section) + bfd_section_size(section) + load_bias;
+      if (end > UINT32_MAX) elfconv_runtime_error("i386 PIE exceeds guest address space.\n");
+      bfd_set_section_vma(section, bfd_section_vma(section) + load_bias);
+    }
+  }
+  elf_end(elf);
+  close(fd);
 }
 
 void ELFObject::LoadELF() {
@@ -192,7 +207,7 @@ void ELFObject::LoadELFBFD() {
   // get binary handler
   OpenELF();
   // get entry point
-  entry = bfd_get_start_address(bfd_h);
+  entry = bfd_get_start_address(bfd_h) + load_bias;
   // get binary format
   bin_type_str = std::string(bfd_h->xvec->name);
   switch (bfd_h->xvec->flavour) {
@@ -310,8 +325,9 @@ void ELFObject::LoadStaticSymbolsBFD() {
     if (sym_sizes.count(sym_name) > 0) {
       sym_size = sym_sizes[sym_name];
     }
-    func_symbols.emplace_back(ELFSymbol::SYM_TYPE_FUNC, sym_name, bfd_asymbol_value(bfd_symtab[i]),
-                              GetIncludedSection(bfd_asymbol_value(bfd_symtab[i])), sym_size);
+    const uint64_t address = bfd_asymbol_value(bfd_symtab[i]) + load_bias;
+    func_symbols.emplace_back(ELFSymbol::SYM_TYPE_FUNC, sym_name, address,
+                              GetIncludedSection(address), sym_size);
   }
 }
 
@@ -359,31 +375,77 @@ void ELFObject::LoadDynamicSymbolsBFD() {
 }
 
 void ELFObject::ResolveI386Imports() {
-  for (const auto &section : sections) {
-    if (section.sec_name == ".init") i386_initializers.push_back(section.vma);
-    if (section.sec_name == ".init_array" || section.sec_name == ".fini_array") {
-      auto &functions = section.sec_name == ".init_array" ? i386_initializers : i386_finalizers;
-      if (section.size % 4) elfconv_runtime_error("Invalid i386 initializer array.\n");
-      for (size_t offset = 0; offset < section.size; offset += 4) {
-        uint32_t function;
-        memcpy(&function, section.bytes + offset, 4);
-        if (function && function != UINT32_MAX) functions.push_back(function);
-      }
-    }
-  }
-  std::reverse(i386_finalizers.begin(), i386_finalizers.end());
-  for (const auto &section : sections) {
-    if (section.sec_name == ".fini") i386_finalizers.push_back(section.vma);
-  }
   int fd = open(file_name.c_str(), O_RDONLY);
   Elf *elf = fd < 0 ? nullptr : elf_begin(fd, ELF_C_READ, nullptr);
   GElf_Ehdr header;
-  if (!elf || !gelf_getehdr(elf, &header) || header.e_type != ET_EXEC) {
-    elfconv_runtime_error("i386 conversion currently requires a non-PIE ELF executable.\n");
+  if (!elf || !gelf_getehdr(elf, &header) ||
+      (header.e_type != ET_EXEC && header.e_type != ET_DYN)) {
+    elfconv_runtime_error("i386 conversion requires an ELF executable.\n");
   }
+  if (header.e_type == ET_DYN) {
+    bool executable = false;
+    size_t count = 0;
+    if (elf_getphdrnum(elf, &count) != 0) elfconv_runtime_error("Invalid i386 program headers.\n");
+    for (size_t i = 0; i < count; ++i) {
+      GElf_Phdr phdr;
+      if (!gelf_getphdr(elf, i, &phdr)) elfconv_runtime_error("Invalid i386 program header.\n");
+      executable |= phdr.p_type == PT_INTERP;
+    }
+    if (!executable && entry_symbol.empty())
+      elfconv_runtime_error("i386 shared libraries require --entry_symbol (int(int,char**) ABI).\n");
+    if (executable && !entry_symbol.empty())
+      elfconv_runtime_error("--entry_symbol is only supported for i386 shared libraries.\n");
+  }
+  if (header.e_type != ET_DYN && !entry_symbol.empty())
+    elfconv_runtime_error("--entry_symbol requires an i386 shared library.\n");
+  // Use a fixed guest bias, keeping PIE away from the null guard and host strings.
+  uint64_t got_base = 0;
+  uint64_t imported_data_vma = 0;
+  for (const auto &section : sections) {
+    if (section.sec_name == ".got.plt") got_base = section.vma;
+    imported_data_vma = std::max(imported_data_vma, section.vma + section.size);
+  }
+  imported_data_vma = (imported_data_vma + 3) & ~uint64_t(3);
+  if (imported_data_vma > UINT32_MAX - 8) elfconv_runtime_error("No guest address space for i386 stdio imports.\n");
+  auto *stdio_bytes = static_cast<uint8_t *>(malloc(8));
+  const uint32_t stdio_handles[] = {1, 2};
+  memcpy(stdio_bytes, stdio_handles, sizeof(stdio_handles));
+  sections.emplace_back(this, ELFSection::SEC_TYPE_DATA, ".elfconv.stdio",
+                        imported_data_vma, 8, stdio_bytes);
+  bool entry_found = entry_symbol.empty();
+  Elf_Scn *dynamic_scn = nullptr;
+  while ((dynamic_scn = elf_nextscn(elf, dynamic_scn))) {
+    GElf_Shdr shdr;
+    if (!gelf_getshdr(dynamic_scn, &shdr)) continue;
+    if (!entry_symbol.empty() && shdr.sh_type == SHT_DYNSYM) {
+      Elf_Data *symbols = elf_getdata(dynamic_scn, nullptr);
+      if (!symbols || !shdr.sh_entsize) elfconv_runtime_error("Invalid i386 exports.\n");
+      for (size_t i = 0; i < shdr.sh_size / shdr.sh_entsize; ++i) {
+        GElf_Sym symbol;
+        if (!gelf_getsym(symbols, i, &symbol)) elfconv_runtime_error("Invalid i386 export.\n");
+        const char *name = elf_strptr(elf, shdr.sh_link, symbol.st_name);
+        if (name && entry_symbol == name && symbol.st_shndx != SHN_UNDEF &&
+            GELF_ST_TYPE(symbol.st_info) == STT_FUNC &&
+            GELF_ST_BIND(symbol.st_info) != STB_LOCAL) {
+          entry = symbol.st_value + load_bias;
+          entry_found = true;
+        }
+      }
+    }
+    if (shdr.sh_type != SHT_DYNAMIC) continue;
+    Elf_Data *data = elf_getdata(dynamic_scn, nullptr);
+    if (!data || !shdr.sh_entsize) elfconv_runtime_error("Invalid i386 dynamic table.\n");
+    for (size_t i = 0; i < shdr.sh_size / shdr.sh_entsize; ++i) {
+      GElf_Dyn dynamic;
+      if (!gelf_getdyn(data, i, &dynamic)) elfconv_runtime_error("Invalid i386 dynamic entry.\n");
+      if (dynamic.d_tag == DT_PLTGOT) got_base = dynamic.d_un.d_ptr + load_bias;
+    }
+  }
+  if (!entry_found) elfconv_runtime_error("Exported i386 entry not found: %s.\n", entry_symbol.c_str());
   auto patch = [&](uint64_t address, uint32_t value) {
     for (auto &section : sections) {
-      if (address >= section.vma && address - section.vma + 4 <= section.size) {
+      if (section.size >= 4 && address >= section.vma &&
+          address - section.vma <= section.size - 4) {
         memcpy(section.bytes + address - section.vma, &value, 4);
         return;
       }
@@ -412,8 +474,43 @@ void ELFObject::ResolveI386Imports() {
       if (!name) elfconv_runtime_error("Invalid i386 import name.\n");
       unsigned type = GELF_R_TYPE(rel.r_info);
       if (type == R_386_NONE) continue;
-      if (type == R_386_GLOB_DAT && GELF_ST_BIND(sym.st_info) == STB_WEAK &&
-          sym.st_shndx == SHN_UNDEF) {
+      rel.r_offset += load_bias;
+      if (type == R_386_RELATIVE) {
+        if (GELF_R_SYM(rel.r_info) != 0) elfconv_runtime_error("Invalid i386 relative relocation.\n");
+        bool mapped = false;
+        for (const auto &section : sections) {
+          if (section.size < 4 || rel.r_offset < section.vma ||
+              rel.r_offset - section.vma > section.size - 4) continue;
+          uint32_t addend;
+          memcpy(&addend, section.bytes + rel.r_offset - section.vma, 4);
+          patch(rel.r_offset, addend + load_bias);
+          mapped = true;
+          break;
+        }
+        if (!mapped) elfconv_runtime_error("Unmapped i386 relative relocation.\n");
+      } else if (type == R_386_32 && sym.st_shndx != SHN_UNDEF) {
+        bool mapped = false;
+        for (const auto &section : sections) {
+          if (section.size < 4 || rel.r_offset < section.vma ||
+              rel.r_offset - section.vma > section.size - 4) continue;
+          uint32_t addend;
+          memcpy(&addend, section.bytes + rel.r_offset - section.vma, 4);
+          patch(rel.r_offset, addend + static_cast<uint32_t>(sym.st_value) +
+                (sym.st_shndx == SHN_ABS ? 0 : load_bias));
+          mapped = true;
+          break;
+        }
+        if (!mapped) elfconv_runtime_error("Unmapped i386 symbol relocation.\n");
+      } else if ((type == R_386_GLOB_DAT || type == R_386_JMP_SLOT) &&
+                 sym.st_shndx != SHN_UNDEF) {
+        patch(rel.r_offset, static_cast<uint32_t>(sym.st_value +
+              (sym.st_shndx == SHN_ABS ? 0 : load_bias)));
+      } else if (type == R_386_GLOB_DAT &&
+                 (std::string(name) == "stdout" || std::string(name) == "stderr")) {
+        patch(rel.r_offset, static_cast<uint32_t>(imported_data_vma +
+              (std::string(name) == "stderr" ? 4 : 0)));
+      } else if (type == R_386_GLOB_DAT && GELF_ST_BIND(sym.st_info) == STB_WEAK &&
+                 sym.st_shndx == SHN_UNDEF) {
         patch(rel.r_offset, 0);
       } else if (type == R_386_COPY && sym.st_size == 4 &&
                  (std::string(name) == "stdout" || std::string(name) == "stderr")) {
@@ -427,8 +524,10 @@ void ELFObject::ResolveI386Imports() {
           for (size_t offset = 0; offset + 6 <= section.size; ++offset) {
             uint32_t got;
             memcpy(&got, section.bytes + offset + 2, 4);
-            if (section.bytes[offset] != 0xff || section.bytes[offset + 1] != 0x25 ||
-                got != rel.r_offset) continue;
+            const bool absolute = section.bytes[offset + 1] == 0x25 && got == rel.r_offset;
+            const bool relative = section.bytes[offset + 1] == 0xa3 &&
+                                  static_cast<uint32_t>(got_base + got) == rel.r_offset;
+            if (section.bytes[offset] != 0xff || (!absolute && !relative)) continue;
             if (offset >= 4 && memcmp(section.bytes + offset - 4, "\\xf3\\x0f\\x1e\\xfb", 4) == 0)
               offset -= 4;
             entry = section.vma + offset;
@@ -444,6 +543,35 @@ void ELFObject::ResolveI386Imports() {
       } else {
         elfconv_runtime_error("Unsupported i386 relocation %u for %s.\n", type, name);
       }
+    }
+  }
+  for (const auto &section : sections) {
+    if (section.sec_name == ".init") i386_initializers.push_back(section.vma);
+    if (section.sec_name == ".init_array" || section.sec_name == ".fini_array") {
+      auto &functions = section.sec_name == ".init_array" ? i386_initializers : i386_finalizers;
+      if (section.size % 4) elfconv_runtime_error("Invalid i386 initializer array.\n");
+      for (size_t offset = 0; offset < section.size; offset += 4) {
+        uint32_t function;
+        memcpy(&function, section.bytes + offset, 4);
+        if (function && function != UINT32_MAX) functions.push_back(function);
+      }
+    }
+  }
+  std::reverse(i386_finalizers.begin(), i386_finalizers.end());
+  for (const auto &section : sections) {
+    if (section.sec_name == ".fini") i386_finalizers.push_back(section.vma);
+  }
+  // Declare both local-symbol PLT stubs and non-lazy GOT stubs for unit ownership.
+  for (const auto &section : sections) {
+    const bool got_plt = section.sec_name == ".plt.got";
+    if (!got_plt && section.sec_name != ".plt" && section.sec_name != ".plt.sec") continue;
+    const size_t stride = got_plt ? 8 : 16;
+    const size_t first = section.sec_name == ".plt" ? 16 : 0;
+    for (size_t offset = first; offset + stride <= section.size; offset += stride) {
+      const auto address = section.vma + offset;
+      if (i386_imports.count(address)) continue;
+      func_symbols.emplace_back(ELFSymbol::SYM_TYPE_FUNC, "local_plt", address,
+                                GetIncludedSection(address), stride);
     }
   }
   std::sort(func_symbols.begin(), func_symbols.end(),
@@ -595,6 +723,7 @@ int ELFObject::ParseEhFrame(Dwarf_Debug dbg) {
 
     // Make all func symbols.
     GetFuncFromEhFrame(&ehf_fun_entry, &ehf_fun_size, dbg, fde_data[fdenum]);
+    ehf_fun_entry += load_bias;
     std::stringstream ehf_fun_name;
     ehf_fun_name << "_ecv_lifted_fun_0x" << std::hex << ehf_fun_entry;
     func_symbols_map.insert({ehf_fun_entry,
