@@ -93,7 +93,80 @@ DEF_SEM(DAA) {
 
 }
 
+DEF_SEM(DAS) {
+  auto old_al = Read(REG_AL);
+  auto old_cf = Read(FLAG_CF);
+  auto al = old_al;
+  FLAG_CF = false;
+  if (UCmpGt(UAnd8(al, 0xf), 9) || FLAG_AF) {
+    al = USub8(al, 6);
+    FLAG_CF = BOr(old_cf, UCmpLt(old_al, 6));
+    FLAG_AF = true;
+  } else {
+    FLAG_AF = false;
+  }
+  if (UCmpGt(old_al, 0x99) || old_cf) {
+    al = USub8(al, 0x60);
+    FLAG_CF = true;
+  }
+  Write(REG_AL, al);
+  FLAG_SF = SignFlag(al);
+  FLAG_ZF = ZeroFlag(al);
+  FLAG_PF = ParityFlag(al);
+  FLAG_OF = __remill_undefined_8();
+}
+
+DEF_SEM(AAA) {
+  if (UCmpGt(UAnd8(REG_AL, 0xf), 9) || FLAG_AF) {
+    Write(REG_AX, UAdd16(REG_AX, 0x106));
+    FLAG_AF = true;
+    FLAG_CF = true;
+  } else {
+    FLAG_AF = false;
+    FLAG_CF = false;
+  }
+  Write(REG_AL, UAnd8(REG_AL, 0xf));
+  FLAG_OF = __remill_undefined_8();
+  FLAG_SF = __remill_undefined_8();
+  FLAG_ZF = __remill_undefined_8();
+  FLAG_PF = __remill_undefined_8();
+}
+
+DEF_SEM(AAM, I8 radix, PC next_pc) {
+  auto base = Read(radix);
+  WriteZExt(REG_PC, Read(next_pc));
+  if (IsZero(base)) {
+    StopFailure();
+  } else {
+    auto al = Read(REG_AL);
+    Write(REG_AH, UDiv8(al, base));
+    Write(REG_AL, URem8(al, base));
+    FLAG_SF = SignFlag(REG_AL);
+    FLAG_ZF = ZeroFlag(REG_AL);
+    FLAG_PF = ParityFlag(REG_AL);
+    FLAG_OF = __remill_undefined_8();
+    FLAG_AF = __remill_undefined_8();
+    FLAG_CF = __remill_undefined_8();
+  }
+}
+
+DEF_SEM(AAD, I8 radix) {
+  auto al = UAdd8(REG_AL, UMul8(REG_AH, Read(radix)));
+  Write(REG_AL, al);
+  Write(REG_AH, 0_u8);
+  FLAG_SF = SignFlag(al);
+  FLAG_ZF = ZeroFlag(al);
+  FLAG_PF = ParityFlag(al);
+  FLAG_OF = __remill_undefined_8();
+  FLAG_AF = __remill_undefined_8();
+  FLAG_CF = __remill_undefined_8();
+}
+
 }  // namespace
 
 IF_32BIT(DEF_ISEL(AAS) = AAS;)
 IF_32BIT(DEF_ISEL(DAA) = DAA;)
+IF_32BIT(DEF_ISEL(DAS) = DAS;)
+IF_32BIT(DEF_ISEL(AAA) = AAA;)
+IF_32BIT(DEF_ISEL(AAM_IMMb) = AAM;)
+IF_32BIT(DEF_ISEL(AAD_IMMb) = AAD;)

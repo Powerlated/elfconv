@@ -13,11 +13,22 @@
 <button id="fullscreen">Fullscreen</button>
 <canvas id="canvas" width="640" height="480" tabindex="0"></canvas>
 <p id="status">Ready. Start enables browser audio.</p>
+<p id="frametime" title="Frame work from input processing through rendering and audio, excluding frame-pacing waits; not a GPU timer">Frame work: — ms</p>
 <pre id="output"></pre>
 <script>
+  function resetFrameTiming() {
+    document.getElementById('frametime').textContent = 'Frame work: — ms';
+  }
+  document.addEventListener('visibilitychange', resetFrameTiming);
   var Module = {
     canvas: document.getElementById('canvas'),
     arguments: new URLSearchParams(location.search).getAll('arg'),
+    onFrame: function (milliseconds) {
+      if (!document.hidden) {
+        document.getElementById('frametime').textContent =
+            'Frame work: ' + milliseconds.toFixed(2) + ' ms';
+      }
+    },
     print: function (line) { document.getElementById('output').textContent += line + '\n'; },
     printErr: function (line) { document.getElementById('output').textContent += line + '\n'; },
     onRuntimeInitialized: function () {
@@ -25,10 +36,12 @@
       Module.canvas.focus();
     },
     onExit: function (code) {
+      resetFrameTiming();
       document.getElementById('status').textContent = 'Exited with status ' + code;
       document.body.dataset.exitCode = String(code);
     },
     onAbort: function (reason) {
+      resetFrameTiming();
       document.getElementById('status').textContent = 'Aborted: ' + reason;
       document.body.dataset.abort = String(reason);
     }

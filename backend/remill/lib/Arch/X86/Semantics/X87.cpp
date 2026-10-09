@@ -115,12 +115,13 @@ template <typename T>
 DEF_FPU_SEM(FLD, RF80W, T src1) {
   SetFPUIpOp();
   auto val = Read(src1);
-  state.sw.ie |= IsSignalingNaN(val);
+  const auto is_snan = IsSignalingNaN(val);
+  state.sw.ie |= is_snan;
   state.sw.de |= IsDenormal(val);
   auto res = Float80(val);
 
   // Quietize if signaling NaN.
-  if (state.sw.ie) {
+  if (is_snan) {
 
     static_assert(sizeof(native_float80_t) == sizeof(nan64_t), "Float/NaN size mismatch");
     nan64_t res_nan = {static_cast<native_float80_t>(res)};
@@ -719,41 +720,47 @@ DEF_FPU_SEM(FSTPmem, T dst, RF80W src) {
   FSTP(rt_m, state, dst, src, pc, fop);
 }
 
-template <typename C1, typename C2>
-DEF_HELPER(ConvertToInt, C1 cast, C2 convert, native_float80_t input)->decltype(cast(input)) {
-  auto rounded = FRoundUsingMode80(input);
-  auto casted = CheckedFloatUnaryOp(state, cast, rounded);
-  auto converted = convert(rounded);
-  auto back = static_cast<native_float80_t>(converted);
-
-  if (!state.sw.ie && !state.sw.pe) {
-    if (converted != casted || IsInfinite(input) || IsNaN(input)) {
-      state.sw.ie = 1;
-      state.sw.pe = 0;
-    } else {
-      if (back != rounded) {
-        state.sw.ie = static_cast<uint8_t>(FAbs80(back) < FAbs80(input));
-        state.sw.pe = 1 - state.sw.ie;
-      } else {
-        state.sw.pe = static_cast<uint8_t>(rounded != input);
-        state.sw.ie = 0;
+// Wasm has no host rounding-mode register. Guest x87 rounding belongs to State.
+ALWAYS_INLINE static native_float80_t RoundX87(State &state, native_float80_t value) {
+  switch (state.x87.fxsave.cwd.rc) {
+    case kFPURoundDownNegInf: return __builtin_floor(value);
+    case kFPURoundUpInf: return __builtin_ceil(value);
+    case kFPURoundToZero: return __builtin_trunc(value);
+    default: {
+      const auto magnitude = __builtin_fabs(value);
+      if (!(magnitude < 4503599627370496.0)) return value;
+      auto integral = __builtin_floor(magnitude);
+      const auto fraction = magnitude - integral;
+      if (fraction > 0.5 ||
+          (fraction == 0.5 && __builtin_fmod(integral, 2.0) != 0.0)) {
+        integral += 1.0;
       }
+      return __builtin_copysign(integral, value);
     }
   }
+}
 
+template <typename C>
+DEF_HELPER(ConvertToInt, C convert, native_float80_t input)->decltype(convert(input)) {
+  auto rounded = RoundX87(state, input);
+  auto converted = convert(rounded);
+  auto back = static_cast<native_float80_t>(converted);
+  const bool invalid = IsNaN(input) || IsInfinite(input) || back != rounded;
+  state.sw.ie |= static_cast<uint8_t>(invalid);
+  if (!invalid) state.sw.pe |= static_cast<uint8_t>(rounded != input);
   return converted;
 }
 
 DEF_FPU_SEM(FISTm16, M16W dst, RF80W src) {
   SetFPUIpOp();
   SetFPUDp(dst);
-  auto res = ConvertToInt(rt_m, state, Int16<float80_t>, Float80ToInt16, Read(src));
+  auto res = ConvertToInt(rt_m, state, Float80ToInt16, Read(src));
   Write(dst, Unsigned(res));
 }
 
 DEF_FPU_SEM(FISTm32, M32W dst, RF80W src) {
   SetFPUIpOp();
-  auto res = ConvertToInt(rt_m, state, Int32<float80_t>, Float80ToInt32, Read(src));
+  auto res = ConvertToInt(rt_m, state, Float80ToInt32, Read(src));
   Write(dst, Unsigned(res));
 }
 
@@ -770,7 +777,7 @@ DEF_FPU_SEM(FISTPm32, M32W dst, RF80W src) {
 DEF_FPU_SEM(FISTPm64, M64W dst, RF80W src) {
   SetFPUIpOp();
   SetFPUDp(dst);
-  auto res = ConvertToInt(rt_m, state, Int64<float80_t>, Float80ToInt64, Read(src));
+  auto res = ConvertToInt(rt_m, state, Float80ToInt64, Read(src));
   Write(dst, Unsigned(res));
   (void) POP_X87_STACK();
 }
@@ -1208,34 +1215,14 @@ DEF_SEM(FNSTSW, D dst) {
 }
 
 DEF_SEM(FNSTCW, M16W dst) {
-  auto &cw = state.x87.fxsave.cwd;
-  cw.pc = kPrecisionSingle;
-
-  switch (fegetround()) {
-    default:
-    case FE_TONEAREST: cw.rc = kFPURoundToNearestEven; break;
-    case FE_DOWNWARD: cw.rc = kFPURoundDownNegInf; break;
-    case FE_UPWARD: cw.rc = kFPURoundUpInf; break;
-    case FE_TOWARDZERO: cw.rc = kFPURoundToZero; break;
-  }
+  const auto &cw = state.x87.fxsave.cwd;
   Write(dst, cw.flat);
 }
 
 DEF_SEM(FLDCW, M16 cwd) {
   auto &cw = state.x87.fxsave.cwd;
   cw.flat = Read(cwd);
-  cw.pc = kPrecisionSingle;
-  int rounding_mode = FE_TONEAREST;
-  switch (cw.rc) {
-    case kFPURoundToNearestEven: rounding_mode = FE_TONEAREST; break;
-
-    case kFPURoundDownNegInf: rounding_mode = FE_DOWNWARD; break;
-
-    case kFPURoundUpInf: rounding_mode = FE_UPWARD; break;
-
-    case kFPURoundToZero: rounding_mode = FE_TOWARDZERO; break;
-  }
-  fesetround(rounding_mode);
+  // Preserve the guest control word; conversion instructions consult it directly.
 }
 
 }  // namespace
@@ -1250,7 +1237,7 @@ namespace {
 DEF_FPU_SEM(DoFRNDINT) {
   SetFPUIpOp();
   auto st0 = Read(X87_ST0);
-  auto rounded = FRoundUsingMode(st0);
+  auto rounded = Float80(RoundX87(state, st0));
   state.sw.ie |= IsSignalingNaN(st0);
   state.sw.de |= IsDenormal(st0);
   if (!IsNaN(rounded)) {

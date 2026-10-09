@@ -294,6 +294,16 @@ DEF_SEM(LZCNT, D dst, S src) {
   WriteZExt(dst, Select(FLAG_CF, BitSizeOf(src), count));
 }
 
+template <typename D, typename S>
+DEF_SEM(POPCNT, D dst, S src) {
+  auto val = Read(src);
+  auto count = static_cast<decltype(val)>(
+      __builtin_popcountll(static_cast<uint64_t>(val)));
+  ClearArithFlags();
+  Write(FLAG_ZF, ZeroFlag(val));
+  WriteZExt(dst, count);
+}
+
 }  // namespace
 
 DEF_ISEL(BSWAP_GPRv_16) = BSWAP_16;
@@ -305,6 +315,9 @@ DEF_ISEL_RnW_Rn(TZCNT_GPRv_GPRv, TZCNT);
 
 DEF_ISEL_RnW_Mn(LZCNT_GPRv_MEMv, LZCNT);
 DEF_ISEL_RnW_Rn(LZCNT_GPRv_GPRv, LZCNT);
+
+DEF_ISEL_RnW_Mn(POPCNT_GPRv_MEMv, POPCNT);
+DEF_ISEL_RnW_Rn(POPCNT_GPRv_GPRv, POPCNT);
 
 namespace {
 template <typename D, typename S>

@@ -306,7 +306,7 @@ set(debug_flags)
 if(ELFCONV_WASM_OPT_LEVEL STREQUAL "0")
   set(debug_flags -g2)
 endif()
-set(link_material "${metadata_compile_key}|${registry_compile_key}|${unit_compile_keys}|${runtime_compile_keys}|${runtime_definitions_text}|${ELFCONV_WASM_OPT_LEVEL}|${ELFCONV_WASM_JSPI}|${ELFCONV_LEGACY_GL}|${ELFCONV_FLOAT_EXCEPTION}|${ELFCONV_DEBUG}")
+set(link_material "${metadata_compile_key}|${registry_compile_key}|${unit_compile_keys}|${runtime_compile_keys}|${runtime_definitions_text}|${ELFCONV_WASM_OPT_LEVEL}|${ELFCONV_WASM_JSPI}|${ELFCONV_LEGACY_GL}|webgl=2|${ELFCONV_FLOAT_EXCEPTION}|${ELFCONV_DEBUG}")
 file(SHA256 "${ELFCONV_ROOT}/browser/i386.html.in" html_template_hash)
 string(APPEND link_material "|${html_template_hash}|${pipeline_key}")
 string(SHA256 link_key "${link_material}")
@@ -321,6 +321,7 @@ if(NOT previous_link_key STREQUAL link_key OR NOT EXISTS "${output_js}" OR NOT E
     "-O${ELFCONV_WASM_OPT_LEVEL}" ${debug_flags} ${ELFCONV_RUNTIME_INCLUDE_FLAGS}
     -std=c++17 ${ELFCONV_RUNTIME_DEFINITIONS} -DELF_IS_I386 -DADDRESS_SIZE_BITS=32
     -sUSE_SDL=2 "-sLEGACY_GL_EMULATION=${ELFCONV_LEGACY_GL}"
+    -sMIN_WEBGL_VERSION=2 -sMAX_WEBGL_VERSION=2
     "-DECV_LEGACY_GL=${ELFCONV_LEGACY_GL}" -DELFCONV_INCREMENTAL_UNITS=1
     ${suspension_flags} -sALLOW_MEMORY_GROWTH=1 -sINITIAL_MEMORY=335544320
     -sSTACK_SIZE=1048576 -sEXIT_RUNTIME=1

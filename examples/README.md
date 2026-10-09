@@ -197,6 +197,18 @@ uses linker-resolved code, not raw relocatable `.o` files. VMA/layout changes
 can invalidate additional units, and the final Wasm link remains whole-program
 without cross-unit LTO.
 
+Lifted i386 browser builds require WebGL2 (`MIN_WEBGL_VERSION=2` and
+`MAX_WEBGL_VERSION=2`), including both incremental and whole-program conversion.
+SM64EX uses Emscripten's SDL2/OpenGL bridge with legacy GL emulation disabled;
+the browser build does not fall back to WebGL1. Native rendering is unchanged.
+
+The generated HTML displays the latest frame's work time in milliseconds, not
+FPS or the interval between frames. For SM64, timing starts at the first input
+event poll and ends at the pacing-timer sample after rendering and audio.
+Browser swap waits are subtracted, and the final frame-rate sleep is excluded.
+This is CPU-side elapsed time, not a GPU timer. The display resets when the tab
+changes visibility or the program exits/aborts.
+
 The browser build boots through the intro to the title screen, where Mario and
 the `SUPER MARIO 64` text are visible. The earlier splash intentionally shows
 only the `64` logo. The title background is still visibly tiled, and gameplay

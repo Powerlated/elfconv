@@ -29,7 +29,8 @@ DEF_SEM(SHR, D dst, S1 src1, S2 src2) {
   auto masked_shift = UAnd(shift, shift_mask);
   if (UCmpEq(masked_shift, 0)) {
     WriteZExt(dst, val);
-    // No flags affected.
+    // No flags are affected by a zero count.
+    return;
   }
   auto new_val = val;
   auto new_of = false;
@@ -73,7 +74,8 @@ DEF_SEM(SAR, D dst, S1 src1, S2 src2) {
   auto masked_shift = UAnd(shift, shift_mask);
   if (UCmpEq(masked_shift, 0)) {
     WriteZExt(dst, uval);
-    // No flags affected.
+    // No flags are affected by a zero count.
+    return;
   }
   auto new_val = uval;
   auto new_of = false;
@@ -92,7 +94,8 @@ DEF_SEM(SAR, D dst, S1 src1, S2 src2) {
 
   } else {
     new_of = BUndefined();
-    new_cf = BUndefined();
+    // Once the sign bit has shifted out, every further SAR bit is the sign.
+    new_cf = SignFlag(val);
     if (SignFlag(val)) {
       new_val = Maximize(uval);
     } else {
@@ -122,7 +125,8 @@ DEF_SEM(SHL, D dst, S1 src1, S2 src2) {
 
   if (UCmpEq(masked_shift, 0)) {
     WriteZExt(dst, val);
-    // No flags affected.
+    // No flags are affected by a zero count.
+    return;
   }
 
   auto new_val = val;
@@ -234,33 +238,35 @@ DEF_SEM(SHRD, D dst, S1 src1, S2 src2, S3 src3) {
 
   if (UCmpEq(masked_shift, 0)) {
     WriteZExt(dst, val1);
+    // No flags affected.
+  } else if (UCmpEq(masked_shift, op_size)) {
+    // Avoid a host/lifted shift by the operand width.
+    WriteZExt(dst, val2);
+    Write(FLAG_CF, SHRDCarryFlag(val1, masked_shift));
+    Write(FLAG_PF, ParityFlag(val2));
+    Write(FLAG_AF, BUndefined());
+    Write(FLAG_ZF, ZeroFlag(val2));
+    Write(FLAG_SF, SignFlag(val2));
+    Write(FLAG_OF, BUndefined());
+  } else if (UCmpLt(masked_shift, op_size)) {
+    auto left = UShl(val2, USub(op_size, masked_shift));
+    auto right = UShr(val1, masked_shift);
+    auto res = UOr(left, right);
 
-
-  } else if (UCmpLt(op_size, masked_shift)) {
-    ClearArithFlags();
-
-    // `dst` is undefined; leave as-is, except w.r.t. zero-
-    // extension.
-    //
-    // TODO(pag): Update `dst` anyway because it may be readable but not
-    //            writable?
-    WriteZExt(dst, val1);
+    WriteZExt(dst, res);
+    Write(FLAG_CF, SHRDCarryFlag(val1, masked_shift));
+    Write(FLAG_PF, ParityFlag(res));
+    Write(FLAG_AF, BUndefined());
+    Write(FLAG_ZF, ZeroFlag(res));
+    Write(FLAG_SF, SignFlag(res));
+    if (UCmpEq(masked_shift, 1)) {
+      Write(FLAG_OF, BXor(SignFlag(val1), SignFlag(res)));
+    } else {
+      Write(FLAG_OF, BUndefined());
+    }
+  } else {
+    // Counts above the operand size have architecturally undefined results.
   }
-
-  auto left = UShl(val2, USub(op_size, masked_shift));
-  auto right = UShr(val1, masked_shift);
-  auto res = UOr(left, right);
-
-  WriteZExt(dst, res);
-
-  Write(FLAG_CF, SHRDCarryFlag(val1, masked_shift));
-  Write(FLAG_PF, ParityFlag(res));
-  Write(FLAG_AF, BUndefined());
-  Write(FLAG_ZF, ZeroFlag(res));
-  Write(FLAG_SF, SignFlag(res));
-  Write(FLAG_OF, BXor(SignFlag(val1), FLAG_SF));
-
-  // OF undefined for `1 == temp_count`.
 }
 
 }  // namespace
@@ -272,9 +278,9 @@ DEF_ISEL_RnW_Rn_Rn_Rn(SHRD_GPRv_GPRv_CL, SHRD);
 
 namespace {
 
-template <typename T>
-ALWAYS_INLINE static uint8_t SHLDCarryFlag(T val, T count) {
-  return UCmpEq(UAnd(UShr(val, USub(BitSizeOf(count), count)), 1), 1);
+template <typename T, typename C, typename O>
+ALWAYS_INLINE static uint8_t SHLDCarryFlag(T val, C count, O op_size) {
+  return UCmpEq(UAnd(UShr(val, USub(op_size, count)), 1), 1);
 }
 
 template <typename D, typename S1, typename S2, typename S3>
@@ -291,33 +297,35 @@ DEF_SEM(SHLD, D dst, S1 src1, S2 src2, S3 src3) {
 
   if (UCmpEq(masked_shift, 0)) {
     WriteZExt(dst, val1);
+    // No flags affected.
+  } else if (UCmpEq(masked_shift, op_size)) {
+    // Avoid a host/lifted shift by the operand width.
+    WriteZExt(dst, val2);
+    Write(FLAG_CF, SHLDCarryFlag(val1, masked_shift, op_size));
+    Write(FLAG_PF, ParityFlag(val2));
+    Write(FLAG_AF, BUndefined());
+    Write(FLAG_ZF, ZeroFlag(val2));
+    Write(FLAG_SF, SignFlag(val2));
+    Write(FLAG_OF, BUndefined());
+  } else if (UCmpLt(masked_shift, op_size)) {
+    auto left = UShl(val1, masked_shift);
+    auto right = UShr(val2, USub(op_size, masked_shift));
+    auto res = UOr(left, right);
 
-
-  } else if (UCmpLt(op_size, masked_shift)) {
-    ClearArithFlags();
-
-    // `dst` is undefined; leave as-is, except w.r.t
-    // zero-extension.
-    //
-    // TODO(pag): Update `dst` anyway because it may be readable but not
-    //            writable?
-    WriteZExt(dst, val1);
+    WriteZExt(dst, res);
+    Write(FLAG_CF, SHLDCarryFlag(val1, masked_shift, op_size));
+    Write(FLAG_PF, ParityFlag(res));
+    Write(FLAG_AF, BUndefined());
+    Write(FLAG_ZF, ZeroFlag(res));
+    Write(FLAG_SF, SignFlag(res));
+    if (UCmpEq(masked_shift, 1)) {
+      Write(FLAG_OF, BXor(SignFlag(val1), SignFlag(res)));
+    } else {
+      Write(FLAG_OF, BUndefined());
+    }
+  } else {
+    // Counts above the operand size have architecturally undefined results.
   }
-
-  auto left = UShl(val1, masked_shift);
-  auto right = UShr(val2, USub(op_size, masked_shift));
-  auto res = UOr(left, right);
-
-  WriteZExt(dst, res);
-
-  Write(FLAG_CF, SHLDCarryFlag(val1, masked_shift));
-  Write(FLAG_PF, ParityFlag(res));
-  Write(FLAG_AF, BUndefined());
-  Write(FLAG_ZF, ZeroFlag(res));
-  Write(FLAG_SF, SignFlag(res));
-  Write(FLAG_OF, BXor(SignFlag(val1), FLAG_SF));
-
-  // OF undefined for `1 == temp_count`.
 }
 
 }  // namespace
@@ -326,7 +334,6 @@ DEF_ISEL_MnW_Mn_Rn_In(SHLD_MEMv_GPRv_IMMb, SHLD);
 DEF_ISEL_RnW_Rn_Rn_In(SHLD_GPRv_GPRv_IMMb, SHLD);
 DEF_ISEL_MnW_Mn_Rn_Rn(SHLD_MEMv_GPRv_CL, SHLD);
 DEF_ISEL_RnW_Rn_Rn_Rn(SHLD_GPRv_GPRv_CL, SHLD);
-
 namespace {
 
 template <typename D>

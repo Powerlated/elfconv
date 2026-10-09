@@ -157,6 +157,7 @@ static bool UsesStopFailure(const xed_decoded_inst_t *xedd) {
   switch (xed_decoded_inst_get_iclass(xedd)) {
     case XED_ICLASS_DIV:
     case XED_ICLASS_IDIV:
+    case XED_ICLASS_AAM:
     case XED_ICLASS_XEND:
     case XED_ICLASS_XGETBV: return true;
     default: return false;
@@ -336,6 +337,16 @@ static std::string InstructionFunctionName(const xed_decoded_inst_t *xedd) {
     ss << xed_decoded_inst_get_operand_width(xedd);
   }
 
+  switch (xed_decoded_inst_get_iclass(xedd)) {
+    case XED_ICLASS_LOOP:
+    case XED_ICLASS_LOOPE:
+    case XED_ICLASS_LOOPNE:
+      ss << "_" << xed_operand_values_get_effective_address_width(
+          xed_decoded_inst_operands_const(xedd));
+      break;
+    default: break;
+  }
+
   // Suffix the ISEL function name with the segment or control register names,
   // as a runtime may need to perform complex actions that are specific to
   // the register used.
@@ -355,6 +366,9 @@ static bool DecodeXED(xed_decoded_inst_t *xedd, const xed_state_t *mode,
   auto bytes = reinterpret_cast<const uint8_t *>(inst_bytes.data());
   xed_decoded_inst_zero_set_mode(xedd, mode);
   xed_decoded_inst_set_input_chip(xedd, XED_CHIP_INVALID);
+  // Decode count extensions rather than their legacy BSF/BSR aliases.
+  xed3_operand_set_tzcnt(xedd, 1);
+  xed3_operand_set_lzcnt(xedd, 1);
   auto err = xed_decode(xedd, bytes, static_cast<uint32_t>(num_bytes));
 
   if (XED_ERROR_NONE != err) {

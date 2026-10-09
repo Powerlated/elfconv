@@ -3,6 +3,7 @@
 #include "remill/Arch/Runtime/Math.h"
 
 #include <cstring>
+#include <cfenv>
 #if defined(ELF_IS_AARCH64)
 #  include "remill/Arch/Runtime/Types.h"
 #else
@@ -618,7 +619,9 @@ void __remill_atomic_end(RuntimeManager *rt_m) {}
 void __remill_aarch64_emulate_instruction(RuntimeManager *rt_m) {}
 
 int __remill_fpu_exception_test_and_clear(int read_mask, int clear_mask) {
-  return clear_mask;
+  const int exceptions = std::fetestexcept(read_mask);
+  std::feclearexcept(clear_mask);
+  return exceptions;
 }
 
 // Memory *__remill_read_memory_f80(Memory *, addr_t, native_float80_t &) {
@@ -673,21 +676,36 @@ Memory *__remill_delay_slot_end(Memory *) {
   UNDEFINED_INTRINSICS("__remill_delay_slot_end");
   return 0;
 }
-void __remill_compare_exchange_memory_8(RuntimeManager *, addr_t addr, uint8_t &expected,
+namespace {
+template <typename T>
+void CompareExchangeMemory(RuntimeManager *rt_m, addr_t addr, T &expected, T desired) {
+  // Guest execution is single-threaded, like atomic_begin/end above. memcpy
+  // supports x86's unaligned operands without host alignment/aliasing UB.
+  auto *memory = TranslateVMA(rt_m, rt_m->main_memory_arena->bytes, addr);
+  T observed;
+  std::memcpy(&observed, memory, sizeof(observed));
+  if (observed == expected) {
+    std::memcpy(memory, &desired, sizeof(desired));
+  }
+  expected = observed;
+}
+}  // namespace
+
+void __remill_compare_exchange_memory_8(RuntimeManager *rt_m, addr_t addr, uint8_t &expected,
                                         uint8_t desired) {
-  UNDEFINED_INTRINSICS("__remill_compare_exchange_memory_8");
+  CompareExchangeMemory(rt_m, addr, expected, desired);
 }
-void __remill_compare_exchange_memory_16(RuntimeManager *, addr_t addr, uint16_t &expected,
+void __remill_compare_exchange_memory_16(RuntimeManager *rt_m, addr_t addr, uint16_t &expected,
                                          uint16_t desired) {
-  UNDEFINED_INTRINSICS("__remill_compare_exchange_memory_16");
+  CompareExchangeMemory(rt_m, addr, expected, desired);
 }
-void __remill_compare_exchange_memory_32(RuntimeManager *, addr_t addr, uint32_t &expected,
+void __remill_compare_exchange_memory_32(RuntimeManager *rt_m, addr_t addr, uint32_t &expected,
                                          uint32_t desired) {
-  UNDEFINED_INTRINSICS("__remill_compare_exchange_memory_32");
+  CompareExchangeMemory(rt_m, addr, expected, desired);
 }
-void __remill_compare_exchange_memory_64(RuntimeManager *, addr_t addr, uint64_t &expected,
+void __remill_compare_exchange_memory_64(RuntimeManager *rt_m, addr_t addr, uint64_t &expected,
                                          uint64_t desired) {
-  UNDEFINED_INTRINSICS("__remill_compare_exchange_memory_64");
+  CompareExchangeMemory(rt_m, addr, expected, desired);
 }
 #if !defined(REMILL_DISABLE_INT128)
 void __remill_compare_exchange_memory_128(RuntimeManager *, addr_t addr, uint128_t &expected,

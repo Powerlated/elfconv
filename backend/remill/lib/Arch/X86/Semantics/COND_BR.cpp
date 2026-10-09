@@ -286,33 +286,30 @@ DEF_SEM(JRCXZ, R8W cond, PC taken, PC not_taken, IF_32BIT_ELSE(R32W, R64W) pc_ds
 }
 #endif  // 64 == ADDRESS_SIZE_BITS
 
+template <unsigned kAddressBits, unsigned kCondition>
 DEF_SEM(LOOP, R8W cond, PC taken, PC not_taken, IF_32BIT_ELSE(R32W, R64W) pc_dst) {
   addr_t taken_pc = Read(taken);
   addr_t not_taken_pc = Read(not_taken);
-  addr_t count = USub(REG_XCX, addr_t(1));
+  addr_t count;
+  if constexpr (kAddressBits == 16) {
+    auto value = USub(REG_CX, uint16_t(1));
+    Write(REG_CX, value);
+    count = value;
+  } else if constexpr (kAddressBits == 32) {
+    auto value = USub(REG_ECX, uint32_t(1));
+    REG_XCX = value;
+    count = value;
+  } else {
+    count = USub(REG_XCX, addr_t(1));
+    Write(REG_XCX, count);
+  }
   auto take_branch = UCmpNeq(count, addr_t(0));
+  if constexpr (kCondition == 1) {
+    take_branch = BAnd(take_branch, FLAG_ZF);
+  } else if constexpr (kCondition == 2) {
+    take_branch = BAnd(take_branch, BNot(FLAG_ZF));
+  }
   Write(cond, take_branch);
-  Write(REG_XCX, count);
-  Write(pc_dst, Select<addr_t>(take_branch, taken_pc, not_taken_pc));
-}
-
-DEF_SEM(LOOPE, R8W cond, PC taken, PC not_taken, IF_32BIT_ELSE(R32W, R64W) pc_dst) {
-  addr_t taken_pc = Read(taken);
-  addr_t not_taken_pc = Read(not_taken);
-  addr_t count = USub(REG_XCX, addr_t(1));
-  auto take_branch = BAnd(UCmpNeq(count, addr_t(0)), FLAG_ZF);
-  Write(cond, take_branch);
-  Write(REG_XCX, count);
-  Write(pc_dst, Select<addr_t>(take_branch, taken_pc, not_taken_pc));
-}
-
-DEF_SEM(LOOPNE, R8W cond, PC taken, PC not_taken, IF_32BIT_ELSE(R32W, R64W) pc_dst) {
-  addr_t taken_pc = Read(taken);
-  addr_t not_taken_pc = Read(not_taken);
-  addr_t count = USub(REG_XCX, addr_t(1));
-  auto take_branch = BAnd(UCmpNeq(count, addr_t(0)), BNot(FLAG_ZF));
-  Write(cond, take_branch);
-  Write(REG_XCX, count);
   Write(pc_dst, Select<addr_t>(take_branch, taken_pc, not_taken_pc));
 }
 
@@ -322,6 +319,12 @@ DEF_ISEL(JCXZ_RELBRb) = JCXZ;
 DEF_ISEL(JECXZ_RELBRb) = JECXZ;
 IF_64BIT(DEF_ISEL(JRCXZ_RELBRb) = JRCXZ;)
 
-DEF_ISEL(LOOP_RELBRb) = LOOP;
-DEF_ISEL(LOOPE_RELBRb) = LOOPE;
-DEF_ISEL(LOOPNE_RELBRb) = LOOPNE;
+DEF_ISEL(LOOP_RELBRb_16) = LOOP<16, 0>;
+DEF_ISEL(LOOP_RELBRb_32) = LOOP<32, 0>;
+IF_64BIT(DEF_ISEL(LOOP_RELBRb_64) = LOOP<64, 0>;)
+DEF_ISEL(LOOPE_RELBRb_16) = LOOP<16, 1>;
+DEF_ISEL(LOOPE_RELBRb_32) = LOOP<32, 1>;
+IF_64BIT(DEF_ISEL(LOOPE_RELBRb_64) = LOOP<64, 1>;)
+DEF_ISEL(LOOPNE_RELBRb_16) = LOOP<16, 2>;
+DEF_ISEL(LOOPNE_RELBRb_32) = LOOP<32, 2>;
+IF_64BIT(DEF_ISEL(LOOPNE_RELBRb_64) = LOOP<64, 2>;)

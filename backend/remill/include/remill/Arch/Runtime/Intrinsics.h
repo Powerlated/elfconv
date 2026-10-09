@@ -257,7 +257,7 @@ extern "C" {
 //      auto flags = __remill_fpu_exception_test_and_clear(FE_ALL_EXCEPT, 0);
 //
 // These flags are also subject to optimizations
-[[gnu::used, gnu::const]] extern int __remill_fpu_exception_test_and_clear(int read_mask,
+[[gnu::used]] extern int __remill_fpu_exception_test_and_clear(int read_mask,
                                                                            int clear_mask);
 
 // Read/write to I/O ports.

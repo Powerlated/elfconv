@@ -91,7 +91,10 @@ struct float80_t final {
     if (exponent == 0x7fff) {
       uint64_t bits = (uint64_t(sign_exp & 0x8000) << 48) | 0x7ff0000000000000ULL;
       uint64_t payload = significand & 0x7fffffffffffffffULL;
-      if (payload) bits |= (payload >> 11) | 1;
+      if (payload) {
+        uint64_t narrowed = payload >> 11;
+        bits |= narrowed ? narrowed : 1;
+      }
       double value;
       memcpy_impl(&value, &bits, sizeof(value));
       return value;
@@ -272,3 +275,150 @@ using namespace remill_std;
 }  // namespace std
 
 #endif  // `__has_include(<cmath>)`
+namespace remill_fp {
+
+// The x86 guest controls rounding independently of the host's floating-point
+// environment. These helpers adjust a default round-to-nearest result to the
+// requested IEEE-754 direction.
+ALWAYS_INLINE static float32_t Round32(float32_t nearest, int exact_cmp,
+                                       unsigned mode) {
+  if (!mode || !exact_cmp) {
+    return nearest;
+  }
+  if (__builtin_isinf(nearest)) {
+    if ((mode == 1 && !__builtin_signbit(nearest)) ||
+        (mode == 2 && __builtin_signbit(nearest)) || mode == 3) {
+      return __builtin_nextafterf(nearest, 0.0f);
+    }
+    return nearest;
+  }
+  bool toward_negative = mode == 1 || (mode == 3 && nearest > 0.0f);
+  bool toward_positive = mode == 2 || (mode == 3 && nearest < 0.0f);
+  if ((toward_negative && exact_cmp < 0) ||
+      (toward_positive && exact_cmp > 0)) {
+    return __builtin_nextafterf(
+        nearest, toward_negative ? -__builtin_inff() : __builtin_inff());
+  }
+  return nearest;
+}
+
+ALWAYS_INLINE static float64_t Round64(float64_t nearest, int exact_cmp,
+                                       unsigned mode) {
+  if (!mode || !exact_cmp) {
+    return nearest;
+  }
+  if (__builtin_isinf(nearest)) {
+    if ((mode == 1 && !__builtin_signbit(nearest)) ||
+        (mode == 2 && __builtin_signbit(nearest)) || mode == 3) {
+      return __builtin_nextafter(nearest, 0.0);
+    }
+    return nearest;
+  }
+  bool toward_negative = mode == 1 || (mode == 3 && nearest > 0.0);
+  bool toward_positive = mode == 2 || (mode == 3 && nearest < 0.0);
+  if ((toward_negative && exact_cmp < 0) ||
+      (toward_positive && exact_cmp > 0)) {
+    return __builtin_nextafter(
+        nearest, toward_negative ? -__builtin_inf() : __builtin_inf());
+  }
+  return nearest;
+}
+
+ALWAYS_INLINE static float32_t RoundFrom64To32(float64_t value,
+                                                unsigned mode) {
+  float32_t nearest = static_cast<float32_t>(value);
+  int exact_cmp = value < static_cast<float64_t>(nearest)
+                      ? -1
+                      : (value > static_cast<float64_t>(nearest) ? 1 : 0);
+  return Round32(nearest, exact_cmp, mode);
+}
+
+ALWAYS_INLINE static float64_t RoundFromInt32To64(int32_t value,
+                                                   unsigned mode) {
+  float64_t nearest = static_cast<float64_t>(value);
+  return Round64(nearest, 0, mode);
+}
+
+ALWAYS_INLINE static unsigned RoundingModeFromMXCSR(uint32_t mxcsr) {
+  return (mxcsr >> 13u) & 3u;
+}
+
+ALWAYS_INLINE static float32_t RoundFromInt64To32(int64_t value,
+                                                   unsigned mode) {
+  float32_t nearest = static_cast<float32_t>(value);
+  int64_t min_int = static_cast<int64_t>(0x8000000000000000ULL);
+  int exact_cmp;
+  if (nearest >= 9223372036854775808.0f) {
+    exact_cmp = -1;
+  } else if (nearest <= -9223372036854775808.0f) {
+    exact_cmp = value == min_int ? 0 : 1;
+  } else {
+    int64_t rounded = static_cast<int64_t>(nearest);
+    exact_cmp = value < rounded ? -1 : (value > rounded ? 1 : 0);
+  }
+  return Round32(nearest, exact_cmp, mode);
+}
+
+ALWAYS_INLINE static float64_t RoundFromInt64To64(int64_t value,
+                                                   unsigned mode) {
+  float64_t nearest = static_cast<float64_t>(value);
+  int64_t min_int = static_cast<int64_t>(0x8000000000000000ULL);
+  int exact_cmp;
+  if (nearest >= 9223372036854775808.0) {
+    exact_cmp = -1;
+  } else if (nearest <= -9223372036854775808.0) {
+    exact_cmp = value == min_int ? 0 : 1;
+  } else {
+    int64_t rounded = static_cast<int64_t>(nearest);
+    exact_cmp = value < rounded ? -1 : (value > rounded ? 1 : 0);
+  }
+  return Round64(nearest, exact_cmp, mode);
+}
+ALWAYS_INLINE static float32_t RoundToIntegral32(float32_t value,
+                                                  unsigned mode) {
+  if (!__builtin_isfinite(value) || mode == 3) {
+    return mode == 3 ? static_cast<float32_t>(__builtin_trunc(value)) : value;
+  }
+  float64_t x = static_cast<float64_t>(value);
+  float64_t rounded;
+  if (mode == 1) {
+    rounded = __builtin_floor(x);
+  } else if (mode == 2) {
+    rounded = __builtin_ceil(x);
+  } else {
+    float64_t lower = __builtin_floor(x);
+    float64_t fraction = x - lower;
+    if (fraction < 0.5) {
+      rounded = lower;
+    } else if (fraction > 0.5) {
+      rounded = lower + 1.0;
+    } else {
+      rounded = __builtin_fmod(lower, 2.0) == 0.0 ? lower : lower + 1.0;
+    }
+  }
+  return static_cast<float32_t>(rounded);
+}
+
+ALWAYS_INLINE static float64_t RoundToIntegral64(float64_t value,
+                                                  unsigned mode) {
+  if (!__builtin_isfinite(value) || mode == 3) {
+    return mode == 3 ? __builtin_trunc(value) : value;
+  }
+  if (mode == 1) {
+    return __builtin_floor(value);
+  }
+  if (mode == 2) {
+    return __builtin_ceil(value);
+  }
+  float64_t lower = __builtin_floor(value);
+  float64_t fraction = value - lower;
+  if (fraction < 0.5) {
+    return lower;
+  }
+  if (fraction > 0.5) {
+    return lower + 1.0;
+  }
+  return __builtin_fmod(lower, 2.0) == 0.0 ? lower : lower + 1.0;
+}
+
+}  // namespace remill_fp

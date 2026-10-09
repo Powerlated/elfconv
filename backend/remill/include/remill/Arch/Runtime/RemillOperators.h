@@ -1685,47 +1685,73 @@ MAKE_BUILTIN(FRoundToNegativeInfinity, __builtin_floor);
 #undef MAKE_BUILTIN
 
 ALWAYS_INLINE static int16_t Float64ToInt16(float64_t val) {
-  auto max_int = Float64(Maximize(Int16(0)));
-  return Select<int16_t>(FCmpLt(max_int, FAbs(val)), Int16(0x8000), Int16(val));
+  if (!(val >= -32768.0 && val < 32768.0)) {
+    return Int16(0x8000);
+  }
+  return Int16(val);
 }
 
 ALWAYS_INLINE static int32_t Float64ToInt32(float64_t val) {
-  auto max_int = Float64(Maximize(Int32(0)));
-  return Select<int32_t>(FCmpLt(max_int, FAbs(val)), Int32(0x80000000), Int32(val));
+  if (!(val >= -2147483648.0 && val < 2147483648.0)) {
+    return Int32(0x80000000);
+  }
+  return Int32(val);
 }
 
 ALWAYS_INLINE static int16_t Float80ToInt16(float80_t val) {
-  auto max_int = Float80(Float64(Maximize(Int16(0))));
-  return Select<int16_t>(FCmpLt80(max_int, FAbs80(val)), Int16(0x8000), Int16(val));
+  auto value = static_cast<native_float80_t>(val);
+  if (!(value >= -32768.0 && value < 32768.0)) {
+    return Int16(0x8000);
+  }
+  return Int16(value);
 }
 
 ALWAYS_INLINE static int32_t Float80ToInt32(float80_t val) {
-  auto max_int = Float80(Float64(Maximize(Int32(0))));
-  return Select<int32_t>(FCmpLt80(max_int, FAbs80(val)), Int32(0x80000000), Int32(val));
+  auto value = static_cast<native_float80_t>(val);
+  if (!(value >= -2147483648.0 && value < 2147483648.0)) {
+    return Int32(0x80000000);
+  }
+  return Int32(value);
 }
 
 ALWAYS_INLINE static int16_t Float32ToInt16(float32_t val) {
-  auto max_int = Float32(Maximize(Int32(0)));
-  return Select<int16_t>(FCmpLt(max_int, FAbs(val)), Int16(0x8000), Int16(val));
+  if (!(val >= -32768.0f && val < 32768.0f)) {
+    return Int16(0x8000);
+  }
+  return Int16(val);
 }
 
 ALWAYS_INLINE static int32_t Float32ToInt32(float32_t val) {
-  auto max_int = Float32(Maximize(Int32(0)));
-  return Select<int32_t>(FCmpLt(max_int, FAbs(val)), Int32(0x80000000), Int32(val));
+  if (!(val >= -2147483648.0f && val < 2147483648.0f)) {
+    return Int32(0x80000000);
+  }
+  return Int32(val);
 }
 
 ALWAYS_INLINE static int64_t Float32ToInt64(float32_t val) {
+  auto value = static_cast<double>(val);
+  if (!(value >= -9223372036854775808.0 &&
+        value < 9223372036854775808.0)) {
+    return Int64(0x8000000000000000ULL);
+  }
   return Int64(val);
 }
 
 ALWAYS_INLINE static int64_t Float64ToInt64(float64_t val) {
-  auto max_int = Float64(Maximize(Int64(0)));
-  return Select<int64_t>(FCmpLt(max_int, FAbs(val)), Int64(0x8000000000000000LL), Int64(val));
+  if (!(val >= -9223372036854775808.0 &&
+        val < 9223372036854775808.0)) {
+    return Int64(0x8000000000000000ULL);
+  }
+  return Int64(val);
 }
 
 ALWAYS_INLINE static int64_t Float80ToInt64(float80_t val) {
-  auto max_int = Float80(Float64(Maximize(Int64(0))));
-  return Select<int64_t>(FCmpLt80(max_int, FAbs80(val)), Int64(0x8000000000000000LL), Int64(val));
+  auto value = static_cast<native_float80_t>(val);
+  if (!(value >= -9223372036854775808.0 &&
+        value < 9223372036854775808.0)) {
+    return Int64(0x8000000000000000ULL);
+  }
+  return Int64(value);
 }
 
 ALWAYS_INLINE static float32_t FRoundToNearestEven32(float32_t val) {

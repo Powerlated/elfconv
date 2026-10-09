@@ -119,8 +119,11 @@ template <typename D, typename S1, size_t num_to_convert>
 DEF_SEM(CVTDQ2PS, D dst, S1 src) {
   auto src_vec = SReadV32(src);
   auto dst_vec = FClearV32(FReadV32(dst));
+  auto mode = remill_fp::RoundingModeFromMXCSR(
+      state.x87.fxsave.mxcsr.flat);
   _Pragma("unroll") for (size_t i = 0; i < num_to_convert; ++i) {
-    auto entry = Float32(SExtractV32(src_vec, i));
+    auto entry = remill_fp::RoundFrom64To32(
+        static_cast<float64_t>(SExtractV32(src_vec, i)), mode);
     dst_vec = FInsertV32(dst_vec, i, entry);
   }
   FWriteV32(dst, dst_vec);
@@ -137,14 +140,22 @@ IF_AVX(DEF_ISEL(VCVTDQ2PS_YMMqq_YMMqq) = CVTDQ2PS<VV256W, VV256, 8>;)
 
 namespace {
 
-template <typename D, typename S1, size_t num_to_convert, FloatConv64 FRound = FRoundUsingMode64>
+template <typename D, typename S1, size_t num_to_convert,
+          FloatConv64 FRound = FRoundUsingMode64>
 DEF_SEM(CVTPD2DQ, D dst, S1 src) {
   auto src_vec = FReadV64(src);
   auto dst_vec = SClearV32(SReadV32(dst));
+  auto mode = remill_fp::RoundingModeFromMXCSR(
+      state.x87.fxsave.mxcsr.flat);
   _Pragma("unroll") for (size_t i = 0; i < num_to_convert; ++i) {
-    float64_t rounded_elem = FRound(FExtractV64(src_vec, i));
-    auto entry = Float64ToInt32(rounded_elem);
-    dst_vec = SInsertV32(dst_vec, i, entry);
+    auto source = FExtractV64(src_vec, i);
+    float64_t rounded_elem;
+    if constexpr (FRound == FTruncTowardZero64) {
+      rounded_elem = FTruncTowardZero64(source);
+    } else {
+      rounded_elem = remill_fp::RoundToIntegral64(source, mode);
+    }
+    dst_vec = SInsertV32(dst_vec, i, Float64ToInt32(rounded_elem));
   }
   SWriteV32(dst, dst_vec);
 }
@@ -167,12 +178,21 @@ IF_AVX(DEF_ISEL(VCVTTPD2DQ_XMMdq_YMMqq) = CVTPD2DQ<VV128W, V256, 4, FTruncToward
 
 namespace {
 
-template <typename D, typename S1, size_t num_to_convert, FloatConv32 FRound = FRoundUsingMode32>
+template <typename D, typename S1, size_t num_to_convert,
+          FloatConv32 FRound = FRoundUsingMode32>
 DEF_SEM(CVTPS2DQ, D dst, S1 src) {
   auto src_vec = FReadV32(src);
   auto dst_vec = SClearV32(SReadV32(dst));
+  auto mode = remill_fp::RoundingModeFromMXCSR(
+      state.x87.fxsave.mxcsr.flat);
   _Pragma("unroll") for (size_t i = 0; i < num_to_convert; ++i) {
-    float32_t rounded_elem = FRound(FExtractV32(src_vec, i));
+    auto source = FExtractV32(src_vec, i);
+    float32_t rounded_elem;
+    if constexpr (FRound == FTruncTowardZero32) {
+      rounded_elem = FTruncTowardZero32(source);
+    } else {
+      rounded_elem = remill_fp::RoundToIntegral32(source, mode);
+    }
     dst_vec = SInsertV32(dst_vec, i, Float32ToInt32(rounded_elem));
   }
   SWriteV32(dst, dst_vec);
@@ -198,14 +218,30 @@ namespace {
 
 template <typename S, FloatConv32 FRound = FRoundUsingMode32>
 DEF_SEM(CVTSS2SI_32, R32W dst, S src) {
-  float32_t rounded_val = FRound(FExtractV32(FReadV32(src), 0));
+  auto source = FExtractV32(FReadV32(src), 0);
+  float32_t rounded_val;
+  if constexpr (FRound == FTruncTowardZero32) {
+    rounded_val = FTruncTowardZero32(source);
+  } else {
+    rounded_val = remill_fp::RoundToIntegral32(
+        source, remill_fp::RoundingModeFromMXCSR(
+                    state.x87.fxsave.mxcsr.flat));
+  }
   WriteZExt(dst, Unsigned(Float32ToInt32(rounded_val)));
 }
 
 #if 64 == ADDRESS_SIZE_BITS
 template <typename S, FloatConv32 FRound = FRoundUsingMode32>
 DEF_SEM(CVTSS2SI_64, R64W dst, S src) {
-  float32_t rounded_val = FRound(FExtractV32(FReadV32(src), 0));
+  auto source = FExtractV32(FReadV32(src), 0);
+  float32_t rounded_val;
+  if constexpr (FRound == FTruncTowardZero32) {
+    rounded_val = FTruncTowardZero32(source);
+  } else {
+    rounded_val = remill_fp::RoundToIntegral32(
+        source, remill_fp::RoundingModeFromMXCSR(
+                    state.x87.fxsave.mxcsr.flat));
+  }
   Write(dst, Unsigned(Float32ToInt64(rounded_val)));
 }
 #endif  // ADDRESS_SIZE_BITS
@@ -234,14 +270,30 @@ namespace {
 
 template <typename S, FloatConv64 FRound = FRoundUsingMode64>
 DEF_SEM(CVTSD2SI_32, R32W dst, S src) {
-  auto rounded_val = FRound(FExtractV64(FReadV64(src), 0));
+  auto source = FExtractV64(FReadV64(src), 0);
+  float64_t rounded_val;
+  if constexpr (FRound == FTruncTowardZero64) {
+    rounded_val = FTruncTowardZero64(source);
+  } else {
+    rounded_val = remill_fp::RoundToIntegral64(
+        source, remill_fp::RoundingModeFromMXCSR(
+                    state.x87.fxsave.mxcsr.flat));
+  }
   WriteZExt(dst, Unsigned(Float64ToInt32(rounded_val)));
 }
 
 #if 64 == ADDRESS_SIZE_BITS
 template <typename S, FloatConv64 FRound = FRoundUsingMode64>
 DEF_SEM(CVTSD2SI_64, R64W dst, S src) {
-  auto rounded_val = FRound(FExtractV64(FReadV64(src), 0));
+  auto source = FExtractV64(FReadV64(src), 0);
+  float64_t rounded_val;
+  if constexpr (FRound == FTruncTowardZero64) {
+    rounded_val = FTruncTowardZero64(source);
+  } else {
+    rounded_val = remill_fp::RoundToIntegral64(
+        source, remill_fp::RoundingModeFromMXCSR(
+                    state.x87.fxsave.mxcsr.flat));
+  }
   Write(dst, Unsigned(Float64ToInt64(rounded_val)));
 }
 #endif  // ADDRESS_SIZE_BITS
@@ -270,16 +322,22 @@ namespace {
 
 template <typename S1>
 DEF_SEM(CVTSD2SS, V128W dst, V128 _nop_read, S1 src) {
-  FWriteV32(dst, FInsertV32(FReadV32(dst), 0, Float32(FExtractV64(FReadV64(src), 0))));
+  auto value = FExtractV64(FReadV64(src), 0);
+  auto converted = remill_fp::RoundFrom64To32(
+      value, remill_fp::RoundingModeFromMXCSR(
+                 state.x87.fxsave.mxcsr.flat));
+  FWriteV32(dst, FInsertV32(FReadV32(dst), 0, converted));
 }
 
 #if HAS_FEATURE_AVX
 template <typename S2>
 DEF_SEM(VCVTSD2SS, VV128W dst, V128W src1, S2 src2) {
   auto src1_vec = FReadV32(src1);
-  auto src2_vec = FReadV64(src2);
-  auto dst_vec = FInsertV32(src1_vec, 0, Float32(FExtractV64(src2_vec, 0)));
-  FWriteV32(dst, dst_vec);
+  auto value = FExtractV64(FReadV64(src2), 0);
+  auto converted = remill_fp::RoundFrom64To32(
+      value, remill_fp::RoundingModeFromMXCSR(
+                 state.x87.fxsave.mxcsr.flat));
+  FWriteV32(dst, FInsertV32(src1_vec, 0, converted));
 }
 #endif  // HAS_FEATURE_AVX
 
@@ -294,14 +352,33 @@ namespace {
 template <typename S2>
 DEF_SEM(CVTSI2SS, V128W dst, V128 src1, S2 src2) {
   auto src1_vec = FReadV32(src1);
-  auto conv_val = Float32(Signed(Read(src2)));
+  auto source = Signed(Read(src2));
+  auto mode = remill_fp::RoundingModeFromMXCSR(
+      state.x87.fxsave.mxcsr.flat);
+  float32_t conv_val;
+  if constexpr (sizeof(source) <= sizeof(int32_t)) {
+    conv_val = remill_fp::RoundFrom64To32(
+        static_cast<float64_t>(source), mode);
+  } else {
+    conv_val = remill_fp::RoundFromInt64To32(
+        static_cast<int64_t>(source), mode);
+  }
   FWriteV32(dst, FInsertV32(src1_vec, 0, conv_val));
 }
 
 template <typename S2>
 DEF_SEM(CVTSI2SD, V128W dst, V128 src1, S2 src2) {
   auto src1_vec = FReadV64(src1);
-  auto conv_val = Float64(Signed(Read(src2)));
+  auto source = Signed(Read(src2));
+  auto mode = remill_fp::RoundingModeFromMXCSR(
+      state.x87.fxsave.mxcsr.flat);
+  float64_t conv_val;
+  if constexpr (sizeof(source) <= sizeof(int32_t)) {
+    conv_val = static_cast<float64_t>(source);
+  } else {
+    conv_val = remill_fp::RoundFromInt64To64(
+        static_cast<int64_t>(source), mode);
+  }
   FWriteV64(dst, FInsertV64(src1_vec, 0, conv_val));
 }
 
@@ -317,14 +394,33 @@ DEF_SEM(CVTSS2SD, VV128W dst_src1, V128 _nop_read, S2 src2) {
 template <typename S2>
 DEF_SEM(VCVTSI2SS, VV128W dst, V128 src1, S2 src2) {
   auto src1_vec = FReadV32(src1);
-  auto conv_val = Float32(Signed(Read(src2)));
+  auto source = Signed(Read(src2));
+  auto mode = remill_fp::RoundingModeFromMXCSR(
+      state.x87.fxsave.mxcsr.flat);
+  float32_t conv_val;
+  if constexpr (sizeof(source) <= sizeof(int32_t)) {
+    conv_val = remill_fp::RoundFrom64To32(
+        static_cast<float64_t>(source), mode);
+  } else {
+    conv_val = remill_fp::RoundFromInt64To32(
+        static_cast<int64_t>(source), mode);
+  }
   FWriteV32(dst, FInsertV32(src1_vec, 0, conv_val));
 }
 
 template <typename S2>
 DEF_SEM(VCVTSI2SD, VV128W dst, V128 src1, S2 src2) {
   auto src1_vec = FReadV64(src1);
-  auto conv_val = Float64(Signed(Read(src2)));
+  auto source = Signed(Read(src2));
+  auto mode = remill_fp::RoundingModeFromMXCSR(
+      state.x87.fxsave.mxcsr.flat);
+  float64_t conv_val;
+  if constexpr (sizeof(source) <= sizeof(int32_t)) {
+    conv_val = static_cast<float64_t>(source);
+  } else {
+    conv_val = remill_fp::RoundFromInt64To64(
+        static_cast<int64_t>(source), mode);
+  }
   FWriteV64(dst, FInsertV64(src1_vec, 0, conv_val));
 }
 
@@ -379,8 +475,11 @@ template <typename D, typename S1, size_t vec_count>
 DEF_SEM(CVTPD2PS, D dst, S1 src) {
   auto src_vec = FReadV64(src);
   auto dst_vec = FClearV32(FReadV32(dst));
+  auto mode = remill_fp::RoundingModeFromMXCSR(
+      state.x87.fxsave.mxcsr.flat);
   _Pragma("unroll") for (size_t i = 0; i < vec_count; ++i) {
-    auto conv_val = Float32(FExtractV64(src_vec, i));
+    auto conv_val = remill_fp::RoundFrom64To32(
+        FExtractV64(src_vec, i), mode);
     dst_vec = FInsertV32(dst_vec, i, conv_val);
   }
   FWriteV32(dst, dst_vec);

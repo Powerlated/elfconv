@@ -37,3 +37,5 @@ target_compile_options(i386_imports_test PRIVATE -ffunction-sections -fdata-sect
 target_link_options(i386_imports_test PRIVATE -Wl,--gc-sections)
 
 gtest_discover_tests(i386_imports_test)
+
+add_subdirectory(qemu-i386)

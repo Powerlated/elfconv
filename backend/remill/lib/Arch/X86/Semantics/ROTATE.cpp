@@ -33,14 +33,14 @@ DEF_SEM(ROL, D dst, S1 src1, S2 src2) {
     auto new_val = UOr(UShl(val, temp_count), UShr(val, USub(op_size, temp_count)));
     WriteZExt(dst, new_val);
     Write(FLAG_CF, UCmpEq(UAnd(new_val, one), one));
-    if (1 == temp_count) {
+    if (masked_count == 1)
       Write(FLAG_OF, BXor(FLAG_CF, SignFlag(new_val)));
-      // OF undefined for `1 != temp_count`.
-    } else {
+    else
       Write(FLAG_OF, BUndefined());
-    }
   } else {
     WriteZExt(dst, val);
+    if (masked_count)
+      Write(FLAG_CF, UCmpEq(UAnd(val, one), one));
   }
 }
 
@@ -59,13 +59,14 @@ DEF_SEM(ROR, D dst, S1 src1, S2 src2) {
     auto new_val = UOr(UShr(val, temp_count), UShl(val, USub(op_size, temp_count)));
     WriteZExt(dst, new_val);
     Write(FLAG_CF, SignFlag(new_val));
-    // OF undefined for `1 != temp_count`.
-    if (temp_count == 1)
+    if (masked_count == 1)
       Write(FLAG_OF, BXor(FLAG_CF, SignFlag(UShl(new_val, one))));
     else
       Write(FLAG_OF, BUndefined());
   } else {
     WriteZExt(dst, val);
+    if (masked_count)
+      Write(FLAG_CF, SignFlag(val));
   }
 }
 

@@ -486,7 +486,7 @@ template <typename D, typename S1, typename S2>
 DEF_SEM(CMPSS, D dst, S1 src1, S2 src2, I8 src3) {
   auto src1_vec = FReadV32(src1);
   auto src2_vec = FReadV32(src2);
-  auto dst_vec = UClearV32(UReadV32(dst));
+  auto dst_vec = UReadV32(src1);
   auto op = Read(src3);
   if (op >= 32) {
     StopFailure();
@@ -494,9 +494,7 @@ DEF_SEM(CMPSS, D dst, S1 src1, S2 src2, I8 src3) {
   auto v1 = FExtractV32(src1_vec, 0);
   auto v2 = FExtractV32(src2_vec, 0);
   bool cond = CompareFloats<float32_t>(static_cast<FloatCompareOperator>(op), v1, v2);
-
   dst_vec = UInsertV32(dst_vec, 0, Select<uint32_t>(cond, ~0_u32, 0_u32));
-
   UWriteV32(dst, dst_vec);
 }
 
@@ -504,7 +502,7 @@ template <typename D, typename S1, typename S2>
 DEF_SEM(CMPSD, D dst, S1 src1, S2 src2, I8 src3) {
   auto src1_vec = FReadV64(src1);
   auto src2_vec = FReadV64(src2);
-  auto dst_vec = UClearV64(UReadV64(dst));
+  auto dst_vec = UReadV64(src1);
   auto op = Read(src3);
   if (op >= 32) {
     StopFailure();
@@ -512,9 +510,7 @@ DEF_SEM(CMPSD, D dst, S1 src1, S2 src2, I8 src3) {
   auto v1 = FExtractV64(src1_vec, 0);
   auto v2 = FExtractV64(src2_vec, 0);
   bool cond = CompareFloats<float64_t>(static_cast<FloatCompareOperator>(op), v1, v2);
-
   dst_vec = UInsertV64(dst_vec, 0, Select<uint64_t>(cond, ~0_u64, 0_u64));
-
   UWriteV64(dst, dst_vec);
 }
 
@@ -1916,55 +1912,11 @@ IF_AVX(DEF_ISEL(VHADDPD_YMMqq_YMMqq_MEMqq) = HADDPD<VV256W, V256, MV256>;)
 namespace {
 
 DEF_SEM(LDMXCSR, M32 src) {
-  auto &csr = state.x87.fxsave.mxcsr;
-  csr.flat = Read(src);
-
-  int rounding_mode = FE_TONEAREST;
-
-  if (!csr.rp && !csr.rn) {
-    rounding_mode = FE_TONEAREST;
-  } else if (!csr.rp && csr.rn) {
-    rounding_mode = FE_DOWNWARD;
-  } else if (csr.rp && !csr.rn) {
-    rounding_mode = FE_UPWARD;
-  } else {
-    rounding_mode = FE_TOWARDZERO;
-  }
-  fesetround(rounding_mode);
-
-  // TODO: set FPU precision based on MXCSR precision flag (csr.pe)
-
+  state.x87.fxsave.mxcsr.flat = Read(src);
 }
 
 DEF_SEM(STMXCSR, M32W dst) {
-  auto &csr = state.x87.fxsave.mxcsr;
-
-  // TODO: store the current FPU precision control:
-  csr.pe = 0;
-
-  // Store the current FPU rounding mode:
-  switch (fegetround()) {
-    default:
-    case FE_TONEAREST:
-      csr.rp = 0;
-      csr.rn = 0;
-      break;
-    case FE_DOWNWARD:
-      csr.rp = 0;
-      csr.rn = 1;
-      break;
-    case FE_UPWARD:
-      csr.rp = 1;
-      csr.rn = 0;
-      break;
-    case FE_TOWARDZERO:
-      csr.rp = 1;
-      csr.rn = 1;
-      break;
-  }
-
-  Write(dst, csr.flat);
-
+  Write(dst, state.x87.fxsave.mxcsr.flat);
 }
 
 }  // namespace

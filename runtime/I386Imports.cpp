@@ -713,6 +713,9 @@ IMPORT(SDL_GL_DeleteContext) {
 }
 #ifdef __EMSCRIPTEN__
 static int browser_swap_interval = 1;
+static double browser_frame_start = -1.0;
+static double browser_frame_wait = 0.0;
+static bool browser_frame_submitted = false;
 EM_ASYNC_JS(void, wait_browser_frame, (), {
   await new Promise(requestAnimationFrame);
 });
@@ -741,9 +744,12 @@ IMPORT(SDL_GL_SwapWindow) {
 #ifdef __EMSCRIPTEN__
   // Present at the requested browser frame boundary without requiring SDL's
   // Emscripten main-loop API; the lifted guest owns its synchronous loop.
+  browser_frame_submitted = true;
+  const double wait_start = emscripten_get_now();
   if (browser_swap_interval) {
     for (int i = 0; i < browser_swap_interval; ++i) wait_browser_frame();
   } else emscripten_sleep(0);
+  browser_frame_wait += emscripten_get_now() - wait_start;
 #endif
 }
 static SDL_GameController *guest_controllers[32] = {};
@@ -796,6 +802,19 @@ IMPORT(SDL_GetPerformanceFrequency) {
   state->gpr.rax.dword = uint32_t(value); state->gpr.rdx.dword = uint32_t(value >> 32);
 }
 IMPORT(SDL_GetPerformanceCounter) {
+#ifdef __EMSCRIPTEN__
+  // SM64 samples its pacing timer after rendering and audio, immediately
+  // before its end-of-frame sleep. Finish timing here, not at the earlier swap.
+  if (browser_frame_start >= 0.0 && browser_frame_submitted) {
+    const double elapsed = emscripten_get_now() - browser_frame_start - browser_frame_wait;
+    EM_ASM({
+      if (Module['onFrame']) Module['onFrame']($0);
+    }, elapsed);
+    browser_frame_start = -1.0;
+    browser_frame_wait = 0.0;
+    browser_frame_submitted = false;
+  }
+#endif
   CALL; uint64_t value = SDL_GetPerformanceCounter();
   state->gpr.rax.dword = uint32_t(value); state->gpr.rdx.dword = uint32_t(value >> 32);
 }
@@ -812,6 +831,10 @@ IMPORT(SDL_GetKeyboardState) {
 }
 IMPORT(SDL_PollEvent) {
   CALL;
+#ifdef __EMSCRIPTEN__
+  // SM64 begins frame work by draining input events.
+  if (browser_frame_start < 0.0) browser_frame_start = emscripten_get_now();
+#endif
   SDL_Event event;
   int found = SDL_PollEvent(call.word(0) ? &event : nullptr);
   if (guest_keyboard_state) {
