@@ -1578,15 +1578,18 @@ DEF_SEM(SQRTSS, D dst, S1 old_dst, S2 src1) {
   FWriteV32(dst, temp_vec);  // SSE: Writes to XMM, AVX: Zero-extends XMM.
 }
 
-template <typename D, typename S1>
-DEF_SEM(RSQRTSS, D dst, S1 src1) {
+template <typename D, typename S1, typename S2>
+DEF_SEM(RSQRTSS, D dst, S1 old_dst, S2 src1) {
 
   // Extract a "single-precision" (32-bit) float from [31:0] of src1 vector:
   auto src_float = FExtractV32(FReadV32(src1), 0);
+  // RSQRT treats denormal operands as signed zero regardless of MXCSR.DAZ.
+  if (std::fpclassify(src_float) == FP_SUBNORMAL)
+    src_float = std::copysign(0.0f, src_float);
 
   // Store the square root result in dest[32:0]:
   auto square_root = SquareRoot32(rt_m, state, src_float);
-  auto temp_vec = FReadV32(dst);  // initialize a destination vector
+  auto temp_vec = FReadV32(old_dst);
   temp_vec = FInsertV32(temp_vec, 0, FDiv(1.0f, square_root));
 
   // Write out the result and return memory state:
@@ -1640,8 +1643,8 @@ IF_AVX(DEF_ISEL(VSQRTSS_XMMdq_XMMdq_XMMd) = VSQRTSS<VV128W, V128, V128>;)
 4318 VSQRTSS VSQRTSS_XMMf32_MASKmskw_XMMf32_MEMf32_AVX512 AVX512 AVX512EVEX AVX512F_SCALAR ATTRIBUTES: DISP8_SCALAR MASKOP_EVEX MEMORY_FAULT_SUPPRESSION MXCSR SIMD_SCALAR
 */
 
-DEF_ISEL(RSQRTSS_XMMss_MEMss) = RSQRTSS<V128W, MV32>;
-DEF_ISEL(RSQRTSS_XMMss_XMMss) = RSQRTSS<V128W, V128>;
+DEF_ISEL(RSQRTSS_XMMss_MEMss) = RSQRTSS<V128W, V128, MV32>;
+DEF_ISEL(RSQRTSS_XMMss_XMMss) = RSQRTSS<V128W, V128, V128>;
 IF_AVX(DEF_ISEL(VRSQRTSS_XMMdq_XMMdq_MEMd) = VRSQRTSS<VV128W, V128, MV32>;)
 IF_AVX(DEF_ISEL(VRSQRTSS_XMMdq_XMMdq_XMMd) = VRSQRTSS<VV128W, V128, V128>;)
 
