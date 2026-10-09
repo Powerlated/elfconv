@@ -138,6 +138,19 @@ DEF_SEM(DoCPUID) {
 }
 }  // namespace
 
+extern "C" uint64_t __ecv_i386_random32();
+
+namespace {
+DEF_SEM(DoRDRAND32, R32W dst) {
+  const uint64_t sample = __ecv_i386_random32();
+  WriteZExt(dst, uint32_t(sample));
+  FLAG_CF = bool(sample >> 32);
+  FLAG_OF = FLAG_SF = FLAG_ZF = FLAG_AF = FLAG_PF = false;
+}
+}  // namespace
+
+DEF_ISEL(RDRAND_GPRv_32) = DoRDRAND32;
+
 DEF_ISEL(ENTER_IMMw_IMMb_16) = ENTER<uint16_t>;
 IF_32BIT(DEF_ISEL(ENTER_IMMw_IMMb_32) = ENTER<uint32_t>;)
 IF_64BIT(DEF_ISEL(ENTER_IMMw_IMMb_64) = ENTER<uint64_t>;)

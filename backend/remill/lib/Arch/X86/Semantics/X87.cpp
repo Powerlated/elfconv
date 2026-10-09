@@ -29,6 +29,7 @@
     state.st.elems[1].val = state.st.elems[0].val; \
     state.st.elems[0].val = __x; \
     state.x87.fxsave.swd.top = static_cast<uint16_t>((state.x87.fxsave.swd.top + 7) % 8); \
+    state.x87.fxsave.ftw.flat |= uint8_t(1u << state.x87.fxsave.swd.top); \
   } while (false)
 
 
@@ -37,6 +38,7 @@
 #define POP_X87_STACK() \
   ({ \
     auto __x = state.st.elems[0].val; \
+    state.x87.fxsave.ftw.flat &= uint8_t(~(1u << state.x87.fxsave.swd.top)); \
     state.st.elems[0].val = state.st.elems[1].val; \
     state.st.elems[1].val = state.st.elems[2].val; \
     state.st.elems[2].val = state.st.elems[3].val; \
@@ -506,6 +508,12 @@ DEF_FPU_SEM(FADDmem, RF80W dst, RF80W src1, T src2) {
 }
 
 template <typename T>
+DEF_FPU_SEM(FADDmemImplicit, T src) {
+  const RF80W st0{&X87_ST0};
+  FADDmem(rt_m, state, st0, st0, src, pc, fop);
+}
+
+template <typename T>
 DEF_FPU_SEM(FADDP, RF80W dst, RF80W src1, T src2) {
   FADD<T>(rt_m, state, dst, src1, src2, pc, fop);
   (void) POP_X87_STACK();
@@ -522,8 +530,10 @@ DEF_FPU_SEM(FIADD, RF80W dst, RF80W src1, T src2) {
 }  // namespace
 
 DEF_ISEL(FADD_ST0_MEMmem32real) = FADDmem<MF32>;
+DEF_ISEL(FADD_MEMmem32real) = FADDmemImplicit<MF32>;
 DEF_ISEL(FADD_ST0_X87) = FADD<RF80W>;
 DEF_ISEL(FADD_ST0_MEMm64real) = FADDmem<MF64>;
+DEF_ISEL(FADD_MEMm64real) = FADDmemImplicit<MF64>;
 DEF_ISEL(FADD_X87_ST0) = FADD<RF80W>;
 DEF_ISEL(FADDP_X87_ST0) = FADDP<RF80W>;
 DEF_ISEL(FIADD_ST0_MEMmem32int) = FIADD<M32>;
@@ -1225,12 +1235,81 @@ DEF_SEM(FLDCW, M16 cwd) {
   // Preserve the guest control word; conversion instructions consult it directly.
 }
 
+#if ADDRESS_SIZE_BITS == 32
+DEF_SEM(DoFNSTENV28, M8W dst) {
+  const addr_t base = AddressOf(dst);
+  auto &fx = state.x87.fxsave32;
+  Write(M32W{base}, uint32_t(fx.cwd.flat) | 0xffff0000u);
+  FNSTSW<M16W>(rt_m, state, M16W{base + 4});
+  Write(M16W{base + 6}, uint16_t(0xffff));
+  uint16_t tags = 0;
+  for (unsigned physical = 0; physical < 8; ++physical) {
+    unsigned tag = 3;
+    if (fx.ftw.flat & (1u << physical)) {
+      const auto &value = state.st.elems[(physical + 8 - fx.swd.top) & 7].val;
+      uint64_t significand;
+      uint16_t exponent;
+      memcpy_impl(&significand, value.data, 8);
+      memcpy_impl(&exponent, value.data + 8, 2);
+      exponent &= 0x7fff;
+      tag = !exponent && !significand ? 1u :
+          (exponent == 0x7fff || !(significand >> 63) ? 2u : 0u);
+    }
+    tags |= uint16_t(tag << (physical * 2));
+  }
+  Write(M32W{base + 8}, uint32_t(tags) | 0xffff0000u);
+  Write(M32W{base + 12}, fx.ip);
+  Write(M16W{base + 16}, fx.cs.flat);
+  Write(M16W{base + 18}, uint16_t(fx.fop & 0x7ff));
+  Write(M32W{base + 20}, fx.dp);
+  Write(M32W{base + 24}, uint32_t(fx.ds.flat) | 0xffff0000u);
+  // FNSTENV masks exceptions only after saving the original control word.
+  fx.cwd.flat |= 0x3f;
+}
+
+DEF_SEM(DoFLDENV28, M8 src) {
+  const addr_t base = AddressOf(src);
+  auto &fx = state.x87.fxsave32;
+  const uint16_t status = Read(M16{base + 4});
+  const unsigned old_top = fx.swd.top, new_top = (status >> 11) & 7;
+  if (old_top != new_top) {
+    float80_t values[8];
+    for (unsigned i = 0; i < 8; ++i) values[i] = state.st.elems[i].val;
+    for (unsigned i = 0; i < 8; ++i)
+      state.st.elems[i].val = values[(i + new_top + 8 - old_top) & 7];
+  }
+  fx.cwd.flat = Read(M16{base});
+  fx.swd.flat = status;
+  const uint16_t tags = Read(M16{base + 8});
+  fx.ftw.flat = 0;
+  for (unsigned i = 0; i < 8; ++i)
+    if (((tags >> (2 * i)) & 3) != 3) fx.ftw.flat |= uint8_t(1u << i);
+  fx.ip = Read(M32{base + 12});
+  fx.cs.flat = Read(M16{base + 16});
+  fx.fop = Read(M16{base + 18}) & 0x7ff;
+  fx.dp = Read(M32{base + 20});
+  fx.ds.flat = Read(M16{base + 24});
+  state.sw.c0 = fx.swd.c0;
+  state.sw.c1 = fx.swd.c1;
+  state.sw.c2 = fx.swd.c2;
+  state.sw.c3 = fx.swd.c3;
+  state.sw.pe = fx.swd.pe;
+  state.sw.ue = fx.swd.ue;
+  state.sw.oe = fx.swd.oe;
+  state.sw.ze = fx.swd.ze;
+  state.sw.de = fx.swd.de;
+  state.sw.ie = fx.swd.ie;
+}
+#endif
+
 }  // namespace
 
 DEF_ISEL(FNSTSW_MEMmem16) = FNSTSW<M16W>;
 DEF_ISEL(FNSTSW_AX) = FNSTSW<R16W>;
 DEF_ISEL(FNSTCW_MEMmem16) = FNSTCW;
 DEF_ISEL(FLDCW_MEMmem16) = FLDCW;
+IF_32BIT(DEF_ISEL(FNSTENV_MEMmem28) = DoFNSTENV28;)
+IF_32BIT(DEF_ISEL(FLDENV_MEMmem28) = DoFLDENV28;)
 
 namespace {
 
@@ -1363,14 +1442,16 @@ DEF_SEM(DoFNINIT) {
   // Initialize the FPU state without checking error conditions.
   // "Word" and opcode fields are always 16-bit. Pointer fields are either
   // 32-bit or 64-bit, but regardless, they are set to 0.
-  state.x87.fsave.cwd.flat = 0x037F;  // FPUControlWord
-  state.x87.fsave.swd.flat = 0x0000;  // FPUStatusWord
-  state.x87.fsave.ftw.flat = 0x0000;  // FPUTagWord (0xFFFF in the manual, 0x0000 in testing)
-  state.x87.fsave.dp = 0x0;  // FPUDataPointer
-  state.x87.fsave.ip = 0x0;  // FPUInstructionPointer
-  state.x87.fsave.fop = 0x0;  // FPULastInstructionOpcode
-  state.x87.fsave.ds.flat = 0x0000;  // FPU code segment selector
-  state.x87.fsave.cs.flat = 0x0000;  // FPU data operand segment selector
+  state.x87.fxsave.cwd.flat = 0x037F;
+  state.x87.fxsave.swd.flat = 0;
+  state.x87.fxsave.ftw.flat = 0;  // Abridged tags: every register empty.
+  state.x87.fxsave.dp = 0;
+  state.x87.fxsave.ip = 0;
+  state.x87.fxsave.fop = 0;
+  IF_32BIT(state.x87.fxsave32.ds.flat = 0;)
+  IF_32BIT(state.x87.fxsave32.cs.flat = 0;)
+  state.sw.c0 = state.sw.c1 = state.sw.c2 = state.sw.c3 = 0;
+  state.sw.pe = state.sw.ue = state.sw.oe = state.sw.ze = state.sw.de = state.sw.ie = 0;
 
   // Mask all floating-point exceptions:
   std::feclearexcept(FE_ALL_EXCEPT);
@@ -1393,7 +1474,6 @@ DEF_ISEL(FNINIT) = DoFNINIT;
 890 FICOM FICOM_ST0_MEMmem16int X87_ALU X87 X87 ATTRIBUTES: NOTSX
 
 1200 FLDENV FLDENV_MEMmem14 X87_ALU X87 X87 ATTRIBUTES: NOTSX X87_CONTROL
-1201 FLDENV FLDENV_MEMmem28 X87_ALU X87 X87 ATTRIBUTES: NOTSX X87_CONTROL
 102 FNSAVE FNSAVE_MEMmem94 X87_ALU X87 X87 ATTRIBUTES: NOTSX X87_CONTROL X87_MMX_STATE_R X87_MMX_STATE_W X87_NOWAIT
 103 FNSAVE FNSAVE_MEMmem108 X87_ALU X87 X87 ATTRIBUTES: NOTSX X87_CONTROL X87_MMX_STATE_R X87_MMX_STATE_W X87_NOWAIT
 357 FXTRACT FXTRACT_ST0_ST1 X87_ALU X87 X87 ATTRIBUTES: NOTSX
@@ -1401,12 +1481,10 @@ DEF_ISEL(FNINIT) = DoFNINIT;
 546 FSETPM287_NOP FSETPM287_NOP X87_ALU X87 X87 ATTRIBUTES: NOP NOTSX
 
 1200 FLDENV FLDENV_MEMmem14 X87_ALU X87 X87 ATTRIBUTES: NOTSX X87_CONTROL
-1201 FLDENV FLDENV_MEMmem28 X87_ALU X87 X87 ATTRIBUTES: NOTSX X87_CONTROL
 1262 FBLD FBLD_ST0_MEMmem80dec X87_ALU X87 X87 ATTRIBUTES: NOTSX
 1286 FDISI8087_NOP FDISI8087_NOP X87_ALU X87 X87 ATTRIBUTES: NOP NOTSX
 1593 FRSTOR FRSTOR_MEMmem94 X87_ALU X87 X87 ATTRIBUTES: NOTSX X87_CONTROL X87_MMX_STATE_W
 1594 FRSTOR FRSTOR_MEMmem108 X87_ALU X87 X87 ATTRIBUTES: NOTSX X87_CONTROL X87_MMX_STATE_W
 1735 FBSTP FBSTP_MEMmem80dec_ST0 X87_ALU X87 X87 ATTRIBUTES: NOTSX
 1762 FNSTENV FNSTENV_MEMmem14 X87_ALU X87 X87 ATTRIBUTES: NOTSX X87_CONTROL X87_NOWAIT
-1763 FNSTENV FNSTENV_MEMmem28 X87_ALU X87 X87 ATTRIBUTES: NOTSX X87_CONTROL X87_NOWAIT
  */

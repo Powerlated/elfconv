@@ -16,6 +16,8 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cerrno>
+#include <unistd.h>
 #include <iomanip>
 #include <iostream>
 #include <remill/Arch/Runtime/Intrinsics.h>
@@ -43,6 +45,14 @@ typedef unsigned long long ull;
 
 extern void *TranslateVMA(RuntimeManager *rt_m, uint8_t *arena_ptr, addr_t vma_addr);
 extern void *TranslateVMACheck(RuntimeManager *rt_m, uint8_t *arena_ptr, addr_t vma_addr);
+
+extern "C" uint64_t __ecv_i386_random32() {
+  uint32_t value = 0;
+  const int saved_errno = errno;
+  const bool success = getentropy(&value, sizeof(value)) == 0;
+  errno = saved_errno;
+  return success ? (uint64_t(1) << 32) | value : uint64_t(0);
+}
 
 #define UNDEFINED_INTRINSICS(intrinsics) \
   printf("[ERROR] undefined intrinsics: %s\n", intrinsics); \
