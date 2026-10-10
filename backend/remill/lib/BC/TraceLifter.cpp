@@ -453,6 +453,36 @@ bool TraceLifter::Impl::Lift(uint64_t addr, const char *fn_name,
       std::ignore =
           arch->DecodeInstruction(inst_addr, inst_bytes, inst, this->arch->CreateInitialContext());
 
+      if (arch->IsX86()) {
+        // Local dead-EFLAGS elimination before emitting the semantic call.
+        // Register-only ADD/SUB/CMP neither read flags nor fault; each defines
+        // CF/PF/AF/ZF/SF/OF. Preserve flags at every other instruction boundary.
+        const auto overwrites_flags = [](const Instruction &decoded) {
+          if (!decoded.IsValid() || decoded.is_atomic_read_modify_write ||
+              decoded.category != Instruction::kCategoryNormal ||
+              !(decoded.function.compare(0, 4, "ADD_") == 0 ||
+                decoded.function.compare(0, 4, "SUB_") == 0 ||
+                decoded.function.compare(0, 4, "CMP_") == 0)) return false;
+          for (const auto &operand : decoded.operands) {
+            if (operand.type != Operand::kTypeRegister &&
+                operand.type != Operand::kTypeImmediate) return false;
+          }
+          return true;
+        };
+        if (overwrites_flags(inst)) {
+          const auto noflags = "NOFLAGS_" + inst.function;
+          if (module->getNamedGlobal("ISEL_" + noflags) &&
+              !get_trace_decl(inst.next_pc) && ReadInstructionBytes(inst.next_pc)) {
+            Instruction next;
+            if (arch->DecodeInstruction(inst.next_pc, inst_bytes, next,
+                                        arch->CreateInitialContext()) &&
+                overwrites_flags(next)) {
+              inst.function = noflags;
+            }
+          }
+        }
+      }
+
       // Lift instruction
       inst.GetLifter()->LiftIntoBlock(inst, block, state_ptr, bb_reg_info_node);
 
