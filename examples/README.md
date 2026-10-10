@@ -315,6 +315,11 @@ Bundled i386 Wasm conversion lifts and caches each ELF separately, then links
 one Wasm module with shared guest layout/loader metadata and import adapters.
 This is the canonical Portal conversion path: use `ELFCONV_SHARED_LIBRARIES`
 with `i386-wasm` above. Cache: output directory's `.elfconv-incremental/`.
+Each uncached ELF runs lift → Wasm compilation as one parallel job.
+`ELFCONV_CONVERSION_JOBS` limits concurrent jobs (default 2); lower it for
+memory-constrained hosts. Target API: `CONVERSION_JOBS`.
+The manifest, shared metadata, registry/runtime compilation, and final link
+remain serial. Successful stages retain their cache keys if another job fails.
 
 
 This is an explicit AOT bundle, not a runtime native-ELF compiler or a general
