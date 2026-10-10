@@ -35,9 +35,9 @@ endif()
 file(MAKE_DIRECTORY "${ELFCONV_OUTPUT_DIR}")
 file(REAL_PATH "${ELFCONV_OUTPUT_DIR}" ELFCONV_OUTPUT_DIR)
 
-set(ELFCONV_RUNTIME_DIR "${ELFCONV_ROOT}/runtime")
-set(ELFCONV_UTILS_DIR "${ELFCONV_ROOT}/utils")
-set(ELFCONV_BROWSER_DIR "${ELFCONV_ROOT}/browser")
+set(ELFCONV_RUNTIME_DIR "${ELFCONV_ROOT}/src/runtime")
+set(ELFCONV_UTILS_DIR "${ELFCONV_ROOT}/src/utils")
+set(ELFCONV_BROWSER_DIR "${ELFCONV_ROOT}/src/browser")
 set(ELFCONV_COMMON_RUNTIME_SOURCES
   "${ELFCONV_RUNTIME_DIR}/Entry.cpp"
   "${ELFCONV_RUNTIME_DIR}/Memory.cpp"
@@ -49,6 +49,7 @@ set(ELFCONV_COMMON_RUNTIME_SOURCES
 set(ELFCONV_RUNTIME_INCLUDE_FLAGS
   "-I${ELFCONV_ROOT}/backend/remill/include"
   "-I${ELFCONV_ROOT}"
+  "-I${ELFCONV_ROOT}/src"
 )
 set(ELFCONV_RUNTIME_DEFINITIONS)
 if(ELFCONV_TARGET MATCHES "^aarch64-")
@@ -144,7 +145,7 @@ if(NOT DEFINED ELFCONV_LIFTER OR ELFCONV_LIFTER STREQUAL "")
   if(EXISTS "${ELFCONV_ROOT}/bin/elflift")
     set(ELFCONV_LIFTER "${ELFCONV_ROOT}/bin/elflift")
   else()
-    set(ELFCONV_LIFTER "${ELFCONV_ROOT}/build/lifter/elflift")
+    set(ELFCONV_LIFTER "${ELFCONV_ROOT}/build/src/lifter/elflift")
   endif()
 endif()
 if(NOT DEFINED ELFCONV_BITCODE_PATH AND IS_DIRECTORY "${ELFCONV_ROOT}/bitcode")
@@ -304,7 +305,7 @@ if(ELFCONV_TARGET STREQUAL "i386-wasm")
     "${main_object}" ${ELFCONV_COMMON_RUNTIME_SOURCES} "${ELFCONV_RUNTIME_DIR}/I386Imports.cpp"
     -o "${ELFCONV_OUTPUT_DIR}/${ELFCONV_NAME}.js"
   )
-  configure_file("${ELFCONV_ROOT}/browser/i386.html.in"
+  configure_file("${ELFCONV_ROOT}/src/browser/i386.html.in"
     "${ELFCONV_OUTPUT_DIR}/${ELFCONV_NAME}.html" @ONLY)
   return()
 endif()

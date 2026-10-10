@@ -5,7 +5,7 @@
 
 #define ELF_IS_I386 1
 #define ADDRESS_SIZE_BITS 32
-#include "../../runtime/I386Imports.cpp"
+#include "../../src/runtime/I386Imports.cpp"
 
 #include <array>
 #include <cstdint>

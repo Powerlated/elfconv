@@ -25,9 +25,9 @@ setting() {
   ELFCONV_DIR=${RELEASE_DIR}/../
   BUILD_DIR=${ELFCONV_DIR}/build
   ELFCONV_ARCH_DIR=${BUILD_DIR}/backend/remill/lib/Arch
-  RUNTIME_DIR=${ELFCONV_DIR}/runtime
-  UTILS_DIR=${ELFCONV_DIR}/utils
-  BROWSER_DIR=${ELFCONV_DIR}/browser
+  RUNTIME_DIR=${ELFCONV_DIR}/src/runtime
+  UTILS_DIR=${ELFCONV_DIR}/src/utils
+  BROWSER_DIR=${ELFCONV_DIR}/src/browser
   OUTDIR=${RELEASE_DIR}/outdir
   BINDIR=${OUTDIR}/bin
   BITCODEDIR=${OUTDIR}/bitcode
@@ -56,8 +56,8 @@ main() {
   # clean existing outdir/
   if [ "$1" = "clean" ]; then
     rm -rf "$BINDIR" "$BITCODEDIR" "$LIBDIR" "$OUTOUTDIR" \
-      "${OUTDIR}/browser" "${OUTDIR}/cmake" "${OUTDIR}/runtime" \
-      "${OUTDIR}/utils" "${OUTDIR}/backend" "${OUTDIR}/thirdparty" \
+      "${OUTDIR}/src" "${OUTDIR}/cmake" \
+      "${OUTDIR}/backend" "${OUTDIR}/thirdparty" \
       "${OUTDIR}/scripts" "${OUTDIR}/elfconv.sh" "${OUTDIR}/xterm-pty" *.tar.gz
     exit 0
   fi
@@ -65,11 +65,11 @@ main() {
   # set elflift
   mkdir -p $BINDIR
   cmake --build "${BUILD_DIR}" --target elflift
-  if file "${BUILD_DIR}/lifter/elflift" | grep -q "dynamically linked"; then
+  if file "${BUILD_DIR}/src/lifter/elflift" | grep -q "dynamically linked"; then
     echo -e "[${ORANGE}WARNING${NC}] elflift is dynamically linked file."
   fi
   
-  if cp ${BUILD_DIR}/lifter/elflift $BINDIR; then
+  if cp ${BUILD_DIR}/src/lifter/elflift $BINDIR; then
     echo -e "[${GREEN}INFO${NC}] Set elflift."
   else
     echo -e "[${RED}ERROR${NC}] Faild to set elflift."
@@ -82,7 +82,7 @@ main() {
       cp -L "${so_path}" "${LIBDIR}/"
       echo -e "[${GREEN}INFO${NC}] Bundled $(basename ${so_path})."
     fi
-  done < <(ldd "${BUILD_DIR}/lifter/elflift" \
+  done < <(ldd "${BUILD_DIR}/src/lifter/elflift" \
     | grep -vE 'linux-vdso|ld-linux|libc\.so|libm\.so|libgcc_s|libstdc\+\+|libpthread|libdl\.so|librt\.so' \
     | awk '{print $3}' \
     | grep -v '^$')
@@ -107,13 +107,13 @@ main() {
   
 
   # Package the CMake converter and runtime sources.
-  mkdir -p "${OUTDIR}/browser" "${OUTDIR}/cmake" "${OUTDIR}/runtime" \
-    "${OUTDIR}/utils" "${OUTDIR}/backend/remill/include" \
+  mkdir -p "${OUTDIR}/src/browser" "${OUTDIR}/cmake" "${OUTDIR}/src/runtime" \
+    "${OUTDIR}/src/utils" "${OUTDIR}/backend/remill/include" \
     "${OUTDIR}/thirdparty/nlohmann" "${OUTDIR}/xterm-pty"
-  cp -R "${BROWSER_DIR}/." "${OUTDIR}/browser/"
+  cp -R "${BROWSER_DIR}/." "${OUTDIR}/src/browser/"
   cp -R "${ELFCONV_DIR}/cmake/." "${OUTDIR}/cmake/"
-  cp -R "${RUNTIME_DIR}/." "${OUTDIR}/runtime/"
-  cp -R "${UTILS_DIR}/." "${OUTDIR}/utils/"
+  cp -R "${RUNTIME_DIR}/." "${OUTDIR}/src/runtime/"
+  cp -R "${UTILS_DIR}/." "${OUTDIR}/src/utils/"
   cp -R "${ELFCONV_DIR}/backend/remill/include/." "${OUTDIR}/backend/remill/include/"
   cp -R "${ELFCONV_DIR}/thirdparty/nlohmann/." "${OUTDIR}/thirdparty/nlohmann/"
   cp "${ELFCONV_DIR}/xterm-pty/emscripten-pty.js" "${OUTDIR}/xterm-pty/"

@@ -16,8 +16,9 @@ enable_testing()
 include(GoogleTest)
 
 if(CMAKE_ELFCONV_AARCH64_BUILD)
-  add_executable(elfconv_test ../../utils/Util.cpp Run.cpp)
+  add_executable(elfconv_test ../../src/utils/Util.cpp Run.cpp)
   target_link_libraries(elfconv_test PRIVATE GTest::gtest_main)
+  target_include_directories(elfconv_test PRIVATE "${CMAKE_SOURCE_DIR}/src")
   gtest_discover_tests(elfconv_test)
 endif()
 
@@ -30,6 +31,7 @@ target_link_libraries(
 
 target_include_directories(i386_imports_test PRIVATE
   ${CMAKE_SOURCE_DIR}
+  ${CMAKE_SOURCE_DIR}/src
   ${CMAKE_SOURCE_DIR}/backend/remill/include
 )
 target_compile_definitions(i386_imports_test PRIVATE ELF_IS_I386 ADDRESS_SIZE_BITS=32)

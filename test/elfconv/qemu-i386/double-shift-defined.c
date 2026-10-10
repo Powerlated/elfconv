@@ -1,7 +1,7 @@
 /*
  * Architecturally defined SHLD/SHRD differential cases for the i386 runner.
  * Compile with: gcc -m32 -O0 -fno-pie -no-pie -o double-shift-defined \
- *   tests/elfconv/qemu-i386/double-shift-defined.c
+ *   test/elfconv/qemu-i386/double-shift-defined.c
  */
 #include <stdint.h>
 #include <stdio.h>

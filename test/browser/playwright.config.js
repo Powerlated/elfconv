@@ -2,7 +2,7 @@ const { defineConfig } = require('@playwright/test');
 const path = require('path');
 
 const browserBuildDir = path.resolve(
-  process.env.ELFCONV_BROWSER_BUILD_DIR || path.join(__dirname, '../../build/tests/browser'),
+  process.env.ELFCONV_BROWSER_BUILD_DIR || path.join(__dirname, '../../build/test/browser'),
 );
 
 module.exports = defineConfig({

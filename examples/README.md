@@ -27,7 +27,7 @@ Then configure and build the conversion target:
 
 ```bash
 cmake -S examples/sdl_triangle -B build/sdl_triangle \
-  -DELFCONV_LIFTER="$PWD/build/lifter/elflift" \
+  -DELFCONV_LIFTER="$PWD/build/src/lifter/elflift" \
   -DELFCONV_EMCC="$HOME/emsdk/upstream/emscripten/em++"
 cmake --build build/sdl_triangle --target triangle-wasm
 python3 -m http.server 8000 --bind 127.0.0.1 \
@@ -69,7 +69,7 @@ cmake -S examples/sdl_triangle -B build/sdl_triangle \
   -DCMAKE_C_COMPILER="$LLVM_ROOT/bin/clang" \
   -DCMAKE_C_FLAGS="--sysroot=$SYSROOT -I$SYSROOT/usr/include/i386-linux-gnu -B$SYSROOT/usr/lib/i386-linux-gnu" \
   -DCMAKE_EXE_LINKER_FLAGS="-L$SYSROOT/usr/lib/gcc/i686-linux-gnu/15" \
-  -DELFCONV_LIFTER="$PWD/build/lifter/elflift" \
+  -DELFCONV_LIFTER="$PWD/build/src/lifter/elflift" \
   -DELFCONV_EMCC="$HOME/emsdk/upstream/emscripten/em++"
 cmake --build build/sdl_triangle --target triangle-wasm
 ```
@@ -91,7 +91,7 @@ build `cube-wasm`:
 
 ```bash
 cmake -S examples/sdl_cube -B build/sdl_cube \
-  -DELFCONV_LIFTER="$PWD/build/lifter/elflift" \
+  -DELFCONV_LIFTER="$PWD/build/src/lifter/elflift" \
   -DELFCONV_EMCC="$HOME/emsdk/upstream/emscripten/em++"
 cmake --build build/sdl_cube --target cube-wasm
 python3 -m http.server 8000 --bind 127.0.0.1 --directory build/sdl_cube

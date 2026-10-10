@@ -4,7 +4,7 @@ if(NOT DEFINED ELFCONV_ROOT)
   get_filename_component(ELFCONV_ROOT "${CMAKE_CURRENT_LIST_DIR}/.." ABSOLUTE)
 endif()
 
-set(ELFCONV_LIFTER "${ELFCONV_ROOT}/build/lifter/elflift" CACHE FILEPATH "ELF conversion lifter")
+set(ELFCONV_LIFTER "${ELFCONV_ROOT}/build/src/lifter/elflift" CACHE FILEPATH "ELF conversion lifter")
 set(ELFCONV_EMCC "" CACHE FILEPATH "Emscripten C++ compiler")
 
 function(elfconv_add_conversion_target name)

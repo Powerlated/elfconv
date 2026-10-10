@@ -8,7 +8,7 @@ using ::testing::InitGoogleTest;
 using ::testing::Test;
 
 const char *ELFCONV_WASI_MACRO =
-    "-DELF_IS_AARCH64 --sysroot=${WASI_SDK_PATH}/share/wasi-sysroot -D_WASI_EMULATED_SIGNAL -D_WASI_EMULATED_MMAN -D_WASI_EMULATED_PROCESS_CLOCKS -DTARGET_IS_WASI=1 -DELFNAME='\"a_stripped.aarch64\"' -lwasi-emulated-process-clocks -lwasi-emulated-signal -lwasi-emulated-mman -fno-exceptions -I../../../backend/remill/include -I../../../";
+    "-DELF_IS_AARCH64 --sysroot=${WASI_SDK_PATH}/share/wasi-sysroot -D_WASI_EMULATED_SIGNAL -D_WASI_EMULATED_MMAN -D_WASI_EMULATED_PROCESS_CLOCKS -DTARGET_IS_WASI=1 -DELFNAME='\"a_stripped.aarch64\"' -lwasi-emulated-process-clocks -lwasi-emulated-signal -lwasi-emulated-mman -fno-exceptions -I../../../backend/remill/include -I../../../ -I../../../src";
 
 enum WASI_RUNTIME : uint8_t { WASMTIME, WASMEDGE };
 
@@ -43,7 +43,7 @@ std::string binary_lifting(const char *elf_path) {
   FILE *pipe;
   int status;
   std::string stdout_res;
-  auto cmd = "../../../build/lifter/elflift --arch aarch64 --bc_out lift.bc --target_elf " +
+  auto cmd = "../../../build/src/lifter/elflift --arch aarch64 --bc_out lift.bc --target_elf " +
              std::string(elf_path);
 
   pipe = popen(cmd.c_str(), "r");
@@ -65,8 +65,8 @@ void gen_wasm_for_wasi_runtimes() {
 
   auto cmd =
       std::string("${WASI_SDK_PATH}/bin/clang++ -O3 ") + ELFCONV_WASI_MACRO +
-      " -o exe.wasm lift.bc ../../../runtime/Entry.cpp ../../../runtime/Memory.cpp ../../../runtime/Runtime.cpp " +
-      "../../../runtime/syscalls/SyscallWasi.cpp ../../../runtime/VmIntrinsics.cpp ../../../utils/Util.cpp ../../../utils/elfconv.cpp";
+      " -o exe.wasm lift.bc ../../../src/runtime/Entry.cpp ../../../src/runtime/Memory.cpp ../../../src/runtime/Runtime.cpp " +
+      "../../../src/runtime/syscalls/SyscallWasi.cpp ../../../src/runtime/VmIntrinsics.cpp ../../../src/utils/Util.cpp ../../../src/utils/elfconv.cpp";
   pipe = popen(cmd.c_str(), "r");
   EXPECT_NE(pipe, nullptr) << "[ERROR] Failed to " << cmd.c_str()
                            << "at gen_wasm_for_wasi_runtimes.";

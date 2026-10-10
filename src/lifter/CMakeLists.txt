@@ -27,7 +27,7 @@ add_executable(elflift
   MainLifter.cpp
   TraceManager.cpp
   Lift.cpp
-  "${ELFCONV_ROOT}/utils/Util.cpp"
+  "${ELFCONV_ROOT}/src/utils/Util.cpp"
 )
 add_dependencies(elflift semantics)
 target_include_directories(elflift BEFORE PRIVATE "${DWARF_INCLUDE_DIR}")
@@ -40,7 +40,7 @@ if(CMAKE_ELFCONV_AARCH64_BUILD)
 elseif(CMAKE_ELFCONV_X86_BUILD)
   target_compile_definitions(elflift PRIVATE "ELFCONV_X86_BUILD=1")
 else()
-  message(FATAL_ERROR "CMAKE_ELFCONV_<arch_name>_BUILD must be enabled (lifter/CMakeLists.txt)")
+  message(FATAL_ERROR "CMAKE_ELFCONV_<arch_name>_BUILD must be enabled (src/lifter/CMakeLists.txt)")
 endif()
 
 if(CMAKE_ELFLIFT_STATIC_LINK)
@@ -63,6 +63,7 @@ target_include_directories(elflift PRIVATE
   "${DWARF_INCLUDE_DIR}"
   ${PROJECT_INCLUDEDIRECTORIES}
   ${ELFCONV_ROOT}
+  "${ELFCONV_ROOT}/src"
 )
 install(TARGETS elflift RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
 

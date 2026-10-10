@@ -71,7 +71,7 @@ jobs:
       run: |
         docker run --rm -w /root/elfconv elfconv-image \
           "${{ matrix.setup }} && \
-           cd tests/browser && \
+           cd test/browser && \
            npm install && \
            npx playwright install --with-deps chromium && \
            cmake --build build --target browser-${{ matrix.project }} && \
