@@ -28,7 +28,6 @@
 ## Testing and verification
 
 - Use this repository's CMake/CTest and existing native-versus-Wasm fixtures; do not introduce another test framework without need.
-- `tests/elfconv/qemu-i386/`: vendored QEMU i386 tests and associated tooling only (ours or QEMU's). All other fixtures, regressions, and tests belong elsewhere.
 - Permanent tests protect consumer-visible behavior, boundaries, invariants, transitions, and failure cases. No source-text/wiring assertions or mock echoes.
 - Keep helper source in separate language-appropriate files; reuse shared build/test utilities. No embedded source strings for multi-language fixtures.
 - Exercise actual changed path after build. For instruction/ABI changes, compare native and lifted execution where practical.
@@ -41,6 +40,7 @@
 - Markdown: extremely terse; minimum words, meaning intact. No filler.
 - README: user-facing setup, build, launch, controls, troubleshooting. Keep contributions minimal.
 - Internals: code comments, tests, AGENTS.md. Tests document behavior; avoid duplicating assertions in README.
+- If documentation becomes outdated, erase the outdated information instead of updating it.
 
 ## Environment safety
 
