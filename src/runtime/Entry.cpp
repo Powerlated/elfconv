@@ -1,5 +1,8 @@
 #include "Memory.h"
 #include "Runtime.h"
+#if defined(ELF_IS_I386)
+#include "I386Tls.h"
+#endif
 #include "utils/Util.h"
 
 #include <algorithm>
@@ -17,7 +20,11 @@
 #endif
 
 // MemoryArenaPtr is used in the lifted LLVM IR for calculating the correct memory address (e.g. __remill_read_memory_macro* function).
+#if defined(ELF_IS_I386)
+thread_local State *CPUState;
+#else
 State *CPUState;
+#endif
 
 extern void *TranslateVMA(RuntimeManager *rt_m, uint8_t *arena_ptr, addr_t vma_addr);
 #if defined(ELF_IS_I386)
@@ -304,6 +311,11 @@ int main(int argc, char *argv[], char *envp[]) {
   cpu_state->sr.dczid_el0 = {.qword = 0x4};
 #elif defined(ELF_IS_I386)
   cpu_state->gpr.rip.dword = static_cast<uint32_t>(_ecv_entry_pc);
+  // Linux i386 user selectors; CS.RPL must not imply ring 0 to guest probes.
+  cpu_state->seg.cs.flat = 0x23;
+  cpu_state->seg.ds.flat = cpu_state->seg.es.flat = cpu_state->seg.ss.flat = 0x2b;
+  cpu_state->seg.gs.flat = 0x63;
+  cpu_state->rflag.flat = 0x202;
 #endif
 
   auto main_ecv_pr =
@@ -323,12 +335,16 @@ int main(int argc, char *argv[], char *envp[]) {
   // Shared-library exports use the guest SysV function ABI, not ELF _start.
   int status = 0;
 #if defined(ELF_IS_I386)
+  __ecv_i386_initialize_thread_tls(memory_arena->bytes, CPUState, rt_m);
   if (_ecv_i386_function_entry)
     status = __ecv_i386_run_function_entry(memory_arena->bytes, CPUState,
                                           static_cast<uint32_t>(_ecv_entry_pc), rt_m);
   else
 #endif
     _ecv_entry_func(memory_arena->bytes, CPUState, _ecv_entry_pc, rt_m);
+#if defined(ELF_IS_I386)
+  __ecv_i386_finalize_thread_tls(memory_arena->bytes, CPUState, rt_m);
+#endif
 
   delete (rt_m);
 

@@ -103,6 +103,27 @@ readbacks passed, the center pixel changed between frames 1 and 90, the corner
 remained black, and the guest exited with status 0. It uses shader/VBO OpenGL
 calls without legacy GL emulation.
 
+### pthread cube
+
+`sdl_cube_pthread` runs rotation on a second lifted i386 thread. Configure as
+above using `examples/sdl_cube_pthread` and `build/sdl_cube_pthread`.
+Its `cube-wasm` target enables pthreads, JSPI, and worker-owned OffscreenCanvas.
+Serve with COOP/COEP headers:
+
+```sh
+TEST_PORT=8000 SERVE_DIR="$PWD/build/sdl_cube_pthread" \
+  TEST_HTML="$PWD/build/sdl_cube_pthread/index.html" node test/browser/test-server.js
+```
+
+Open `/cube.html`, click Start; Escape exits. Chromium smoke: 90 frames,
+native-matching framebuffer samples at frames 1 and 90, distinct worker identity,
+mutex/condition handshakes, join result 90, exit 0, no browser errors.
+
+Supported: create with default attributes, self/equal/join, normal/recursive/
+error-check mutexes, condition wait/signal/broadcast. Nondefault thread attributes,
+robust/process-shared synchronization, cancellation, and a complete glibc pthread
+descriptor are unsupported.
+
 The cube target emits a GNU linker map, then partitions the final relocated ELF
 by input-object code ranges. It caches each object's lifted bitcode and
 independently optimized Wasm object under
@@ -208,8 +229,115 @@ Shared-object conversion resolves `R_386_RELATIVE`, defined-symbol `R_386_32`,
 `R_386_GLOB_DAT`, and `R_386_JMP_SLOT` at a fixed guest bias. ELF initializers
 are read after relocation. Exported entries must have `int(int,char**)` ABI;
 guest argc/argv are passed on the i386 stack and the return value becomes the
-program exit status. This does not implement runtime Linux `dlopen`, dependency
-loading, symbol interposition, TLS, or arbitrary host-facing export signatures.
+program exit status. Standalone conversion does not automatically load Linux
+dependencies; explicitly bundled libraries can use the guest dynamic loader below.
+Symbol interposition and arbitrary host-facing export signatures remain unsupported.
+`stdin`, `stdout`, and `stderr` data imports relocate to guest stream-handle
+slots, including executable copy relocations; host `FILE*` pointers are not exposed.
+
+### Bundled dynamic libraries
+
+Whole-program i386 conversion accepts a semicolon-separated library list:
+
+```sh
+cmake \
+  -DELFCONV_INPUT=/absolute/path/to/program \
+  -DELFCONV_TARGET=i386-wasm \
+  "-DELFCONV_SHARED_LIBRARIES=/absolute/path/libdependency.so;/absolute/path/libplugin.so" \
+  -DELFCONV_LIFTER="$PWD/build/llvm16/src/lifter/elflift" \
+  -DELFCONV_EMCC=/path/to/emsdk/upstream/emscripten/em++ \
+  -DELFCONV_OUTPUT_DIR=/tmp/program-wasm \
+  -P cmake/ConvertElf.cmake
+```
+
+The equivalent lifter flag is `--shared_libraries=/path/a.so,/path/b.so`;
+`elfconv_add_conversion_target` accepts `SHARED_LIBRARIES` as a list.
+All bundled code and relocated data are included in the generated Wasm.
+Libraries occupy distinct guest ranges between `0x01000000` and `0x04000000`,
+below the heap. `DT_NEEDED` references to bundled SONAMEs establish constructor
+and symbol-lookup dependency order; unbundled system imports still need host adapters.
+Allocated library data is restored on reload after the last reference closes.
+Constructor/finalizer pointers are discovered even when their local symbols
+were stripped from an otherwise partially symbolized ELF.
+External function references through `R_386_32`, `R_386_PC32`, or `R_386_GLOB_DAT`
+use guest-addressed adapter thunks when no bundled definition exists.
+This includes address-taken libc functions and direct calls that bypass the PLT.
+The named adapter must exist at Wasm link time; unknown functions still fail.
+
+Guest `dlopen` matches supplied paths, SONAMEs, or filename aliases (including
+relative paths such as `bin/launcher.so`). `RTLD_LAZY` and `RTLD_NOW` both use
+AOT-resolved bindings. `RTLD_LOCAL`, `RTLD_GLOBAL`, and `RTLD_NOLOAD` are supported,
+as is `dlopen(NULL, ...)` for main-program exports. `dlsym` returns callable guest
+function addresses or guest data addresses, and searches a handle's dependency
+closure. `RTLD_DEFAULT` searches live global objects and retains lookup
+dependencies for the calling object. A zero-valued export is distinct from a
+lookup error; `dlerror` consumes the pending error. Last-close finalizers run
+before dependencies are released; remaining libraries finalize at normal
+process termination. Cyclic reference graphs remain resident until termination.
+
+#### i386 ELF TLS
+
+`PT_TLS` templates and zero storage are initialized separately for each guest
+CPU `State`. The closed-world bundle assigns every module a fixed Variant-II
+static TLS offset, including libraries opened later. Local-exec, initial-exec,
+general-dynamic, local-dynamic, and GNU2 `R_386_TLS_DESC` accesses are supported.
+`dlsym` of a TLS export returns its address in the calling state's block.
+Opening an unloaded module restores its TLS template in all active contexts
+before constructors run; reopening an already-live module preserves its values.
+
+TLS occupies `0x00100000`–`0x01000000`, separate from library images and heap.
+The guest GS base points at an i386 TCB with a DTV and stack/pointer guards.
+`__cxa_thread_atexit_impl`/`__cxa_thread_atexit` callbacks run LIFO at thread exit;
+their owning libraries remain live until callbacks finish. Main-thread TLS
+destructors run before global finalizers, with TLS storage valid for both.
+
+`src/runtime/I386Tls.h` initializes and finalizes each guest pthread's TLS.
+Host pthreads provide execution and synchronization; ELF module IDs, guest TLS
+addresses, GS semantics, and TLS destructors remain guest-owned.
+
+#### C++ runtime bundles
+
+Supply compatible i386 `libstdc++.so.6` and `libgcc_s.so.1` through the same
+`ELFCONV_SHARED_LIBRARIES` list. C++ vtables, RTTI objects, methods, and casts
+then execute as guest code/data; no host C++ object or vtable pointers are used.
+The `rtti` differential fixture bundles real implementations from the compiler's
+`libsupc++.a` and verifies single/multiple/virtual inheritance and cross-library
+casts. That isolated regression does not establish full libstdc++ compatibility.
+
+For the installed Portal, the diagnostic bundle consists of `bin/launcher.so`,
+Steam's `ubuntu12_32/steam-runtime/usr/lib/i386-linux-gnu/libstdc++.so.6`,
+`ubuntu12_32/steam-runtime/lib/i386-linux-gnu/libgcc_s.so.1`, and Portal's
+`bin/libtier0.so`, `bin/libvstdlib.so`, and `bin/libtogl.so`.
+Use absolute paths for all six entries; system SDL/libc/pthread libraries still
+require guest-ABI adapters rather than native host pointers.
+
+Bundled i386 Wasm conversion lifts and caches each ELF separately, then links
+one Wasm module with shared guest layout/loader metadata and import adapters.
+This is the canonical Portal conversion path: use `ELFCONV_SHARED_LIBRARIES`
+with `i386-wasm` above. Cache: output directory's `.elfconv-incremental/`.
+
+
+This is an explicit AOT bundle, not a runtime native-ELF compiler or a general
+Linux dynamic linker. `RTLD_NEXT`,
+deep binding, NODELETE, IFUNC resolution, symbol versions/interposition, and
+filesystem/LD_LIBRARY_PATH searches are not implemented. Unknown library names
+fail rather than invoking host `dlopen` or exposing host pointers.
+
+The installed Portal `hl2_linux` alone links and runs its missing-launcher error
+path (`Failed to load the launcher`). The six-library C++ diagnostic bundle now
+lifts 5,641 functions and resolves the previous TLS, RTTI, `stdin`, and direct
+`getpid` relocation blockers. CPU initialization no longer reports missing
+`FXSAVE` semantics. Wasm linking still fails on unimplemented adapters, including
+pthread mutexes, SDL surface/window functions, and libc string/filesystem APIs.
+Current XED memory `FADD`, `RDRAND`, and 28-byte x87 environment forms lift without
+unsupported-instruction reports and pass native-versus-Wasm regressions.
+Adding engine, client, server, and filesystem lifts 17,008 functions. Optional
+AVX code still reports a decode failure; the virtual CPU advertises no AVX.
+i386 uses a 512 MiB guest arena, with bundled libraries below the executable image.
+Native-versus-Wasm regressions cover the added CPU, AES, packed SSE, and libc adapters.
+This is not a successful Portal game run.
+
+
 
 ### Runtime and incremental conversion
 

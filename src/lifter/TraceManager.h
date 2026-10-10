@@ -57,6 +57,7 @@ class AArch64TraceManager : public remill::TraceManager {
 
   void SetELFData();
   void LoadLinkerMap(const std::string &path, const std::string &object_base);
+  void LoadELFOwners();
   void EnableUnitMode(const std::string &owner, const remill::Arch *arch,
                       llvm::Module *external_declarations);
   bool IsSelectedUnitAddress(uint64_t address) const;

@@ -130,6 +130,31 @@ void AArch64TraceManager::LoadLinkerMap(const std::string &path,
   }
 }
 
+void AArch64TraceManager::LoadELFOwners() {
+  code_owner_ranges.clear();
+  for (const auto &section : elf_obj.sections) {
+    if (section.sec_type != BinaryLoader::ELFSection::SEC_TYPE_CODE || !section.size) continue;
+    std::string owner = elf_obj.file_name;
+    if (elf_obj.i386_imports.count(section.vma)) {
+      owner = kImportUnitOwner;
+    } else if (!elf_obj.i386_libraries.empty()) {
+      const auto library = std::find_if(elf_obj.i386_libraries.begin(), elf_obj.i386_libraries.end(),
+          [&](const auto &image) {
+            return section.vma >= image.image_begin &&
+                   section.vma + section.size <= image.image_end;
+          });
+      if (library == elf_obj.i386_libraries.end())
+        elfconv_runtime_error("Executable section has no ELF owner: %s.\n", section.sec_name.c_str());
+      owner = library->path;
+    }
+    if (owner.find_first_of("\t\r\n") != std::string::npos)
+      elfconv_runtime_error("ELF unit paths cannot contain tabs or newlines.\n");
+    code_owner_ranges.push_back({section.vma, section.vma + section.size, owner});
+  }
+  std::sort(code_owner_ranges.begin(), code_owner_ranges.end(),
+      [](const auto &left, const auto &right) { return left.begin < right.begin; });
+}
+
 void AArch64TraceManager::EnableUnitMode(const std::string &owner, const remill::Arch *arch,
                                         llvm::Module *external_module) {
   if (owner.empty() || !arch || !external_module) {
@@ -181,6 +206,20 @@ void AArch64TraceManager::WriteIncrementalManifest(
     if (!fingerprint) elfconv_runtime_error("Cannot write unit fingerprint: %s\n",
                                             fingerprint_path.c_str());
     WriteString(fingerprint, owner);
+    // Other units' code is independently cached, but their guest addresses and
+    // lifted names determine this unit's external call declarations.
+    const uint64_t binding_count = disasm_funcs.size();
+    WriteScalar(fingerprint, binding_count);
+    for (const auto &[address, function] : disasm_funcs) {
+      WriteScalar(fingerprint, address);
+      WriteString(fingerprint, function.func_name);
+    }
+    const uint64_t imports = elf_obj.i386_imports.size();
+    WriteScalar(fingerprint, imports);
+    for (const auto &[address, name] : elf_obj.i386_imports) {
+      WriteScalar(fingerprint, address);
+      WriteString(fingerprint, name);
+    }
     const uint64_t function_count = functions.size();
     WriteScalar(fingerprint, function_count);
     uint64_t owner_range_count = 0;
@@ -267,6 +306,7 @@ void AArch64TraceManager::WriteIncrementalManifest(
     WriteString(metadata, section.sec_name);
     WriteScalar(metadata, section.vma);
     WriteScalar(metadata, section.size);
+    WriteScalar(metadata, section.is_tls);
     if (section.size) {
       metadata.write(reinterpret_cast<const char *>(section.bytes),
                      static_cast<std::streamsize>(section.size));
@@ -283,6 +323,44 @@ void AArch64TraceManager::WriteIncrementalManifest(
   for (const auto &[address, name] : elf_obj.i386_imports) {
     WriteScalar(metadata, address);
     WriteString(metadata, name);
+  }
+  WriteScalar(metadata, elf_obj.tls_static_size);
+  WriteScalar(metadata, elf_obj.tls_static_alignment);
+  const uint64_t library_count = elf_obj.i386_libraries.size();
+  WriteScalar(metadata, library_count);
+  for (const auto &library : elf_obj.i386_libraries) {
+    WriteString(metadata, library.path);
+    WriteString(metadata, library.name);
+    WriteScalar(metadata, library.image_begin);
+    WriteScalar(metadata, library.image_end);
+    const uint64_t needed_count = library.needed.size();
+    WriteScalar(metadata, needed_count);
+    for (const auto &name : library.needed) WriteString(metadata, name);
+    const uint64_t ordinary_exports = library.exports.size();
+    WriteScalar(metadata, ordinary_exports);
+    for (const auto &[name, address] : library.exports) {
+      WriteString(metadata, name);
+      WriteScalar(metadata, address);
+    }
+    const uint64_t initializers = library.initializers.size();
+    WriteScalar(metadata, initializers);
+    for (const auto address : library.initializers) WriteScalar(metadata, address);
+    const uint64_t finalizers = library.finalizers.size();
+    WriteScalar(metadata, finalizers);
+    for (const auto address : library.finalizers) WriteScalar(metadata, address);
+    WriteScalar(metadata, library.tls_size);
+    WriteScalar(metadata, library.tls_alignment);
+    WriteScalar(metadata, library.tls_distance);
+    const uint64_t template_size = library.tls_template.size();
+    WriteScalar(metadata, template_size);
+    if (template_size) metadata.write(reinterpret_cast<const char *>(library.tls_template.data()),
+                                      static_cast<std::streamsize>(template_size));
+    const uint64_t export_count = library.tls_exports.size();
+    WriteScalar(metadata, export_count);
+    for (const auto &[name, offset] : library.tls_exports) {
+      WriteString(metadata, name);
+      WriteScalar(metadata, offset);
+    }
   }
   if (!metadata) elfconv_runtime_error("Failed writing metadata fingerprint: %s\n",
                                       metadata_fingerprint_path.c_str());

@@ -1,5 +1,8 @@
 #include "Runtime.h"
 #include "utils/elfconv.h"
+#include "I386DynamicLibraries.h"
+#include "I386Tls.h"
+#include "I386Errno.h"
 
 #include <SDL2/SDL.h>
 #define GL_GLEXT_PROTOTYPES 1
@@ -12,13 +15,21 @@
 #include <cstring>
 #include <cctype>
 #include <cmath>
+#include <fcntl.h>
+#include <strings.h>
 #include <dirent.h>
 #include <sys/stat.h>
+#include <sys/time.h>
+#include <time.h>
+#include <wchar.h>
+#include <wctype.h>
+#include <unistd.h>
 #include <string>
 #include <vector>
 #include <map>
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
+#include <emscripten/html5.h>
 #endif
 
 #ifndef ECV_LEGACY_GL
@@ -52,6 +63,13 @@ const char *text(uint8_t *arena, uint32_t address) {
     elfconv_runtime_error("Unterminated i386 host-import string.\n");
   return p;
 }
+const char *bounded_text(uint8_t *arena, uint32_t address, uint32_t limit) {
+  auto *p = static_cast<const char *>(guest(arena, address, 1));
+  const size_t available = MEMORY_ARENA_SIZE - address;
+  if (limit > available && !memchr(p, 0, available))
+    elfconv_runtime_error("Unmapped i386 bounded string.\n");
+  return p;
+}
 uint32_t copy_string(uint8_t *arena, const char *value, unsigned slot) {
   if (!value) return 0;
   size_t length = strlen(value) + 1;
@@ -60,11 +78,19 @@ uint32_t copy_string(uint8_t *arena, const char *value, unsigned slot) {
   memcpy(guest(arena, address, length), value, length);
   return address;
 }
+constexpr uint32_t guest_errno_offset = 32;  // Adapter-private word in the reserved TCB.
 struct Call {
   uint8_t *arena;
   State *state;
   uint32_t stack;
-  Call(uint8_t *a, State *s) : arena(a), state(s), stack(s->gpr.rsp.dword) {}
+  int initial_guest_errno = 0, initial_host_errno = 0;
+  Call(uint8_t *a, State *s) : arena(a), state(s), stack(s->gpr.rsp.dword) {
+    if (state->addr.gs_base.dword) {
+      memcpy(&initial_guest_errno, guest(arena, state->addr.gs_base.dword + guest_errno_offset, 4), 4);
+      errno = i386_errno_to_host(initial_guest_errno);
+    }
+    initial_host_errno = errno;
+  }
   uint32_t word(unsigned index) const {
     uint32_t value;
     uint64_t address = uint64_t(stack) + 4 * uint64_t(index + 1);
@@ -78,8 +104,25 @@ struct Call {
     memcpy(&value, &bits, 4);
     return value;
   }
+  uint64_t wide(unsigned index) const {
+    return uint64_t(word(index)) | (uint64_t(word(index + 1)) << 32);
+  }
+  double real64(unsigned index) const {
+    const uint64_t bits = wide(index);
+    double value;
+    memcpy(&value, &bits, sizeof(value));
+    return value;
+  }
+  void result64(uint64_t value) {
+    state->gpr.rax.dword = uint32_t(value);
+    state->gpr.rdx.dword = uint32_t(value >> 32);
+  }
   void result(uint32_t value) { state->gpr.rax.dword = value; }
   ~Call() {
+    if (state->addr.gs_base.dword) {
+      const int value = errno == initial_host_errno ? initial_guest_errno : host_errno_to_i386(errno);
+      memcpy(guest(arena, state->addr.gs_base.dword + guest_errno_offset, 4), &value, 4);
+    }
     uint32_t return_pc;
     memcpy(&return_pc, guest(arena, stack, 4), 4);
     state->gpr.rip.dword = return_pc;
@@ -117,9 +160,202 @@ void invoke(uint8_t *arena, State *state, RuntimeManager *runtime, uint32_t targ
   state->gpr.rip.dword = saved_pc;
 }
 
+constexpr uint32_t library_handle_base = 0x300;
+
+void dynamic_error(RuntimeManager *runtime, const char *kind, const char *name) {
+  snprintf(runtime->dynamic_error, sizeof(runtime->dynamic_error), "%s: %s", kind, name);
+  runtime->dynamic_error_pending = true;
+}
+
+void prepare_libraries(RuntimeManager *runtime) {
+  if (!runtime->dynamic_libraries.empty()) return;
+  runtime->dynamic_libraries.resize(_ecv_i386_library_count);
+  for (uint32_t i = 0; i < _ecv_i386_library_count; ++i) {
+    auto &scope = runtime->dynamic_libraries[i].scope;
+    scope.reserve(_ecv_i386_library_count);
+    runtime->dynamic_libraries[i].lookup_dependencies.reserve(_ecv_i386_library_count);
+    scope.push_back(i);
+    for (size_t j = 0; j < scope.size(); ++j) {
+      for (auto *p = _ecv_i386_libraries[scope[j]].dependencies; *p != UINT32_MAX; ++p) {
+        if (*p >= _ecv_i386_library_count)
+          elfconv_runtime_error("Invalid bundled dependency index.\n");
+        if (std::find(scope.begin(), scope.end(), *p) == scope.end()) scope.push_back(*p);
+      }
+    }
+  }
+  if (_ecv_i386_library_count) {
+    auto &main = runtime->dynamic_libraries[0];
+    main.references = 1;
+    main.live = main.global = true;
+  }
+}
+
+void reset_tls_module(uint8_t *arena, const RuntimeManager::TlsThread &thread, uint32_t index) {
+  const auto &library = _ecv_i386_libraries[index];
+  const uint32_t address = library.tls_size ? thread.pointer - library.tls_distance : 0;
+  if (library.tls_size) {
+    auto *block = guest(arena, address, library.tls_size);
+    memset(block, 0, library.tls_size);
+    if (library.tls_file_size) memcpy(block, library.tls_template, library.tls_file_size);
+  }
+  memcpy(guest(arena, thread.dtv + 8 * (index + 1), 4), &address, 4);
+}
+
+RuntimeManager::TlsThread &tls_thread(uint8_t *arena, State *state, RuntimeManager *runtime) {
+  // Caller holds tls_mutex. CPU-state identity, not the host's TLS pointer, owns guest TLS.
+  for (const auto &thread : runtime->tls_threads)
+    if (thread->state == state) return *thread;
+  RuntimeManager::TlsThread *thread = nullptr;
+  for (const auto &slot : runtime->tls_threads)
+    if (!slot->state) { thread = slot.get(); break; }
+  if (!thread) {
+    const uint64_t alignment = _ecv_i386_tls_static_alignment;
+    if (alignment < 16 || alignment > 0x100000 || (alignment & (alignment - 1)))
+      elfconv_runtime_error("Invalid i386 TLS alignment.\n");
+    const uint64_t base = (runtime->tls_next_address + alignment - 1) & ~(alignment - 1);
+    const uint64_t size = (_ecv_i386_tls_static_size + 64ull +
+        8ull * (_ecv_i386_library_count + 2) + alignment - 1) & ~(alignment - 1);
+    if (base + size > 0x01000000)
+      elfconv_runtime_error("Guest thread TLS exceeds the reserved TLS region.\n");
+    if (runtime->tls_threads.empty()) {
+      if (getentropy(runtime->tls_guards, sizeof(runtime->tls_guards)))
+        elfconv_runtime_error("Cannot initialize guest TLS guards.\n");
+      runtime->tls_guards[0] &= ~0xffu;
+    }
+    auto slot = std::make_unique<RuntimeManager::TlsThread>();
+    slot->base = base;
+    slot->size = size;
+    slot->pointer = base + _ecv_i386_tls_static_size;
+    slot->dtv = slot->pointer + 64 + 8;
+    thread = slot.get();
+    runtime->tls_threads.push_back(std::move(slot));
+    runtime->tls_next_address = base + size;
+  }
+  thread->state = state;
+  memset(guest(arena, thread->base, thread->size), 0, thread->size);
+  const uint32_t header[] = {thread->pointer, thread->dtv, thread->pointer,
+      0, 0, runtime->tls_guards[0], runtime->tls_guards[1]};
+  memcpy(guest(arena, thread->pointer, sizeof(header)), header, sizeof(header));
+  const uint32_t count = _ecv_i386_library_count, generation = 1;
+  memcpy(guest(arena, thread->dtv - 8, 4), &count, 4);
+  memcpy(guest(arena, thread->dtv, 4), &generation, 4);
+  for (uint32_t i = 0; i < count; ++i)
+    if (runtime->dynamic_libraries[i].live) reset_tls_module(arena, *thread, i);
+  state->addr.gs_base.dword = thread->pointer;
+  if (std::count_if(runtime->tls_threads.begin(), runtime->tls_threads.end(),
+      [](const auto &slot) { return slot->state != nullptr; }) > 1) {
+    const uint32_t multiple = 1;
+    for (const auto &slot : runtime->tls_threads)
+      if (slot->state) memcpy(guest(arena, slot->pointer + 12, 4), &multiple, 4);
+  }
+  return *thread;
+}
+
+void reset_loaded_tls(uint8_t *arena, RuntimeManager *runtime, uint32_t index) {
+  std::lock_guard<std::mutex> lock(runtime->tls_mutex);
+  for (const auto &thread : runtime->tls_threads)
+    if (thread->state) reset_tls_module(arena, *thread, index);
+}
+
+void drain_tls_destructors(uint8_t *arena, State *state, RuntimeManager *runtime);
+
+void restore_library(uint8_t *arena, uint32_t index) {
+  char prefix[32];
+  const int length = snprintf(prefix, sizeof(prefix), "library%u:", index);
+  for (size_t i = 0; i < _ecv_data_sec_num; ++i) {
+    if (strncmp(reinterpret_cast<const char *>(_ecv_data_sec_name_ptr_array[i]), prefix, length))
+      continue;
+    memcpy(guest(arena, _ecv_data_sec_vma_array[i], _ecv_data_sec_size_array[i]),
+           _ecv_data_sec_bytes_ptr_array[i], _ecv_data_sec_size_array[i]);
+  }
+}
+
+void open_library(uint8_t *arena, State *state, RuntimeManager *runtime, uint32_t index) {
+  auto &loaded = runtime->dynamic_libraries[index];
+  if (loaded.references == UINT32_MAX) elfconv_runtime_error("Library reference count overflow.\n");
+  if (loaded.references++ || loaded.live) return;
+  loaded.live = true;  // Cyclic dependency constructors can look up each other.
+  restore_library(arena, index);
+  reset_loaded_tls(arena, runtime, index);
+  for (auto *p = _ecv_i386_libraries[index].dependencies; *p != UINT32_MAX; ++p)
+    open_library(arena, state, runtime, *p);
+  for (auto *p = _ecv_i386_libraries[index].initializers; *p; ++p)
+    invoke(arena, state, runtime, *p, runtime->dynamic_arguments, 3);
+  runtime->dynamic_initialization_order.push_back(index);
+}
+
+void close_library(uint8_t *arena, State *state, RuntimeManager *runtime, uint32_t index) {
+  auto &loaded = runtime->dynamic_libraries[index];
+  if (!loaded.references || --loaded.references || loaded.tls_destructor_count) return;
+  for (auto *p = _ecv_i386_libraries[index].finalizers; *p; ++p)
+    invoke(arena, state, runtime, *p, nullptr, 0);
+  loaded.live = loaded.global = false;
+  auto &order = runtime->dynamic_initialization_order;
+  order.erase(std::remove(order.begin(), order.end(), index), order.end());
+  for (auto *p = _ecv_i386_libraries[index].dependencies; *p != UINT32_MAX; ++p)
+    close_library(arena, state, runtime, *p);
+  for (uint32_t dependency : loaded.lookup_dependencies)
+    close_library(arena, state, runtime, dependency);
+  loaded.lookup_dependencies.clear();
+}
+
+void drain_tls_destructors(uint8_t *arena, State *state, RuntimeManager *runtime) {
+  for (;;) {
+    RuntimeManager::TlsDestructor destructor;
+    {
+      std::lock_guard<std::mutex> lock(runtime->tls_mutex);
+      auto &thread = tls_thread(arena, state, runtime);
+      if (thread.destructors.empty()) return;
+      destructor = thread.destructors.back();
+      thread.destructors.pop_back();
+    }
+    invoke(arena, state, runtime, destructor.function, &destructor.argument, 1);
+    // glibc releases the TLS pin without running global finalizers at thread exit.
+    std::lock_guard<std::mutex> lock(runtime->tls_mutex);
+    --runtime->dynamic_libraries[destructor.module].tls_destructor_count;
+  }
+}
+
+void start_library_dependencies(uint8_t *arena, State *state, RuntimeManager *runtime,
+                                const uint32_t *arguments) {
+  memcpy(runtime->dynamic_arguments, arguments, sizeof(runtime->dynamic_arguments));
+  prepare_libraries(runtime);
+  __ecv_i386_initialize_thread_tls(arena, state, runtime);
+  if (!_ecv_i386_library_count) return;
+  for (auto *p = _ecv_i386_libraries[0].dependencies; *p != UINT32_MAX; ++p) {
+    open_library(arena, state, runtime, *p);
+    for (uint32_t index : runtime->dynamic_libraries[*p].scope)
+      runtime->dynamic_libraries[index].global = true;
+  }
+}
+
+void finish_libraries(uint8_t *arena, State *state, RuntimeManager *runtime) {
+  // Finalize each still-loaded object once, even when dependency cycles retain references.
+  while (!runtime->dynamic_initialization_order.empty()) {
+    const uint32_t index = runtime->dynamic_initialization_order.back();
+    runtime->dynamic_initialization_order.pop_back();
+    auto &loaded = runtime->dynamic_libraries[index];
+    if (!loaded.live) continue;
+    for (auto *p = _ecv_i386_libraries[index].finalizers; *p; ++p)
+      invoke(arena, state, runtime, *p, nullptr, 0);
+    loaded.live = loaded.global = false;
+    loaded.references = 0;
+  }
+}
+
+const I386DynamicSymbol *lookup_library(uint32_t index, const char *name) {
+  const auto &library = _ecv_i386_libraries[index];
+  auto *end = library.symbols + library.symbol_count;
+  auto *symbol = std::lower_bound(library.symbols, end, name,
+      [](const I386DynamicSymbol &symbol, const char *name) { return strcmp(symbol.name, name) < 0; });
+  return symbol != end && !strcmp(symbol->name, name) ? symbol : nullptr;
+}
+
 struct Allocation { uint32_t size; bool free; };
 std::map<uint32_t, Allocation> allocations;
+std::recursive_mutex allocation_mutex;
 uint32_t allocate(uint32_t size) {
+  std::lock_guard<std::recursive_mutex> lock(allocation_mutex);
   if (size > UINT32_MAX - 15) return 0;
   size = (std::max(size, 1u) + 15) & ~15u;
   if (allocations.empty()) {
@@ -143,6 +379,7 @@ uint32_t allocate(uint32_t size) {
   return 0;
 }
 void release(uint32_t address) {
+  std::lock_guard<std::recursive_mutex> lock(allocation_mutex);
   if (!address) return;
   auto it = allocations.find(address);
   if (it == allocations.end() || it->second.free)
@@ -169,6 +406,7 @@ uint32_t owned_string(uint8_t *arena, const char *value) {
   if (address) memcpy(guest(arena, address, length), value, length);
   return address;
 }
+std::map<std::string, uint32_t, std::less<>> environment_values;
 std::map<uint32_t, FILE *> files;
 uint32_t next_file = 0x1000;
 FILE *stream(uint32_t handle) {
@@ -283,22 +521,283 @@ int print(Call &call, FILE *stream, unsigned format_arg) {
                     {call.arena, call.stack + 4 * (format_arg + 2)});
   return fwrite(out.data(), 1, out.size(), stream) == out.size() ? int(out.size()) : -1;
 }
-void parse_unsigned(Call &call) {
+void parse_end(Call &call, const char *input, const char *end) {
+  if (!call.word(1)) return;
+  const uint32_t address = call.word(0) + (end - input);
+  memcpy(guest(call.arena, call.word(1), 4), &address, 4);
+}
+struct ParsedInteger { uint64_t magnitude; bool negative; const char *end; };
+ParsedInteger parse_integer(Call &call, bool binary_prefix) {
   const char *input = text(call.arena, call.word(0));
-  char *end;
-  errno = 0;
-  unsigned long value = strtoul(input, &end, call.word(2));
-  if (value > UINT32_MAX) { value = UINT32_MAX; errno = ERANGE; }
-  if (call.word(1)) {
-    uint32_t address = call.word(0) + (end - input);
-    memcpy(guest(call.arena, call.word(1), 4), &address, 4);
+  const char *digits = input;
+  while (isspace(static_cast<unsigned char>(*digits))) ++digits;
+  const bool negative = *digits == '-';
+  const bool sign = negative || *digits == '+';
+  if (sign) ++digits;
+  int base = int32_t(call.word(2));
+  if (base != 0 && (base < 2 || base > 36)) {
+    errno = EINVAL; return {0, negative, input};
   }
-  call.result(value);
+  if (sign && (isspace(static_cast<unsigned char>(*digits)) || *digits == '+' || *digits == '-'))
+    return {0, negative, input};
+  if (binary_prefix && (base == 0 || base == 2) && digits[0] == '0' &&
+      (digits[1] == 'b' || digits[1] == 'B') && (digits[2] == '0' || digits[2] == '1')) {
+    digits += 2; base = 2;
+  }
+  char *end = const_cast<char *>(digits);
+  const uint64_t magnitude = strtoull(digits, &end, base);
+  return {magnitude, negative, end == digits ? input : end};
+}
+void parse_unsigned(Call &call, bool binary_prefix = false) {
+  const char *input = text(call.arena, call.word(0));
+  const auto parsed = parse_integer(call, binary_prefix);
+  uint64_t value = parsed.magnitude;
+  if (value > UINT32_MAX) { value = UINT32_MAX; errno = ERANGE; }
+  else if (parsed.negative) value = uint32_t(0) - uint32_t(value);
+  parse_end(call, input, parsed.end);
+  call.result(uint32_t(value));
+}
+void parse_signed(Call &call, unsigned bits, bool binary_prefix = false) {
+  const char *input = text(call.arena, call.word(0));
+  const auto parsed = parse_integer(call, binary_prefix);
+  const uint64_t maximum = (uint64_t(1) << (bits - 1)) - 1;
+  const uint64_t limit = maximum + parsed.negative;
+  uint64_t magnitude = parsed.magnitude;
+  if (magnitude > limit) { magnitude = limit; errno = ERANGE; }
+  const uint64_t value = parsed.negative ? uint64_t(0) - magnitude : magnitude;
+  parse_end(call, input, parsed.end);
+  if (bits == 64) call.result64(value);
+  else call.result(uint32_t(value));
 }
 }  // namespace
 
+extern "C" void __ecv_i386_initialize_thread_tls(uint8_t *arena, State *state,
+                                               RuntimeManager *runtime) {
+  std::lock_guard<std::mutex> lock(runtime->tls_mutex);
+  prepare_libraries(runtime);
+  tls_thread(arena, state, runtime);
+}
+
+extern "C" uint32_t __ecv_i386_tls_address(uint8_t *arena, State *state,
+    RuntimeManager *runtime, uint32_t module, uint32_t offset) {
+  std::lock_guard<std::mutex> lock(runtime->tls_mutex);
+  prepare_libraries(runtime);
+  if (!module || module > _ecv_i386_library_count ||
+      !runtime->dynamic_libraries[module - 1].live ||
+      offset >= _ecv_i386_libraries[module - 1].tls_size)
+    elfconv_runtime_error("Invalid or unloaded guest TLS module/offset: %u/%u.\n", module, offset);
+  return tls_thread(arena, state, runtime).pointer -
+      _ecv_i386_libraries[module - 1].tls_distance + offset;
+}
+
+extern "C" void __ecv_i386_finalize_thread_tls(uint8_t *arena, State *state,
+                                             RuntimeManager *runtime) {
+  drain_tls_destructors(arena, state, runtime);
+  std::lock_guard<std::mutex> lock(runtime->tls_mutex);
+  auto &thread = tls_thread(arena, state, runtime);
+  memset(guest(arena, thread.base, thread.size), 0, thread.size);
+  thread.state = nullptr;
+  state->addr.gs_base.dword = 0;
+}
+
+
 #define IMPORT(name) extern "C" void __ecv_i386_##name(uint8_t *arena, State *state, uint32_t, RuntimeManager *runtime)
+#include "I386Pthreads.inc"
 #define CALL Call call(arena, state)
+namespace {
+static_assert(CLOCK_REALTIME == 0 && CLOCK_MONOTONIC == 1 &&
+              CLOCK_PROCESS_CPUTIME_ID == 2 && CLOCK_THREAD_CPUTIME_ID == 3,
+              "Linux i386 clock ID mismatch");
+bool store_time32(uint8_t *arena, uint32_t address, int64_t seconds, int32_t fraction) {
+  if (seconds < INT32_MIN || seconds > INT32_MAX) { errno = EOVERFLOW; return false; }
+  const int32_t value[2] = {int32_t(seconds), fraction};
+  memcpy(guest(arena, address, sizeof(value)), value, sizeof(value));
+  return true;
+}
+}
+IMPORT(time) {
+  CALL;
+  const time_t value = time(nullptr);
+  if (value < INT32_MIN || value > INT32_MAX) {
+    errno = EOVERFLOW; call.result(-1); return;
+  }
+  const int32_t result = value;
+  if (call.word(0)) memcpy(guest(arena, call.word(0), 4), &result, 4);
+  call.result(result);
+}
+IMPORT(clock_gettime) {
+  CALL;
+  struct timespec value;
+  int result = clock_gettime(int32_t(call.word(0)), &value);
+  if (!result && !store_time32(arena, call.word(1), value.tv_sec, value.tv_nsec)) result = -1;
+  call.result(result);
+}
+IMPORT(gettimeofday) {
+  CALL;
+  struct timeval value;
+  struct timezone zone;
+  int result = gettimeofday(&value, call.word(1) ? &zone : nullptr);
+  if (!result && call.word(0) &&
+      !store_time32(arena, call.word(0), value.tv_sec, value.tv_usec)) result = -1;
+  if (!result && call.word(1)) {
+    const int32_t data[2] = {zone.tz_minuteswest, zone.tz_dsttime};
+    memcpy(guest(arena, call.word(1), sizeof(data)), data, sizeof(data));
+  }
+  call.result(result);
+}
+IMPORT(nanosleep) {
+  CALL;
+  int32_t request[2];
+  memcpy(request, guest(arena, call.word(0), sizeof(request)), sizeof(request));
+  const struct timespec duration = {request[0], request[1]};
+  struct timespec remaining = {};
+  const int result = nanosleep(&duration, call.word(1) ? &remaining : nullptr);
+  if (result && errno == EINTR && call.word(1))
+    store_time32(arena, call.word(1), remaining.tv_sec, remaining.tv_nsec);
+  call.result(result);
+}
+IMPORT(sleep) { CALL; call.result(sleep(call.word(0))); }
+
+IMPORT(___tls_get_addr) {
+  CALL;
+  uint32_t index[2];
+  memcpy(index, guest(arena, state->gpr.rax.dword, sizeof(index)), sizeof(index));
+  call.result(__ecv_i386_tls_address(arena, state, runtime, index[0], index[1]));
+}
+IMPORT(__tls_get_addr) {
+  CALL;
+  uint32_t index[2];
+  memcpy(index, guest(arena, call.word(0), sizeof(index)), sizeof(index));
+  call.result(__ecv_i386_tls_address(arena, state, runtime, index[0], index[1]));
+}
+IMPORT(tlsdesc) {
+  CALL;
+  uint32_t offset;
+  memcpy(&offset, guest(arena, state->gpr.rax.dword + 4, 4), 4);
+  call.result(offset);
+}
+
+static void register_tls_destructor(uint8_t *arena, State *state, RuntimeManager *runtime) {
+  Call call(arena, state);
+  prepare_libraries(runtime);
+  const uint32_t handle = call.word(2);
+  uint32_t module = 0;
+  for (uint32_t i = 1; i < _ecv_i386_library_count; ++i)
+    if (handle >= _ecv_i386_libraries[i].image_begin &&
+        handle < _ecv_i386_libraries[i].image_end) { module = i; break; }
+  {
+    std::lock_guard<std::mutex> lock(runtime->tls_mutex);
+    tls_thread(arena, state, runtime).destructors.push_back(
+        {call.word(0), call.word(1), module});
+    auto &count = runtime->dynamic_libraries[module].tls_destructor_count;
+    if (count == UINT32_MAX) elfconv_runtime_error("TLS destructor count overflow.\n");
+    ++count;
+  }
+  call.result(0);
+}
+IMPORT(__cxa_thread_atexit_impl) { register_tls_destructor(arena, state, runtime); }
+IMPORT(__cxa_thread_atexit) { register_tls_destructor(arena, state, runtime); }
+
+
+IMPORT(dlopen) {
+  CALL;
+  prepare_libraries(runtime);
+  const uint32_t flags = call.word(1);
+  if ((flags & ~0x107u) || !(flags & 3) || (flags & 3) == 3) {
+    dynamic_error(runtime, "Unsupported dlopen flags", "");
+    call.result(0);
+    return;
+  }
+  const char *name = call.word(0) ? text(arena, call.word(0)) : nullptr;
+  uint32_t index = 0;
+  if (name) {
+    const char *basename = strrchr(name, '/');
+    basename = basename ? basename + 1 : name;
+    for (index = 1; index < _ecv_i386_library_count; ++index) {
+      const auto &library = _ecv_i386_libraries[index];
+      if (!strcmp(name, library.path) || !strcmp(name, library.name) ||
+          !strcmp(basename, library.filename)) break;
+    }
+  }
+  if ((flags & 4) && index < _ecv_i386_library_count &&
+      !runtime->dynamic_libraries[index].live) {
+    call.result(0);
+    return;
+  }
+  if (index >= _ecv_i386_library_count) {
+    dynamic_error(runtime, "Library not bundled", name ? name : "<main>");
+    call.result(0);
+    return;
+  }
+  open_library(arena, state, runtime, index);
+  if (flags & 0x100)
+    for (uint32_t member : runtime->dynamic_libraries[index].scope)
+      runtime->dynamic_libraries[member].global = true;
+  call.result(library_handle_base + index);
+}
+
+IMPORT(dlsym) {
+  CALL;
+  prepare_libraries(runtime);
+  const uint32_t handle = call.word(0);
+  const char *name = text(arena, call.word(1));
+  const I386DynamicSymbol *symbol = nullptr;
+  if (!handle) {
+    for (uint32_t i = 0; i < _ecv_i386_library_count; ++i) {
+      const auto &loaded = runtime->dynamic_libraries[i];
+      if (!loaded.live || !loaded.global || !(symbol = lookup_library(i, name))) continue;
+      uint32_t return_pc;
+      memcpy(&return_pc, guest(arena, call.stack, 4), 4);
+      uint32_t caller = 0;
+      for (uint32_t j = 1; j < _ecv_i386_library_count; ++j) {
+        const auto &library = _ecv_i386_libraries[j];
+        if (return_pc >= library.image_begin && return_pc < library.image_end) { caller = j; break; }
+      }
+      auto &dependencies = runtime->dynamic_libraries[caller].lookup_dependencies;
+      if (caller != i && std::find(dependencies.begin(), dependencies.end(), i) == dependencies.end()) {
+        dependencies.push_back(i);
+        open_library(arena, state, runtime, i);
+      }
+      break;
+    }
+  } else if (handle >= library_handle_base &&
+             handle - library_handle_base < _ecv_i386_library_count &&
+             runtime->dynamic_libraries[handle - library_handle_base].live) {
+    for (uint32_t index : runtime->dynamic_libraries[handle - library_handle_base].scope)
+      if ((symbol = lookup_library(index, name))) break;
+  } else {
+    dynamic_error(runtime, "Invalid or unsupported dlsym handle", name);
+    call.result(0);
+    return;
+  }
+  if (!symbol) dynamic_error(runtime, "Undefined dynamic symbol", name);
+  call.result(symbol ? (symbol->tls_module
+      ? __ecv_i386_tls_address(arena, state, runtime, symbol->tls_module, symbol->address)
+      : symbol->address) : 0);
+}
+
+IMPORT(dlclose) {
+  CALL;
+  prepare_libraries(runtime);
+  const uint32_t handle = call.word(0);
+  if (handle < library_handle_base || handle - library_handle_base >= _ecv_i386_library_count ||
+      !runtime->dynamic_libraries[handle - library_handle_base].live ||
+      (handle == library_handle_base && runtime->dynamic_libraries[0].references == 1)) {
+    dynamic_error(runtime, "Invalid dlclose handle", "");
+    call.result(UINT32_MAX);
+    return;
+  }
+  close_library(arena, state, runtime, handle - library_handle_base);
+  call.result(0);
+}
+
+IMPORT(dlerror) {
+  CALL;
+  const uint32_t error = runtime->dynamic_error_pending
+      ? copy_string(arena, runtime->dynamic_error, 8) : 0;
+  runtime->dynamic_error_pending = false;
+  call.result(error);
+}
 
 extern "C" int __ecv_i386_run_function_entry(uint8_t *arena, State *state,
                                            uint32_t entry, RuntimeManager *runtime) {
@@ -306,29 +805,154 @@ extern "C" int __ecv_i386_run_function_entry(uint8_t *arena, State *state,
   const uint32_t argv = state->gpr.rsp.dword + 4;
   memcpy(&argc, guest(arena, state->gpr.rsp.dword, 4), 4);
   const uint32_t args[] = {argc, argv, argv + 4 * (argc + 1)};
+  start_library_dependencies(arena, state, runtime, args);
   for (auto *p = _ecv_i386_initializers; *p; ++p)
     invoke(arena, state, runtime, *p, args, 3);
   invoke(arena, state, runtime, entry, args, 3);
   const int status = state->gpr.rax.dword;
+  drain_tls_destructors(arena, state, runtime);
   for (auto *p = _ecv_i386_finalizers; *p; ++p)
     invoke(arena, state, runtime, *p, nullptr, 0);
+  finish_libraries(arena, state, runtime);
   return status;
 }
 IMPORT(__libc_start_main) {
   CALL;
   uint32_t main = call.word(0), argc = call.word(1), argv = call.word(2);
   uint32_t args[] = {argc, argv, argv + 4 * (argc + 1)};
+  start_library_dependencies(arena, state, runtime, args);
   if (call.word(3)) invoke(arena, state, runtime, call.word(3), args, 3);
   else for (auto *p = _ecv_i386_initializers; *p; ++p) invoke(arena, state, runtime, *p, args, 3);
   invoke(arena, state, runtime, main, args, 3);
   int status = state->gpr.rax.dword;
+  drain_tls_destructors(arena, state, runtime);
   for (auto *p = _ecv_i386_finalizers; *p; ++p) invoke(arena, state, runtime, *p, nullptr, 0);
   if (call.word(4)) invoke(arena, state, runtime, call.word(4), nullptr, 0);
+  finish_libraries(arena, state, runtime);
   exit(status);
 }
 IMPORT(strcmp) { CALL; call.result(strcmp(text(arena, call.word(0)), text(arena, call.word(1)))); }
+IMPORT(getenv) {
+  CALL;
+  const char *name = text(arena, call.word(0));
+  const char *value = getenv(name);
+  if (!value) { call.result(0); return; }
+  auto found = environment_values.find(name);
+  if (found != environment_values.end() &&
+      !strcmp(text(arena, found->second), value)) {
+    call.result(found->second);
+    return;
+  }
+  const uint32_t result = owned_string(arena, value);
+  if (!result) { call.result(0); return; }
+  if (found == environment_values.end()) environment_values.emplace(name, result);
+  else { release(found->second); found->second = result; }
+  call.result(result);
+}
+IMPORT(setenv) {
+  CALL;
+  call.result(setenv(text(arena, call.word(0)), text(arena, call.word(1)), int32_t(call.word(2))));
+}
+namespace {
+static_assert(sizeof(wchar_t) == 4, "Linux i386 wide-character ABI mismatch");
+wchar_t *wide_buffer(uint8_t *arena, uint32_t address, uint32_t count) {
+  return static_cast<wchar_t *>(guest(arena, address, uint64_t(count) * 4));
+}
+uint32_t wide_length(uint8_t *arena, uint32_t address) {
+  const auto *begin = wide_buffer(arena, address, 1);
+  const auto *end = begin + (MEMORY_ARENA_SIZE - address) / 4;
+  const auto *terminator = std::find(begin, end, wchar_t(0));
+  if (terminator == end) elfconv_runtime_error("Unterminated i386 wide string.\n");
+  return terminator - begin;
+}
+const wchar_t *wide_text(uint8_t *arena, uint32_t address) {
+  const uint32_t length = wide_length(arena, address);
+  return wide_buffer(arena, address, length + 1);
+}
+}  // namespace
+IMPORT(wcslen) { CALL; call.result(wide_length(arena, call.word(0))); }
+IMPORT(wcscmp) {
+  CALL;
+  call.result(wcscmp(wide_text(arena, call.word(0)), wide_text(arena, call.word(1))));
+}
+IMPORT(wcsncpy) {
+  CALL;
+  const uint32_t count = call.word(2);
+  if (count) {
+    auto *destination = wide_buffer(arena, call.word(0), count);
+    uint32_t copied = 0;
+    while (copied < count) {
+      const uint64_t address = uint64_t(call.word(1)) + uint64_t(copied) * 4;
+      if (address > UINT32_MAX) elfconv_runtime_error("Guest wide string address overflow.\n");
+      const wchar_t value = *wide_buffer(arena, uint32_t(address), 1);
+      if (!value) break;
+      destination[copied++] = value;
+    }
+    if (copied < count) wmemset(destination + copied, 0, count - copied);
+  }
+  call.result(call.word(0));
+}
+IMPORT(wcsncat) {
+  CALL;
+  const uint32_t destination = call.word(0), count = call.word(2);
+  const uint32_t length = wide_length(arena, destination);
+  uint32_t copied = 0;
+  while (copied < count) {
+    const uint64_t source = uint64_t(call.word(1)) + uint64_t(copied) * 4;
+    if (source > UINT32_MAX) elfconv_runtime_error("Guest wide string address overflow.\n");
+    const wchar_t value = *wide_buffer(arena, uint32_t(source), 1);
+    if (!value) break;
+    const uint64_t target = uint64_t(destination) + (uint64_t(length) + copied) * 4;
+    if (target > UINT32_MAX) elfconv_runtime_error("Guest wide string address overflow.\n");
+    *wide_buffer(arena, uint32_t(target), 1) = value;
+    ++copied;
+  }
+  const uint64_t terminator = uint64_t(destination) + (uint64_t(length) + copied) * 4;
+  if (terminator > UINT32_MAX) elfconv_runtime_error("Guest wide string address overflow.\n");
+  *wide_buffer(arena, uint32_t(terminator), 1) = 0;
+  call.result(destination);
+}
+IMPORT(wmemcpy) {
+  CALL;
+  const uint32_t count = call.word(2);
+  if (count) wmemcpy(wide_buffer(arena, call.word(0), count), wide_buffer(arena, call.word(1), count), count);
+  call.result(call.word(0));
+}
+IMPORT(wmemmove) {
+  CALL;
+  const uint32_t count = call.word(2);
+  if (count) wmemmove(wide_buffer(arena, call.word(0), count), wide_buffer(arena, call.word(1), count), count);
+  call.result(call.word(0));
+}
+IMPORT(wmemset) {
+  CALL;
+  const uint32_t count = call.word(2);
+  if (count) wmemset(wide_buffer(arena, call.word(0), count), wchar_t(call.word(1)), count);
+  call.result(call.word(0));
+}
+IMPORT(wmemcmp) {
+  CALL;
+  const uint32_t count = call.word(2);
+  call.result(count ? wmemcmp(wide_buffer(arena, call.word(0), count),
+                            wide_buffer(arena, call.word(1), count), count) : 0);
+}
+IMPORT(wmemchr) {
+  CALL;
+  const uint32_t count = call.word(2), address = call.word(0);
+  if (!count) { call.result(0); return; }
+  const auto *begin = wide_buffer(arena, address, count);
+  const auto *found = wmemchr(begin, wchar_t(call.word(1)), count);
+  call.result(found ? address + uint32_t(found - begin) * 4 : 0);
+}
+IMPORT(towlower) { CALL; call.result(towlower(call.word(0))); }
+IMPORT(towupper) { CALL; call.result(towupper(call.word(0))); }
+IMPORT(iswspace) { CALL; call.result(iswspace(call.word(0))); }
 IMPORT(strtoul) { CALL; parse_unsigned(call); }
-IMPORT(__isoc23_strtoul) { CALL; parse_unsigned(call); }
+IMPORT(__isoc23_strtoul) { CALL; parse_unsigned(call, true); }
+IMPORT(strtol) { CALL; parse_signed(call, 32); }
+IMPORT(strtoll) { CALL; parse_signed(call, 64); }
+IMPORT(__isoc23_strtol) { CALL; parse_signed(call, 32, true); }
+IMPORT(__isoc23_strtoll) { CALL; parse_signed(call, 64, true); }
 IMPORT(printf) { CALL; call.result(print(call, stdout, 0)); }
 IMPORT(fprintf) {
   CALL;
@@ -358,6 +982,7 @@ IMPORT(calloc) {
 }
 IMPORT(realloc) {
   CALL;
+  std::lock_guard<std::recursive_mutex> lock(allocation_mutex);
   uint32_t old = call.word(0), size = call.word(1);
   if (!old) { call.result(allocate(size)); return; }
   if (!size) { release(old); call.result(0); return; }
@@ -388,6 +1013,13 @@ IMPORT(memset) {
   if (call.word(2)) memset(guest(arena, call.word(0), call.word(2)), call.word(1), call.word(2));
   call.result(call.word(0));
 }
+IMPORT(memcmp) {
+  CALL;
+  const uint32_t size = call.word(2);
+  call.result(size ? memcmp(guest(arena, call.word(0), size),
+                           guest(arena, call.word(1), size), size) : 0);
+}
+IMPORT(getpid) { CALL; call.result(runtime->main_ecv_pr->ecv_pid); }
 IMPORT(strlen) { CALL; call.result(strlen(text(arena, call.word(0)))); }
 IMPORT(strcpy) {
   CALL;
@@ -407,7 +1039,7 @@ IMPORT(strncmp) {
   uint32_t size = call.word(2);
   // Either input may terminate before n; a terminated string need not own n bytes.
   if (!size) { call.result(0); return; }
-  const char *a = text(arena, call.word(0)), *b = text(arena, call.word(1));
+  const char *a = bounded_text(arena, call.word(0), size), *b = bounded_text(arena, call.word(1), size);
   call.result(strncmp(a, b, size));
 }
 IMPORT(strrchr) {
@@ -415,6 +1047,88 @@ IMPORT(strrchr) {
   const char *start = text(arena, call.word(0)), *found = strrchr(start, call.word(1));
   call.result(found ? call.word(0) + (found - start) : 0);
 }
+IMPORT(strchr) {
+  CALL;
+  const char *start = text(arena, call.word(0)), *found = strchr(start, call.word(1));
+  call.result(found ? call.word(0) + (found - start) : 0);
+}
+IMPORT(strstr) {
+  CALL;
+  const char *start = text(arena, call.word(0)), *found = strstr(start, text(arena, call.word(1)));
+  call.result(found ? call.word(0) + (found - start) : 0);
+}
+IMPORT(strcasestr) {
+  CALL;
+  const char *start = text(arena, call.word(0)), *found = strcasestr(start, text(arena, call.word(1)));
+  call.result(found ? call.word(0) + (found - start) : 0);
+}
+IMPORT(strpbrk) {
+  CALL;
+  const char *start = text(arena, call.word(0)), *found = strpbrk(start, text(arena, call.word(1)));
+  call.result(found ? call.word(0) + (found - start) : 0);
+}
+IMPORT(strcasecmp) { CALL; call.result(strcasecmp(text(arena, call.word(0)), text(arena, call.word(1)))); }
+IMPORT(strncasecmp) {
+  CALL;
+  const uint32_t size = call.word(2);
+  call.result(size ? strncasecmp(bounded_text(arena, call.word(0), size),
+                               bounded_text(arena, call.word(1), size), size) : 0);
+}
+IMPORT(strdup) { CALL; call.result(owned_string(arena, text(arena, call.word(0)))); }
+IMPORT(memchr) {
+  CALL;
+  const uint32_t size = call.word(2);
+  if (!size) { call.result(0); return; }
+  auto *start = static_cast<uint8_t *>(guest(arena, call.word(0), size));
+  auto *found = static_cast<uint8_t *>(memchr(start, call.word(1), size));
+  call.result(found ? call.word(0) + (found - start) : 0);
+}
+namespace {
+void concatenate(Call &call, bool bounded, bool fortified) {
+  const uint32_t destination = call.word(0);
+  const char *prefix = text(call.arena, destination);
+  const size_t prefix_size = strlen(prefix);
+  const uint32_t limit = bounded ? call.word(2) : 0;
+  const char *source = bounded && !limit ? "" : bounded ?
+      bounded_text(call.arena, call.word(1), limit) : text(call.arena, call.word(1));
+  const size_t source_size = bounded ? strnlen(source, limit) : strlen(source);
+  const size_t size = prefix_size + source_size + 1;
+  if (fortified && size > call.word(bounded ? 3 : 2))
+    elfconv_runtime_error("Guest fortified concatenation overflow.\n");
+  auto *output = static_cast<char *>(guest(call.arena, destination, size));
+  memcpy(output + prefix_size, source, source_size);
+  output[size - 1] = 0;
+  call.result(destination);
+}
+void copy_checked(Call &call, bool fortified, bool end_pointer) {
+  const char *source = text(call.arena, call.word(1));
+  const size_t size = strlen(source) + 1;
+  if (fortified && size > call.word(2))
+    elfconv_runtime_error("Guest fortified string copy overflow.\n");
+  memcpy(guest(call.arena, call.word(0), size), source, size);
+  call.result(call.word(0) + (end_pointer ? size - 1 : 0));
+}
+}
+IMPORT(strcat) { CALL; concatenate(call, false, false); }
+IMPORT(strncat) { CALL; concatenate(call, true, false); }
+IMPORT(stpcpy) { CALL; copy_checked(call, false, true); }
+IMPORT(__strcpy_chk) { CALL; copy_checked(call, true, false); }
+IMPORT(__stpcpy_chk) { CALL; copy_checked(call, true, true); }
+IMPORT(__strcat_chk) { CALL; concatenate(call, false, true); }
+IMPORT(__strncat_chk) { CALL; concatenate(call, true, true); }
+IMPORT(__memcpy_chk) {
+  CALL;
+  const uint32_t size = call.word(2);
+  if (size > call.word(3)) elfconv_runtime_error("Guest fortified memory copy overflow.\n");
+  if (size) memcpy(guest(arena, call.word(0), size), guest(arena, call.word(1), size), size);
+  call.result(call.word(0));
+}
+IMPORT(__errno_location) {
+  CALL;
+  __ecv_i386_initialize_thread_tls(arena, state, runtime);
+  call.result(state->addr.gs_base.dword + guest_errno_offset);
+}
+IMPORT(strerror) { CALL; call.result(copy_string(arena, strerror(i386_errno_to_host(call.word(0))), 9)); }
 IMPORT(strcspn) { CALL; call.result(strcspn(text(arena, call.word(0)), text(arena, call.word(1)))); }
 IMPORT(fopen) {
   CALL;
@@ -422,6 +1136,16 @@ IMPORT(fopen) {
   if (!file) { call.result(0); return; }
   uint32_t handle = next_file++;
   files.emplace(handle, file);
+  call.result(handle);
+}
+IMPORT(fopen64) { __ecv_i386_fopen(arena, state, 0, runtime); }
+IMPORT(freopen) {
+  CALL;
+  const uint32_t handle = call.word(2);
+  FILE *file = freopen(call.word(0) ? text(arena, call.word(0)) : nullptr,
+                       text(arena, call.word(1)), stream(handle));
+  if (!file) { files.erase(handle); call.result(0); return; }
+  files[handle] = file;
   call.result(handle);
 }
 IMPORT(fclose) {
@@ -440,12 +1164,56 @@ IMPORT(fread) {
 }
 IMPORT(fseek) { CALL; call.result(fseek(stream(call.word(0)), int32_t(call.word(1)), call.word(2))); }
 IMPORT(ftell) { CALL; call.result(ftell(stream(call.word(0)))); }
+IMPORT(fseeko64) {
+  CALL;
+  call.result(fseeko(stream(call.word(0)), int64_t(call.wide(1)), int32_t(call.word(3))));
+}
+IMPORT(ftello64) { CALL; call.result64(ftello(stream(call.word(0)))); }
+IMPORT(lseek64) {
+  CALL;
+  call.result64(lseek(int32_t(call.word(0)), int64_t(call.wide(1)), int32_t(call.word(3))));
+}
 IMPORT(feof) { CALL; call.result(feof(stream(call.word(0)))); }
 IMPORT(rewind) { CALL; rewind(stream(call.word(0))); }
 IMPORT(fflush) { CALL; call.result(fflush(call.word(0) ? stream(call.word(0)) : nullptr)); }
+IMPORT(fgetc) { CALL; call.result(fgetc(stream(call.word(0)))); }
+IMPORT(getc) { CALL; call.result(getc(stream(call.word(0)))); }
+IMPORT(ungetc) { CALL; call.result(ungetc(int32_t(call.word(0)), stream(call.word(1)))); }
+IMPORT(ferror) { CALL; call.result(ferror(stream(call.word(0)))); }
+IMPORT(fileno) { CALL; call.result(fileno(stream(call.word(0)))); }
+IMPORT(fgets) {
+  CALL;
+  const int size = int32_t(call.word(1));
+  if (size <= 0) { call.result(0); return; }
+  auto *buffer = static_cast<char *>(guest(arena, call.word(0), size));
+  call.result(fgets(buffer, size, stream(call.word(2))) ? call.word(0) : 0);
+}
+IMPORT(fputs) { CALL; call.result(fputs(text(arena, call.word(0)), stream(call.word(1)))); }
+IMPORT(fdopen) {
+  CALL;
+  FILE *file = fdopen(int32_t(call.word(0)), text(arena, call.word(1)));
+  if (!file) { call.result(0); return; }
+  const uint32_t handle = next_file++;
+  files.emplace(handle, file);
+  call.result(handle);
+}
+IMPORT(setvbuf) {
+  CALL;
+  const uint32_t address = call.word(1), size = call.word(3);
+  call.result(setvbuf(stream(call.word(0)), address ? static_cast<char *>(guest(arena, address, size)) : nullptr,
+                     call.word(2), size));
+}
+IMPORT(_exit) { CALL; _Exit(int32_t(call.word(0))); }
 IMPORT(fputc) { CALL; call.result(fputc(call.word(0), stream(call.word(1)))); }
+IMPORT(putc) { CALL; call.result(putc(int32_t(call.word(0)), stream(call.word(1)))); }
 IMPORT(putchar) { CALL; call.result(putchar(call.word(0))); }
-IMPORT(exit) { CALL; exit(call.word(0)); }
+IMPORT(exit) {
+  CALL;
+  const uint32_t status = call.word(0);
+  drain_tls_destructors(arena, state, runtime);
+  finish_libraries(arena, state, runtime);
+  exit(status);
+}
 IMPORT(usleep) {
   CALL;
 #ifdef __EMSCRIPTEN__
@@ -461,16 +1229,21 @@ IMPORT(__assert_fail) {
       text(arena, call.word(0)), text(arena, call.word(1)), call.word(2), text(arena, call.word(3)));
 }
 namespace {
-void float_result(State *state, float value) {
+void floating_result(State *state, double value) {
   for (unsigned i = 7; i; --i) state->st.elems[i].val = state->st.elems[i - 1].val;
   state->st.elems[0].val = float80_t(double(value));
   state->x87.fxsave.swd.top = (state->x87.fxsave.swd.top + 7) % 8;
+  state->x87.fxsave.ftw.flat |= uint8_t(1u << state->x87.fxsave.swd.top);
 }
-void buffer_format(Call &call, bool bounded, bool va_list) {
-  unsigned format_arg = bounded ? 2 : 1;
+void buffer_format(Call &call, bool bounded, bool va_list, bool fortified = false) {
+  unsigned format_arg = (bounded ? 2 : 1) + (fortified ? 2 : 0);
+  if (fortified && bounded && call.word(1) > call.word(3))
+    elfconv_runtime_error("Guest fortified formatting overflow.\n");
   uint32_t args = va_list ? call.word(format_arg + 1) : call.stack + 4 * (format_arg + 2);
   auto out = format(call.arena, text(call.arena, call.word(format_arg)), {call.arena, args});
   uint32_t capacity = bounded ? call.word(1) : uint32_t(out.size() + 1);
+  if (fortified && !bounded && capacity > call.word(2))
+    elfconv_runtime_error("Guest fortified formatting overflow.\n");
   if (capacity) {
     size_t length = std::min(out.size(), size_t(capacity - 1));
     auto *dst = static_cast<char *>(guest(call.arena, call.word(0), length + 1));
@@ -480,15 +1253,133 @@ void buffer_format(Call &call, bool bounded, bool va_list) {
   call.result(out.size());
 }
 }
-IMPORT(floorf) { CALL; float_result(state, floorf(call.real(0))); }
-IMPORT(ceilf) { CALL; float_result(state, ceilf(call.real(0))); }
-IMPORT(sqrtf) { CALL; float_result(state, sqrtf(call.real(0))); }
-IMPORT(sinf) { CALL; float_result(state, sinf(call.real(0))); }
-IMPORT(cosf) { CALL; float_result(state, cosf(call.real(0))); }
+IMPORT(floorf) { CALL; floating_result(state, floorf(call.real(0))); }
+IMPORT(ceilf) { CALL; floating_result(state, ceilf(call.real(0))); }
+IMPORT(sqrtf) { CALL; floating_result(state, sqrtf(call.real(0))); }
+IMPORT(sinf) { CALL; floating_result(state, sinf(call.real(0))); }
+IMPORT(cosf) { CALL; floating_result(state, cosf(call.real(0))); }
+IMPORT(strtod) {
+  CALL;
+  const char *input = text(arena, call.word(0));
+  char *end = const_cast<char *>(input);
+  const double value = strtod(input, &end);
+  parse_end(call, input, end);
+  floating_result(state, value);
+}
+IMPORT(acosf) { CALL; floating_result(state, acosf(call.real(0))); }
+IMPORT(asinf) { CALL; floating_result(state, asinf(call.real(0))); }
+IMPORT(atanf) { CALL; floating_result(state, atanf(call.real(0))); }
+IMPORT(atan2f) { CALL; floating_result(state, atan2f(call.real(0), call.real(1))); }
+IMPORT(cbrtf) { CALL; floating_result(state, cbrtf(call.real(0))); }
+IMPORT(fmodf) { CALL; floating_result(state, fmodf(call.real(0), call.real(1))); }
+IMPORT(logf) { CALL; floating_result(state, logf(call.real(0))); }
+IMPORT(powf) { CALL; floating_result(state, powf(call.real(0), call.real(1))); }
+IMPORT(tanf) { CALL; floating_result(state, tanf(call.real(0))); }
+IMPORT(ceil) { CALL; floating_result(state, ceil(call.real64(0))); }
+IMPORT(cos) { CALL; floating_result(state, cos(call.real64(0))); }
+IMPORT(exp) { CALL; floating_result(state, exp(call.real64(0))); }
+IMPORT(floor) { CALL; floating_result(state, floor(call.real64(0))); }
+IMPORT(pow) { CALL; floating_result(state, pow(call.real64(0), call.real64(2))); }
+IMPORT(sin) { CALL; floating_result(state, sin(call.real64(0))); }
+IMPORT(tan) { CALL; floating_result(state, tan(call.real64(0))); }
+IMPORT(modf) {
+  CALL;
+  double integral;
+  const double fractional = modf(call.real64(0), &integral);
+  memcpy(guest(arena, call.word(2), sizeof(integral)), &integral, sizeof(integral));
+  floating_result(state, fractional);
+}
+IMPORT(sincosf) {
+  CALL;
+  const float value = call.real(0), sine = sinf(value), cosine = cosf(value);
+  memcpy(guest(arena, call.word(1), sizeof(sine)), &sine, sizeof(sine));
+  memcpy(guest(arena, call.word(2), sizeof(cosine)), &cosine, sizeof(cosine));
+}
+IMPORT(frexpl) {
+  CALL;
+  float80_t value;
+  memcpy(value.data, guest(arena, call.stack + 4, 12), 10);
+  int exponent;
+  const double fraction = frexp(double(value), &exponent);
+  memcpy(guest(arena, call.word(3), sizeof(exponent)), &exponent, sizeof(exponent));
+  floating_result(state, fraction);
+}
 IMPORT(sprintf) { CALL; buffer_format(call, false, false); }
 IMPORT(snprintf) { CALL; buffer_format(call, true, false); }
 IMPORT(vsnprintf) { CALL; buffer_format(call, true, true); }
+IMPORT(__snprintf_chk) { CALL; buffer_format(call, true, false, true); }
+IMPORT(__sprintf_chk) { CALL; buffer_format(call, false, false, true); }
+IMPORT(__vsnprintf_chk) { CALL; buffer_format(call, true, true, true); }
 IMPORT(mkdir) { CALL; call.result(mkdir(text(arena, call.word(0)), call.word(1))); }
+IMPORT(open) {
+  CALL;
+  const int flags = call.word(1);
+  // i386 Linux and Emscripten use the same open flag bits.
+  static_assert(O_CREAT == 0100 && O_TRUNC == 01000 && O_DIRECTORY == 0200000, "Open flag ABI mismatch");
+  const bool needs_mode = (flags & 0100) || (flags & 020000000) == 020000000;
+  call.result(open(text(arena, call.word(0)), flags, needs_mode ? call.word(2) : 0));
+}
+IMPORT(open64) { __ecv_i386_open(arena, state, 0, runtime); }
+IMPORT(close) { CALL; call.result(close(int32_t(call.word(0)))); }
+IMPORT(read) {
+  CALL;
+  const uint32_t size = call.word(2);
+  call.result(read(int32_t(call.word(0)), size ? guest(arena, call.word(1), size) : nullptr, size));
+}
+IMPORT(write) {
+  CALL;
+  const uint32_t size = call.word(2);
+  call.result(write(int32_t(call.word(0)), size ? guest(arena, call.word(1), size) : nullptr, size));
+}
+IMPORT(access) { CALL; call.result(access(text(arena, call.word(0)), call.word(1))); }
+IMPORT(chmod) { CALL; call.result(chmod(text(arena, call.word(0)), call.word(1))); }
+IMPORT(chown) { CALL; call.result(chown(text(arena, call.word(0)), call.word(1), call.word(2))); }
+IMPORT(lchown) { CALL; call.result(lchown(text(arena, call.word(0)), call.word(1), call.word(2))); }
+IMPORT(chdir) { CALL; call.result(chdir(text(arena, call.word(0)))); }
+IMPORT(rename) { CALL; call.result(rename(text(arena, call.word(0)), text(arena, call.word(1)))); }
+IMPORT(unlink) { CALL; call.result(unlink(text(arena, call.word(0)))); }
+IMPORT(rmdir) { CALL; call.result(rmdir(text(arena, call.word(0)))); }
+IMPORT(link) { CALL; call.result(link(text(arena, call.word(0)), text(arena, call.word(1)))); }
+IMPORT(symlink) { CALL; call.result(symlink(text(arena, call.word(0)), text(arena, call.word(1)))); }
+IMPORT(readlink) {
+  CALL;
+  const uint32_t size = call.word(2);
+  call.result(readlink(text(arena, call.word(0)), size ? static_cast<char *>(guest(arena, call.word(1), size)) : nullptr, size));
+}
+IMPORT(getcwd) {
+  CALL;
+  const uint32_t address = call.word(0), size = call.word(1);
+  if (address) {
+    call.result(getcwd(static_cast<char *>(guest(arena, address, size)), size) ? address : 0);
+    return;
+  }
+  char *host = getcwd(nullptr, size);
+  if (!host) { call.result(0); return; }
+  const uint32_t length = strlen(host) + 1;
+  const uint32_t result = allocate(size ? size : length);
+  if (result) memcpy(guest(arena, result, length), host, length);
+  free(host);
+  call.result(result);
+}
+static void resolve_path(Call &call) {
+  const char *path = text(call.arena, call.word(0));
+  const uint32_t address = call.word(1);
+  if (address) {
+    call.result(realpath(path, static_cast<char *>(guest(call.arena, address, PATH_MAX))) ? address : 0);
+    return;
+  }
+  char *host = realpath(path, nullptr);
+  const uint32_t result = owned_string(call.arena, host);
+  free(host);
+  call.result(result);
+}
+IMPORT(realpath) { CALL; resolve_path(call); }
+IMPORT(__realpath_chk) {
+  CALL;
+  if (call.word(1) && call.word(2) < PATH_MAX)
+    elfconv_runtime_error("Guest fortified realpath overflow.\n");
+  resolve_path(call);
+}
 IMPORT(stat) {
   CALL;
   struct stat host;
@@ -510,6 +1401,49 @@ IMPORT(stat) {
   call.result(result);
 }
 namespace {
+int store_stat64(uint8_t *arena, uint32_t address, const struct stat &host) {
+  if (host.st_atim.tv_sec < INT32_MIN || host.st_atim.tv_sec > INT32_MAX ||
+      host.st_mtim.tv_sec < INT32_MIN || host.st_mtim.tv_sec > INT32_MAX ||
+      host.st_ctim.tv_sec < INT32_MIN || host.st_ctim.tv_sec > INT32_MAX) {
+    errno = EOVERFLOW; return -1;
+  }
+  // Linux i386 stat64 (time32): verified against native sizeof/offsetof.
+  uint8_t data[96] = {};
+  auto put = [&](unsigned offset, uint64_t value, unsigned size = 4) {
+    memcpy(data + offset, &value, size);
+  };
+  put(0, host.st_dev, 8); put(12, host.st_ino); put(16, host.st_mode);
+  put(20, host.st_nlink); put(24, host.st_uid); put(28, host.st_gid);
+  put(32, host.st_rdev, 8); put(44, host.st_size, 8); put(52, host.st_blksize);
+  put(56, host.st_blocks, 8); put(64, host.st_atim.tv_sec); put(68, host.st_atim.tv_nsec);
+  put(72, host.st_mtim.tv_sec); put(76, host.st_mtim.tv_nsec);
+  put(80, host.st_ctim.tv_sec); put(84, host.st_ctim.tv_nsec); put(88, host.st_ino, 8);
+  memcpy(guest(arena, address, sizeof(data)), data, sizeof(data));
+  return 0;
+}
+}
+IMPORT(__xstat64) {
+  CALL;
+  struct stat host;
+  int result = stat(text(arena, call.word(1)), &host);
+  if (!result) result = store_stat64(arena, call.word(2), host);
+  call.result(result);
+}
+IMPORT(__lxstat64) {
+  CALL;
+  struct stat host;
+  int result = lstat(text(arena, call.word(1)), &host);
+  if (!result) result = store_stat64(arena, call.word(2), host);
+  call.result(result);
+}
+IMPORT(__fxstat64) {
+  CALL;
+  struct stat host;
+  int result = fstat(int32_t(call.word(1)), &host);
+  if (!result) result = store_stat64(arena, call.word(2), host);
+  call.result(result);
+}
+namespace {
 struct Directory { DIR *host; uint32_t entry; };
 std::map<uint32_t, Directory> directories;
 uint32_t next_directory = 0x2000;
@@ -518,7 +1452,7 @@ IMPORT(opendir) {
   CALL;
   DIR *dir = opendir(text(arena, call.word(0)));
   if (!dir) { call.result(0); return; }
-  uint32_t entry = allocate(268);
+  uint32_t entry = allocate(276);
   if (!entry) { closedir(dir); call.result(0); return; }
   uint32_t handle = next_directory++;
   directories.emplace(handle, Directory{dir, entry});
@@ -537,6 +1471,25 @@ IMPORT(readdir) {
   memcpy(data, &ino, 4); memcpy(data + 4, &offset, 4); memcpy(data + 8, &length, 2);
   data[10] = entry->d_type;
   memcpy(data + 11, entry->d_name, strlen(entry->d_name) + 1);
+  memcpy(guest(arena, it->second.entry, sizeof(data)), data, sizeof(data));
+  call.result(it->second.entry);
+}
+IMPORT(readdir64) {
+  CALL;
+  auto it = directories.find(call.word(0));
+  if (it == directories.end()) elfconv_runtime_error("Invalid guest DIR handle.\n");
+  auto *entry = readdir(it->second.host);
+  if (!entry) { call.result(0); return; }
+  // Linux i386 dirent64: ino64, off64, reclen16, type8, name at byte 19.
+  uint8_t data[276] = {};
+  const uint64_t ino = entry->d_ino;
+  const int64_t offset = entry->d_off;
+  const size_t name_size = strlen(entry->d_name) + 1;
+  const uint16_t length = (19 + name_size + 7) & ~7u;
+  memcpy(data, &ino, 8); memcpy(data + 8, &offset, 8);
+  memcpy(data + 16, &length, 2);
+  data[18] = entry->d_type;
+  memcpy(data + 19, entry->d_name, name_size);
   memcpy(guest(arena, it->second.entry, sizeof(data)), data, sizeof(data));
   call.result(it->second.entry);
 }
@@ -654,15 +1607,16 @@ IMPORT(__isoc99_sscanf) {
   call.result(assigned);
 }
 namespace {
-uint32_t ctype_table(uint8_t *arena, bool lower) {
+uint32_t ctype_table(uint8_t *arena, unsigned kind) {
   // glibc exposes a pointer-to-table biased by 128 for signed char indexing.
-  uint32_t slot = lower ? 0x41000 : 0x40000;
-  uint32_t table = slot + 16, pointer = table + 128 * (lower ? 4 : 2);
+  const bool mapping = kind != 0;
+  uint32_t slot = 0x40000 + kind * 0x1000;
+  uint32_t table = slot + 16, pointer = table + 128 * (mapping ? 4 : 2);
   memcpy(guest(arena, slot, 4), &pointer, 4);
   for (int c = -128; c < 256; ++c) {
     int value = c < -1 ? c + 256 : c;
-    if (lower) {
-      int32_t mapped = value == -1 ? -1 : tolower(value);
+    if (mapping) {
+      int32_t mapped = value == -1 ? -1 : kind == 1 ? tolower(value) : toupper(value);
       memcpy(guest(arena, table + (c + 128) * 4, 4), &mapped, 4);
     } else {
       uint16_t bits = 0;
@@ -687,8 +1641,13 @@ uint32_t ctype_table(uint8_t *arena, bool lower) {
   return slot;
 }
 }
-IMPORT(__ctype_b_loc) { CALL; call.result(ctype_table(arena, false)); }
-IMPORT(__ctype_tolower_loc) { CALL; call.result(ctype_table(arena, true)); }
+IMPORT(__ctype_b_loc) { CALL; call.result(ctype_table(arena, 0)); }
+IMPORT(__ctype_tolower_loc) { CALL; call.result(ctype_table(arena, 1)); }
+IMPORT(__ctype_toupper_loc) { CALL; call.result(ctype_table(arena, 2)); }
+IMPORT(tolower) { CALL; call.result(tolower(int32_t(call.word(0)))); }
+IMPORT(toupper) { CALL; call.result(toupper(int32_t(call.word(0)))); }
+IMPORT(isspace) { CALL; call.result(isspace(int32_t(call.word(0))) ? 0x2000 : 0); }
+IMPORT(isalnum) { CALL; call.result(isalnum(int32_t(call.word(0))) ? 8 : 0); }
 
 IMPORT(SDL_Init) { CALL; call.result(SDL_Init(call.word(0))); }
 IMPORT(SDL_Quit) {
@@ -718,12 +1677,33 @@ IMPORT(SDL_GL_CreateContext) {
   unsigned slot = 0;
   while (slot < 16 && contexts[slot]) ++slot;
   if (slot == 16) elfconv_runtime_error("Guest GL context handle table exhausted.\n");
+#ifdef __EMSCRIPTEN_PTHREADS__
+  // SDL's EGL backend proxies context creation to the browser thread. The
+  // transferred canvas belongs to this worker; create and bind WebGL here.
+  window(call.word(0));
+  EmscriptenWebGLContextAttributes attributes;
+  emscripten_webgl_init_context_attributes(&attributes);
+  attributes.majorVersion = 2;
+  attributes.depth = true;
+  const auto handle = emscripten_webgl_create_context("#canvas", &attributes);
+  if (handle > 0 && emscripten_webgl_make_context_current(handle) == EMSCRIPTEN_RESULT_SUCCESS)
+    contexts[slot] = reinterpret_cast<SDL_GLContext>(uintptr_t(handle));
+  else if (handle > 0) emscripten_webgl_destroy_context(handle);
+#else
   contexts[slot] = SDL_GL_CreateContext(window(call.word(0)));
+#endif
   call.result(contexts[slot] ? 0x200 + slot : 0);
 }
 IMPORT(SDL_GL_DeleteContext) {
   CALL;
-  if (call.word(0)) { SDL_GL_DeleteContext(context(call.word(0))); contexts[call.word(0) - 0x200] = nullptr; }
+  if (call.word(0)) {
+#ifdef __EMSCRIPTEN_PTHREADS__
+    emscripten_webgl_destroy_context(uintptr_t(context(call.word(0))));
+#else
+    SDL_GL_DeleteContext(context(call.word(0)));
+#endif
+    contexts[call.word(0) - 0x200] = nullptr;
+  }
 }
 #ifdef __EMSCRIPTEN__
 static int browser_swap_interval = 1;
@@ -754,7 +1734,11 @@ IMPORT(SDL_GL_GetDrawableSize) {
 }
 IMPORT(SDL_GL_SwapWindow) {
   CALL;
+#ifndef __EMSCRIPTEN_PTHREADS__
   SDL_GL_SwapWindow(window(call.word(0)));
+#else
+  window(call.word(0));
+#endif
 #ifdef __EMSCRIPTEN__
   // Present at the requested browser frame boundary without requiring SDL's
   // Emscripten main-loop API; the lifted guest owns its synchronous loop.

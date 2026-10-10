@@ -71,6 +71,8 @@ class ELFSection {
   uint64_t vma;
   uint64_t size;
   uint8_t *bytes;
+  bool is_tls = false;
+  bool has_contents = true;
 };
 
 class ELFObject {
@@ -126,6 +128,30 @@ class ELFObject {
   uintptr_t entry;
   uint32_t load_bias = 0;
   std::string entry_symbol;
+  struct I386Library {
+    std::string path, name;
+    uint64_t image_end = 0;
+    uint64_t image_begin = UINT32_MAX;
+    std::vector<std::string> needed;
+    std::map<std::string, uint32_t> exports;
+    std::vector<uint32_t> initializers, finalizers;
+    std::map<std::string, uint32_t> tls_exports;
+    std::vector<uint8_t> tls_template;
+    uint32_t tls_size = 0, tls_alignment = 1, tls_first_byte = 0, tls_distance = 0;
+    uint64_t tls_vma = 0;
+  };
+  std::vector<std::string> shared_library_paths;
+  std::vector<I386Library> i386_libraries;
+  std::map<std::string, uint32_t> shared_symbols;
+  const std::map<std::string, uint32_t> *shared_symbol_scope = nullptr;
+  std::vector<std::unique_ptr<ELFObject>> shared_objects;
+  bool dependency_object = false;
+  struct I386TlsSymbol { uint32_t module, offset; };
+  std::map<std::string, I386TlsSymbol> shared_tls_symbols;
+  const std::map<std::string, I386TlsSymbol> *shared_tls_scope = nullptr;
+  const std::vector<I386Library> *tls_libraries = nullptr;
+  uint32_t tls_module = 1;
+  uint32_t tls_static_size = 0, tls_static_alignment = 16;
   std::vector<ELFSection> sections;
   std::unordered_map<uint64_t, ELFSymbol> func_symbols_map;
   std::vector<ELFSymbol> func_symbols;
@@ -151,6 +177,9 @@ class ELFObject {
   void LoadDynamicSymbolsBFD();
   void LoadSectionsBFD();
   void ResolveI386Imports();
+  void ReadI386DynamicMetadata(I386Library &library, uint32_t bias);
+  void LoadI386Libraries();
+  void CaptureI386TLS(I386Library &library);
   void GetEhdr();
 };
 }  // namespace BinaryLoader

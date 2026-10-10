@@ -19,6 +19,7 @@
 #include "remill/BC/Util.h"
 
 #include <cstdint>
+#include <sstream>
 #if defined(__linux__)
 #  include <signal.h>
 #  include <utils/Util.h>
@@ -51,12 +52,14 @@ DEFINE_string(arch, REMILL_ARCH,
               "`_avx` or `_avx512` appended), aarch64, aarch32");
 DEFINE_string(target_elf, "DUMMY_ELF", "Name of the target ELF binary");
 DEFINE_string(entry_symbol, "", "Exported i386 shared-library entry with int(int,char**) ABI.");
+DEFINE_string(shared_libraries, "", "Comma-separated i386 shared libraries bundled for guest dlopen.");
 DEFINE_uint64(dbg_fun_vma, 0, "Function Address of the debug target");
 DEFINE_string(bitcode_path, "", "Function Name of the debug target");
 DEFINE_string(target_arch, "", "Target Architecture for conversion");
 DEFINE_string(float_exception, "0", "Whether the floating-point exception status is set or not");
 DEFINE_string(linker_map, "", "Linker map for final-ELF incremental unit ownership.");
 DEFINE_string(object_base, "", "Base directory for relative object paths in the linker map.");
+DEFINE_bool(per_elf, false, "Partition i386 bundled code by ELF image, with shared metadata.");
 DEFINE_string(unit_manifest_out, "", "Write unit owners and content fingerprints, then exit.");
 DEFINE_string(metadata_fingerprint_out, "", "Write the process-wide ELF metadata fingerprint.");
 DEFINE_string(unit_owner, "", "Lift only functions owned by this linker-map object.");
@@ -87,6 +90,80 @@ void lift_set_sigaction() {
 #endif
 }
 
+static void EmitI386Libraries(llvm::Module &module, const BinaryLoader::ELFObject &object) {
+  auto &context = module.getContext();
+  auto *word = llvm::Type::getInt32Ty(context);
+  auto *pointer = llvm::PointerType::getUnqual(context);
+  auto *symbol_type = llvm::StructType::get(context, {pointer, word, word});
+  auto *library_type = llvm::StructType::get(
+      context, {pointer, pointer, pointer, pointer, pointer, word, pointer, pointer, word, word,
+                pointer, word, word, word, word});
+  auto emit = [&](const std::string &name, llvm::Constant *data) -> llvm::Constant * {
+    return new llvm::GlobalVariable(module, data->getType(), true,
+        llvm::GlobalValue::ExternalLinkage, data, name);
+  };
+  auto string = [&](const std::string &name, const std::string &value) {
+    return emit(name, llvm::ConstantDataArray::getString(context, value));
+  };
+  auto functions = [&](const std::string &name, const std::vector<uint32_t> &values, uint32_t end) {
+    std::vector<uint32_t> data(values.size() + 1);
+    std::copy(values.begin(), values.end(), data.begin());
+    data.back() = end;
+    return emit(name, llvm::ConstantDataArray::get(context, data));
+  };
+  std::vector<llvm::Constant *> libraries;
+  libraries.reserve(object.i386_libraries.size());
+  for (size_t i = 0; i < object.i386_libraries.size(); ++i) {
+    const auto &library = object.i386_libraries[i];
+    const std::string prefix = "_ecv_i386_library_" + std::to_string(i);
+    const auto slash = library.path.find_last_of('/');
+    const std::string filename = library.path.substr(slash == std::string::npos ? 0 : slash + 1);
+    std::vector<uint32_t> dependencies;
+    for (const auto &needed : library.needed) {
+      for (size_t j = 1; j < object.i386_libraries.size(); ++j) {
+        if (object.i386_libraries[j].name == needed) {
+          dependencies.push_back(j);
+          break;
+        }
+      }
+    }
+    std::vector<llvm::Constant *> symbols;
+    symbols.reserve(library.exports.size() + library.tls_exports.size());
+    auto ordinary = library.exports.begin();
+    auto tls = library.tls_exports.begin();
+    while (ordinary != library.exports.end() || tls != library.tls_exports.end()) {
+      const bool is_tls = tls != library.tls_exports.end() &&
+          (ordinary == library.exports.end() || tls->first < ordinary->first);
+      const auto &symbol = is_tls ? *tls++ : *ordinary++;
+      symbols.push_back(llvm::ConstantStruct::get(symbol_type,
+          {string(prefix + "_symbol_" + std::to_string(symbols.size()), symbol.first),
+           llvm::ConstantInt::get(word, symbol.second),
+           llvm::ConstantInt::get(word, is_tls ? i + 1 : 0)}));
+    }
+    auto *symbol_data = llvm::ConstantArray::get(
+        llvm::ArrayType::get(symbol_type, symbols.size()), symbols);
+    libraries.push_back(llvm::ConstantStruct::get(library_type, {
+        string(prefix + "_path", library.path), string(prefix + "_name", library.name),
+        string(prefix + "_filename", filename),
+        functions(prefix + "_dependencies", dependencies, UINT32_MAX),
+        emit(prefix + "_symbols", symbol_data), llvm::ConstantInt::get(word, symbols.size()),
+        functions(prefix + "_initializers", library.initializers, 0),
+        functions(prefix + "_finalizers", library.finalizers, 0),
+        llvm::ConstantInt::get(word, library.image_begin),
+        llvm::ConstantInt::get(word, library.image_end),
+        emit(prefix + "_tls_template", llvm::ConstantDataArray::get(context, library.tls_template)),
+        llvm::ConstantInt::get(word, library.tls_template.size()),
+        llvm::ConstantInt::get(word, library.tls_size),
+        llvm::ConstantInt::get(word, library.tls_alignment),
+        llvm::ConstantInt::get(word, library.tls_distance)}));
+  }
+  emit("_ecv_i386_libraries", llvm::ConstantArray::get(
+      llvm::ArrayType::get(library_type, libraries.size()), libraries));
+  emit("_ecv_i386_library_count", llvm::ConstantInt::get(word, libraries.size()));
+  emit("_ecv_i386_tls_static_size", llvm::ConstantInt::get(word, object.tls_static_size));
+  emit("_ecv_i386_tls_static_alignment", llvm::ConstantInt::get(word, object.tls_static_alignment));
+}
+
 int main(int argc, char *argv[]) {
   // set custom signal handler for SIGSEGV.
   lift_set_sigaction();
@@ -95,7 +172,25 @@ int main(int argc, char *argv[]) {
 
   AArch64TraceManager manager(FLAGS_target_elf);
   manager.elf_obj.entry_symbol = FLAGS_entry_symbol;
+  if (!FLAGS_shared_libraries.empty()) {
+    if (FLAGS_arch != "i386")
+      elfconv_runtime_error("--shared_libraries requires --arch i386.\n");
+    std::istringstream paths(FLAGS_shared_libraries);
+    std::string path;
+    while (std::getline(paths, path, ',')) {
+      if (path.empty()) elfconv_runtime_error("Empty bundled library path.\n");
+      manager.elf_obj.shared_library_paths.push_back(path);
+    }
+    if (!FLAGS_linker_map.empty() ||
+        (!FLAGS_per_elf && (FLAGS_metadata_only || !FLAGS_unit_owner.empty())))
+      elfconv_runtime_error("Bundled library units require --per_elf.\n");
+  }
   manager.SetELFData();
+  if (FLAGS_per_elf) {
+    if (FLAGS_arch != "i386" || !FLAGS_linker_map.empty())
+      elfconv_runtime_error("--per_elf requires i386 without a linker map.\n");
+    manager.LoadELFOwners();
+  }
   if (!FLAGS_linker_map.empty()) manager.LoadLinkerMap(FLAGS_linker_map, FLAGS_object_base);
   if (!FLAGS_unit_manifest_out.empty()) {
     if (FLAGS_metadata_fingerprint_out.empty()) {
@@ -172,6 +267,7 @@ int main(int argc, char *argv[]) {
     main_lifter.SetCommonMetaData(lift_config);
   }
   if (!unit_mode && arch_name == remill::kArchX86) {
+    EmitI386Libraries(*module, manager.elf_obj);
     new llvm::GlobalVariable(*module, llvm::Type::getInt32Ty(context), true,
                             llvm::GlobalValue::ExternalLinkage,
                             llvm::ConstantInt::get(llvm::Type::getInt32Ty(context),

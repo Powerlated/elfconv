@@ -8,6 +8,9 @@
 #include <stdint.h>
 #include <string>
 #include <unistd.h>
+#if defined(ELF_IS_I386)
+#  include "utils/I386MemoryLayout.h"
+#endif
 
 #if defined(ELF_IS_AARCH64)
 #  include <remill/Arch/AArch64/Runtime/State.h>
@@ -18,7 +21,7 @@
 #endif
 
 /*
- * Runtime virtual memory layout (256 MiB arena)
+ * Default runtime virtual memory layout (i386 uses I386MemoryLayout.h).
  *
  * 0x00000000                                                 0x10000000
  * |------------------------------ 256 MiB ------------------------------|
@@ -32,31 +35,38 @@
  */
 
 const size_t MEMORY_ARENA_VMA = 0x00000000ULL;
-const size_t MEMORY_ARENA_SIZE = 256ULL * 1024 * 1024; /* 256 MiB */
+#if defined(ELF_IS_I386)
+const size_t MEMORY_ARENA_SIZE = i386_memory::kArenaSize;
+const addr_t BRK_START_VMA = i386_memory::kBrkStart;
+const size_t BRK_REGION_SIZE = i386_memory::kBrkSize;
+const size_t MMAP_REGION_SIZE = i386_memory::kMmapSize;
+#else
+const size_t MEMORY_ARENA_SIZE = 256ULL * 1024 * 1024;
+const addr_t BRK_START_VMA = 0x04000000ULL;
+const size_t BRK_REGION_SIZE = 96ULL * 1024 * 1024;
+const size_t MMAP_REGION_SIZE = 80ULL * 1024 * 1024;
+#endif
 const size_t NULL_GUARD_SIZE = 0x00010000ULL; /* 64 KiB */
 const addr_t MEMORY_ARENA_USABLE_VMA = MEMORY_ARENA_VMA + NULL_GUARD_SIZE;
 const size_t MEMORY_ARENA_USABLE_SIZE = MEMORY_ARENA_SIZE - NULL_GUARD_SIZE;
 
 const addr_t LOW_REGION_VMA = MEMORY_ARENA_VMA + NULL_GUARD_SIZE; /* 0x00010000 */
-const size_t LOW_REGION_SIZE = 0x04000000ULL - LOW_REGION_VMA; /* up to BRK_START */
+const size_t LOW_REGION_SIZE = BRK_START_VMA - LOW_REGION_VMA;
 
 /* brk (traditional heap) */
-const addr_t BRK_START_VMA = 0x04000000ULL; /* 64 MiB */
-const size_t BRK_REGION_SIZE = 96ULL * 1024 * 1024; /* 96 MiB: 0x04000000..0x0A000000 */
 const addr_t BRK_END_VMA = BRK_START_VMA + BRK_REGION_SIZE;
 
 /* mmap (anonymous mappings, arenas, large allocs, etc.) */
-const addr_t MMAP_START_VMA = BRK_END_VMA; /* 0x0A000000ULL */
-const size_t MMAP_REGION_SIZE = 80ULL * 1024 * 1024; /* 80 MiB: 0x0A000000..0x0F000000 */
+const addr_t MMAP_START_VMA = BRK_END_VMA;
 const addr_t MMAP_END_VMA = MMAP_START_VMA + MMAP_REGION_SIZE;
 
 /* stack guard */
-const size_t STACK_GUARD_SIZE = 4ULL * 1024; /* 4 KiB: 0x0F000000..0x0F001000 */
+const size_t STACK_GUARD_SIZE = 4ULL * 1024;
 
 /* stack */
 const size_t STACK_REGION_SIZE = 16ULL * 1024 * 1024; /* 16 MiB */
-const addr_t STACK_REGION_USABLE_VMA = MMAP_END_VMA + STACK_GUARD_SIZE; /* 0x0F001000 */
-const addr_t STACK_TOP_VMA = MEMORY_ARENA_VMA + MEMORY_ARENA_SIZE; /* 0x10000000 */
+const addr_t STACK_REGION_USABLE_VMA = MMAP_END_VMA + STACK_GUARD_SIZE;
+const addr_t STACK_TOP_VMA = MEMORY_ARENA_VMA + MEMORY_ARENA_SIZE;
 
 /* Thread pointer / TLS base */
 const addr_t THREAD_PTR = 0x00100000ULL; /* 1 MiB (inside low region) */

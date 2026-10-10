@@ -3,6 +3,7 @@
 #include "remill/Arch/Runtime/Math.h"
 
 #include <cstring>
+#include <atomic>
 #include <cfenv>
 #if defined(ELF_IS_AARCH64)
 #  include "remill/Arch/Runtime/Types.h"
@@ -662,15 +663,29 @@ inline bool __remill_compare_neq(bool result) {
   return result;
 }
 
-/* Data Memory Barrier instruction (FIXME) */
-void __remill_barrier_load_load(RuntimeManager *rt_m) {}
-void __remill_barrier_load_store(RuntimeManager *rt_m) {}
-void __remill_barrier_store_load(RuntimeManager *rt_m) {}
-void __remill_barrier_store_store(RuntimeManager *rt_m) {}
+void __remill_barrier_load_load(RuntimeManager *) {
+  std::atomic_thread_fence(std::memory_order_acquire);
+}
+void __remill_barrier_load_store(RuntimeManager *) {
+  std::atomic_thread_fence(std::memory_order_acq_rel);
+}
+void __remill_barrier_store_load(RuntimeManager *) {
+  std::atomic_thread_fence(std::memory_order_seq_cst);
+}
+void __remill_barrier_store_store(RuntimeManager *) {
+  std::atomic_thread_fence(std::memory_order_release);
+}
 
-/* atomic */
-void __remill_atomic_begin(RuntimeManager *rt_m) {}
-void __remill_atomic_end(RuntimeManager *rt_m) {}
+void __remill_atomic_begin(RuntimeManager *runtime) {
+#if defined(ELF_IS_I386)
+  runtime->guest_atomic_mutex.lock();
+#endif
+}
+void __remill_atomic_end(RuntimeManager *runtime) {
+#if defined(ELF_IS_I386)
+  runtime->guest_atomic_mutex.unlock();
+#endif
+}
 
 /* FIXME */
 void __remill_aarch64_emulate_instruction(RuntimeManager *rt_m) {}
@@ -736,8 +751,10 @@ Memory *__remill_delay_slot_end(Memory *) {
 namespace {
 template <typename T>
 void CompareExchangeMemory(RuntimeManager *rt_m, addr_t addr, T &expected, T desired) {
-  // Guest execution is single-threaded, like atomic_begin/end above. memcpy
-  // supports x86's unaligned operands without host alignment/aliasing UB.
+#if defined(ELF_IS_I386)
+  std::lock_guard<std::recursive_mutex> lock(rt_m->guest_atomic_mutex);
+#endif
+  // memcpy supports x86's unaligned operands without host aliasing UB.
   auto *memory = TranslateVMA(rt_m, rt_m->main_memory_arena->bytes, addr);
   T observed;
   std::memcpy(&observed, memory, sizeof(observed));

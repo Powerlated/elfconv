@@ -1,8 +1,16 @@
-if(NOT ELFCONV_LINK_MAP OR NOT EXISTS "${ELFCONV_LINK_MAP}")
-  message(FATAL_ERROR "Incremental Wasm conversion requires a linker map: ${ELFCONV_LINK_MAP}")
+if(ELFCONV_PER_ELF)
+  set(partition_flags --per_elf)
+else()
+  if(NOT ELFCONV_LINK_MAP OR NOT EXISTS "${ELFCONV_LINK_MAP}")
+    message(FATAL_ERROR "Incremental Wasm conversion requires a linker map: ${ELFCONV_LINK_MAP}")
+  endif()
+  if(NOT ELFCONV_OBJECT_BASE OR NOT IS_DIRECTORY "${ELFCONV_OBJECT_BASE}")
+    message(FATAL_ERROR "Incremental Wasm conversion requires ELFCONV_OBJECT_BASE")
+  endif()
+  set(partition_flags --linker_map "${ELFCONV_LINK_MAP}" --object_base "${ELFCONV_OBJECT_BASE}")
 endif()
-if(NOT ELFCONV_OBJECT_BASE OR NOT IS_DIRECTORY "${ELFCONV_OBJECT_BASE}")
-  message(FATAL_ERROR "Incremental Wasm conversion requires ELFCONV_OBJECT_BASE")
+if(ELFCONV_BITCODE_PATH)
+  list(APPEND partition_flags --bitcode_path "${ELFCONV_BITCODE_PATH}")
 endif()
 if(NOT EXISTS "${ELFCONV_LIFTER}")
   message(FATAL_ERROR "ELF lifter not found: ${ELFCONV_LIFTER}")
@@ -35,7 +43,16 @@ if(NOT emcc_version_result EQUAL 0)
 endif()
 file(SHA256 "${ELFCONV_LIFTER}" lifter_hash)
 file(SHA256 "${ELFCONV_INPUT}" elf_hash)
-file(SHA256 "${ELFCONV_LINK_MAP}" linker_map_hash)
+set(linker_map_hash "")
+if(NOT ELFCONV_PER_ELF)
+  file(SHA256 "${ELFCONV_LINK_MAP}" linker_map_hash)
+endif()
+set(library_hashes "")
+foreach(library IN LISTS ELFCONV_SHARED_LIBRARIES)
+  file(SHA256 "${library}" library_hash)
+  string(APPEND library_hashes "${library}=${library_hash};")
+endforeach()
+string(APPEND elf_hash "|per-elf=${ELFCONV_PER_ELF}|${library_hashes}")
 file(SHA256 "${ELFCONV_ROOT}/cmake/IncrementalWasm.cmake" incremental_script_hash)
 
 set(semantics_files)
@@ -81,7 +98,7 @@ set(pipeline_material
   "${elf_hash}|${linker_map_hash}|${lifter_hash}|${incremental_script_hash}|${semantics_hash}|"
   "${runtime_source_hashes_text}|${runtime_headers_hash}|${runtime_definitions_text}|"
   "${runtime_includes_text}|${ELFCONV_WASM_OPT_LEVEL}|${ELFCONV_WASM_JSPI}|"
-  "${ELFCONV_LEGACY_GL}|${ELFCONV_FLOAT_EXCEPTION}|${ELFCONV_DEBUG}|"
+  "${ELFCONV_LEGACY_GL}|${ELFCONV_PTHREADS}|${ELFCONV_FLOAT_EXCEPTION}|${ELFCONV_DEBUG}|"
   "${ELFCONV_RUNTIME_DIR}/I386Imports.cpp|${ELFCONV_ENTRY_SYMBOL}"
 )
 string(SHA256 pipeline_key "${pipeline_material}")
@@ -104,7 +121,7 @@ set(manifest "${cache_dir}/units.tsv")
 set(metadata_fingerprint "${cache_dir}/metadata.fingerprint")
 _elfconv_execute("Incremental unit scan" "${ELFCONV_LIFTER}"
   --arch i386 --target_arch emscripten32 --target_elf "${ELFCONV_INPUT}"
-  --linker_map "${ELFCONV_LINK_MAP}" --object_base "${ELFCONV_OBJECT_BASE}"
+  ${partition_flags}
   --unit_manifest_out "${manifest}" --metadata_fingerprint_out "${metadata_fingerprint}"
   --norm_mode 1 --fork_emulation 0 --float_exception "${ELFCONV_FLOAT_EXCEPTION}"
   ${elfconv_entry_args}
@@ -130,29 +147,29 @@ if(NOT previous_metadata_lift_key STREQUAL metadata_lift_key OR NOT EXISTS "${me
     --arch i386 --target_arch emscripten32 --target_elf "${ELFCONV_INPUT}"
     --metadata_only --bc_out "${metadata_bc}" --norm_mode 1 --fork_emulation 0
     --float_exception "${ELFCONV_FLOAT_EXCEPTION}"
-    ${elfconv_entry_args}
+    ${partition_flags} ${elfconv_entry_args}
   )
   file(WRITE "${metadata_lift_key_file}" "${metadata_lift_key}")
   set(metadata_lifted TRUE)
 endif()
-set(metadata_compile_key "${metadata_lift_key}|${ELFCONV_EMCC}|${emcc_version}|${ELFCONV_WASM_OPT_LEVEL}")
+set(metadata_compile_key "${metadata_lift_key}|${ELFCONV_EMCC}|${emcc_version}|${ELFCONV_WASM_OPT_LEVEL}|${ELFCONV_PTHREADS}")
 string(SHA256 metadata_compile_key "${metadata_compile_key}")
 if(metadata_lifted OR NOT EXISTS "${metadata_object}")
   _elfconv_execute("Incremental metadata Wasm compilation" "${ELFCONV_EMCC}"
-    "-O${ELFCONV_WASM_OPT_LEVEL}" -c "${metadata_bc}" -o "${metadata_object}"
+    "-O${ELFCONV_WASM_OPT_LEVEL}" ${thread_compile_flags} -c "${metadata_bc}" -o "${metadata_object}"
   )
   file(WRITE "${metadata_compile_key_file}" "${metadata_compile_key}")
 elseif(EXISTS "${metadata_compile_key_file}")
   file(READ "${metadata_compile_key_file}" previous_metadata_compile_key)
   if(NOT previous_metadata_compile_key STREQUAL metadata_compile_key)
     _elfconv_execute("Incremental metadata Wasm compilation" "${ELFCONV_EMCC}"
-      "-O${ELFCONV_WASM_OPT_LEVEL}" -c "${metadata_bc}" -o "${metadata_object}"
+      "-O${ELFCONV_WASM_OPT_LEVEL}" ${thread_compile_flags} -c "${metadata_bc}" -o "${metadata_object}"
     )
     file(WRITE "${metadata_compile_key_file}" "${metadata_compile_key}")
   endif()
 else()
   _elfconv_execute("Incremental metadata Wasm compilation" "${ELFCONV_EMCC}"
-    "-O${ELFCONV_WASM_OPT_LEVEL}" -c "${metadata_bc}" -o "${metadata_object}"
+    "-O${ELFCONV_WASM_OPT_LEVEL}" ${thread_compile_flags} -c "${metadata_bc}" -o "${metadata_object}"
   )
   file(WRITE "${metadata_compile_key_file}" "${metadata_compile_key}")
 endif()
@@ -162,7 +179,7 @@ set(unit_objects)
 set(unit_ids)
 set(unit_compile_keys)
 set(unit_lift_flags --arch i386 --target_arch emscripten32 --target_elf "${ELFCONV_INPUT}"
-  --linker_map "${ELFCONV_LINK_MAP}" --object_base "${ELFCONV_OBJECT_BASE}"
+  ${partition_flags}
   --norm_mode 1 --fork_emulation 0 --float_exception "${ELFCONV_FLOAT_EXCEPTION}"
   ${elfconv_entry_args}
 )
@@ -202,7 +219,7 @@ foreach(line IN LISTS unit_lines)
     file(WRITE "${unit_lift_key_file}" "${unit_lift_key}")
     set(unit_lifted TRUE)
   endif()
-  set(unit_compile_key "${unit_lift_key}|${ELFCONV_EMCC}|${emcc_version}|${ELFCONV_WASM_OPT_LEVEL}")
+  set(unit_compile_key "${unit_lift_key}|${ELFCONV_EMCC}|${emcc_version}|${ELFCONV_WASM_OPT_LEVEL}|${ELFCONV_PTHREADS}")
   string(SHA256 unit_compile_key "${unit_compile_key}")
   if(EXISTS "${unit_compile_key_file}")
     file(READ "${unit_compile_key_file}" previous_unit_compile_key)
@@ -212,7 +229,7 @@ foreach(line IN LISTS unit_lines)
   if(unit_lifted OR NOT previous_unit_compile_key STREQUAL unit_compile_key OR
      NOT EXISTS "${unit_object}")
     _elfconv_execute("Compiling object unit ${owner}" "${ELFCONV_EMCC}"
-      "-O${ELFCONV_WASM_OPT_LEVEL}" -c "${unit_bc}" -o "${unit_object}"
+      "-O${ELFCONV_WASM_OPT_LEVEL}" ${thread_compile_flags} -c "${unit_bc}" -o "${unit_object}"
     )
     file(WRITE "${unit_compile_key_file}" "${unit_compile_key}")
   endif()
@@ -248,7 +265,7 @@ file(WRITE "${registry_source_file}" "${registry_source}")
 string(SHA256 registry_source_hash "${registry_source}")
 set(registry_compile_key
   "${registry_source_hash}|${ELFCONV_EMCC}|${emcc_version}|${ELFCONV_WASM_OPT_LEVEL}|"
-  "${runtime_headers_hash}|${runtime_definitions_text}|${runtime_includes_text}|ELF_IS_I386|ADDRESS_SIZE_BITS=32"
+  "${runtime_headers_hash}|${runtime_definitions_text}|${runtime_includes_text}|ELF_IS_I386|ADDRESS_SIZE_BITS=32|${ELFCONV_PTHREADS}"
 )
 string(SHA256 registry_compile_key "${registry_compile_key}")
 set(registry_object "${cache_dir}/UnitRegistry.wasm.o")
@@ -260,14 +277,14 @@ else()
 endif()
 if(NOT previous_registry_key STREQUAL registry_compile_key OR NOT EXISTS "${registry_object}")
   _elfconv_execute("Compiling unit registry" "${ELFCONV_EMCC}"
-    "-O${ELFCONV_WASM_OPT_LEVEL}" -sUSE_SDL=2 ${ELFCONV_RUNTIME_INCLUDE_FLAGS}
+    "-O${ELFCONV_WASM_OPT_LEVEL}" ${thread_compile_flags} -sUSE_SDL=2 ${ELFCONV_RUNTIME_INCLUDE_FLAGS}
     -std=c++17 ${ELFCONV_RUNTIME_DEFINITIONS} -DELF_IS_I386 -DADDRESS_SIZE_BITS=32
     -DELFCONV_INCREMENTAL_UNITS=1 -c "${registry_source_file}" -o "${registry_object}"
   )
   file(WRITE "${registry_key_file}" "${registry_compile_key}")
 endif()
 
-set(runtime_compile_flags "-O${ELFCONV_WASM_OPT_LEVEL};-sUSE_SDL=2;-std=c++17;${ELFCONV_RUNTIME_DEFINITIONS};-DELF_IS_I386;-DADDRESS_SIZE_BITS=32;-DELFCONV_INCREMENTAL_UNITS=1;-DECV_LEGACY_GL=${ELFCONV_LEGACY_GL};${ELFCONV_RUNTIME_INCLUDE_FLAGS}")
+set(runtime_compile_flags "-O${ELFCONV_WASM_OPT_LEVEL};${thread_compile_flags};-sUSE_SDL=2;-std=c++17;${ELFCONV_RUNTIME_DEFINITIONS};-DELF_IS_I386;-DADDRESS_SIZE_BITS=32;-DELFCONV_INCREMENTAL_UNITS=1;-DECV_LEGACY_GL=${ELFCONV_LEGACY_GL};${ELFCONV_RUNTIME_INCLUDE_FLAGS}")
 string(JOIN ";" runtime_compile_flags_text ${runtime_compile_flags})
 set(runtime_objects)
 set(runtime_compile_keys)
@@ -287,7 +304,7 @@ foreach(source IN LISTS runtime_sources)
   endif()
   if(NOT previous_runtime_key STREQUAL runtime_compile_key OR NOT EXISTS "${runtime_object}")
     _elfconv_execute("Compiling runtime ${source_name}" "${ELFCONV_EMCC}"
-      "-O${ELFCONV_WASM_OPT_LEVEL}" -sUSE_SDL=2 ${ELFCONV_RUNTIME_INCLUDE_FLAGS}
+      "-O${ELFCONV_WASM_OPT_LEVEL}" ${thread_compile_flags} -sUSE_SDL=2 ${ELFCONV_RUNTIME_INCLUDE_FLAGS}
       -std=c++17 ${ELFCONV_RUNTIME_DEFINITIONS} -DELF_IS_I386 -DADDRESS_SIZE_BITS=32
       -DELFCONV_INCREMENTAL_UNITS=1 "-DECV_LEGACY_GL=${ELFCONV_LEGACY_GL}"
       -c "${source}" -o "${runtime_object}"
@@ -298,7 +315,7 @@ foreach(source IN LISTS runtime_sources)
   list(APPEND runtime_compile_keys "${runtime_compile_key}")
 endforeach()
 
-if(ELFCONV_WASM_JSPI)
+if(ELFCONV_WASM_JSPI OR ELFCONV_PTHREADS)
   set(ELFCONV_BROWSER_JSPI true)
   set(suspension_flags -sJSPI=1)
 else()
@@ -310,7 +327,8 @@ if(ELFCONV_WASM_OPT_LEVEL STREQUAL "0")
   set(debug_flags -g2)
 endif()
 set(link_material "${metadata_compile_key}|${registry_compile_key}|${unit_compile_keys}|${runtime_compile_keys}|${runtime_definitions_text}|${ELFCONV_WASM_OPT_LEVEL}|${ELFCONV_WASM_JSPI}|${ELFCONV_LEGACY_GL}|webgl=2|${ELFCONV_FLOAT_EXCEPTION}|${ELFCONV_DEBUG}")
-file(SHA256 "${ELFCONV_ROOT}/src/browser/i386.html.in" html_template_hash)
+string(APPEND link_material "|${thread_link_flags}|${suspension_flags}")
+file(SHA256 "${ELFCONV_BROWSER_DIR}/i386.html.in" html_template_hash)
 string(APPEND link_material "|${html_template_hash}|${pipeline_key}")
 string(SHA256 link_key "${link_material}")
 set(link_key_file "${cache_dir}/link.key")
@@ -321,7 +339,7 @@ else()
 endif()
 if(NOT previous_link_key STREQUAL link_key OR NOT EXISTS "${output_js}" OR NOT EXISTS "${output_wasm}")
   _elfconv_execute("Incremental i386 browser link" "${ELFCONV_EMCC}"
-    "-O${ELFCONV_WASM_OPT_LEVEL}" ${debug_flags} ${ELFCONV_RUNTIME_INCLUDE_FLAGS}
+    "-O${ELFCONV_WASM_OPT_LEVEL}" ${thread_link_flags} ${debug_flags} ${ELFCONV_RUNTIME_INCLUDE_FLAGS}
     -std=c++17 ${ELFCONV_RUNTIME_DEFINITIONS} -DELF_IS_I386 -DADDRESS_SIZE_BITS=32
     -sUSE_SDL=2 "-sLEGACY_GL_EMULATION=${ELFCONV_LEGACY_GL}"
     -sMIN_WEBGL_VERSION=2 -sMAX_WEBGL_VERSION=2
@@ -333,6 +351,6 @@ if(NOT previous_link_key STREQUAL link_key OR NOT EXISTS "${output_js}" OR NOT E
   )
   file(WRITE "${link_key_file}" "${link_key}")
 endif()
-configure_file("${ELFCONV_ROOT}/src/browser/i386.html.in" "${output_html}" @ONLY)
+configure_file("${ELFCONV_BROWSER_DIR}/i386.html.in" "${output_html}" @ONLY)
 file(WRITE "${pipeline_key_file}" "${pipeline_key}")
 message(STATUS "Incremental Wasm units: ${unit_count}")

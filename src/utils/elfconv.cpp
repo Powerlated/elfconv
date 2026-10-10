@@ -14,7 +14,11 @@
 
 #define PRINT_GPR(index) printf("X" #index ": 0x%llx ", (ull) CPUState->gpr.x##index.qword)
 
+#if defined(ELF_IS_I386)
+extern thread_local State *CPUState;
+#else
 extern State *CPUState;
+#endif
 
 typedef unsigned long long ull;
 

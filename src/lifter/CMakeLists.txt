@@ -24,6 +24,7 @@ find_library(DWARF_LIBRARY NAMES dwarf REQUIRED)
 
 add_executable(elflift
   Binary/Loader.cpp
+  Binary/DynamicLibraries.cpp
   MainLifter.cpp
   TraceManager.cpp
   Lift.cpp

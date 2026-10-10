@@ -237,10 +237,13 @@ MainLifter::WrapImpl::SetDataSections(std::vector<BinaryLoader::ELFSection> &sec
   std::vector<llvm::Constant *> data_sec_name_ptr_array, data_sec_vma_array, data_sec_size_array,
       data_sec_bytes_ptr_array;
   uint64_t data_sec_num = 0;
+  const bool i386 = static_cast<AArch64TraceManager &>(manager).elf_obj.bin_arch ==
+                    BinaryLoader::ELFObject::ARCH_I386;
 
   for (auto &section : sections) {
     if (BinaryLoader::ELFSection::SEC_TYPE_CODE == section.sec_type ||
-        BinaryLoader::ELFSection::SEC_TYPE_UNKNOWN == section.sec_type) {
+        BinaryLoader::ELFSection::SEC_TYPE_UNKNOWN == section.sec_type ||
+        (i386 && section.is_tls)) {
       continue;
     }
     // add global data section "sec_name"

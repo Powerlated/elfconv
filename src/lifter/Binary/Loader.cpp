@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include <glog/logging.h>
 #include <sstream>
+#include <unordered_set>
 #define PACKAGE
 #include "Loader.h"
 
@@ -17,6 +18,7 @@
 #include <unistd.h>
 #include <utils/Util.h>
 #include <utils/elfconv.h>
+#include <utils/I386MemoryLayout.h>
 
 #define ERROR_LEN 1000
 
@@ -187,7 +189,7 @@ void ELFObject::OpenELF() {
   GElf_Ehdr header;
   if (!elf || !gelf_getehdr(elf, &header)) elfconv_runtime_error("Invalid ELF header.\n");
   if (header.e_machine == EM_386 && header.e_type == ET_DYN) {
-    load_bias = 0x08000000;
+    if (!load_bias) load_bias = i386_memory::kMainImageStart;
     for (auto *section = bfd_h->sections; section; section = section->next) {
       if (!(bfd_section_flags(section) & SEC_ALLOC)) continue;
       const uint64_t end = bfd_section_vma(section) + bfd_section_size(section) + load_bias;
@@ -200,12 +202,19 @@ void ELFObject::OpenELF() {
 }
 
 void ELFObject::LoadELF() {
-  LoadELFBFD();
+  OpenELF();
+  if (bfd_get_arch(bfd_h) == bfd_arch_i386 && bfd_get_arch_size(bfd_h) == 32) {
+    LoadI386Libraries();
+  } else {
+    if (!shared_library_paths.empty())
+      elfconv_runtime_error("Bundled libraries require an i386 executable.\n");
+    LoadELFBFD();
+  }
 }
 
 void ELFObject::LoadELFBFD() {
   // get binary handler
-  OpenELF();
+  if (!bfd_inited) OpenELF();
   // get entry point
   entry = bfd_get_start_address(bfd_h) + load_bias;
   // get binary format
@@ -281,6 +290,7 @@ void ELFObject::LoadELFBFD() {
 }
 
 asection *ELFObject::GetIncludedSection(uint64_t vma) {
+  if (!bfd_inited) return nullptr;
   for (auto sec = bfd_h->sections; sec; sec = sec->next) {
     bfd_vma sec_vma = bfd_section_vma(sec);
     bfd_size_type sec_size = bfd_section_size(sec);
@@ -288,6 +298,8 @@ asection *ELFObject::GetIncludedSection(uint64_t vma) {
       return sec;
     }
   }
+  for (const auto &object : shared_objects)
+    if (auto *section = object->GetIncludedSection(vma)) return section;
   return nullptr;
 }
 
@@ -375,6 +387,7 @@ void ELFObject::LoadDynamicSymbolsBFD() {
 }
 
 void ELFObject::ResolveI386Imports() {
+  const auto &bindings = shared_symbol_scope ? *shared_symbol_scope : shared_symbols;
   int fd = open(file_name.c_str(), O_RDONLY);
   Elf *elf = fd < 0 ? nullptr : elf_begin(fd, ELF_C_READ, nullptr);
   GElf_Ehdr header;
@@ -391,7 +404,7 @@ void ELFObject::ResolveI386Imports() {
       if (!gelf_getphdr(elf, i, &phdr)) elfconv_runtime_error("Invalid i386 program header.\n");
       executable |= phdr.p_type == PT_INTERP;
     }
-    if (!executable && entry_symbol.empty())
+    if (!executable && entry_symbol.empty() && !dependency_object)
       elfconv_runtime_error("i386 shared libraries require --entry_symbol (int(int,char**) ABI).\n");
     if (executable && !entry_symbol.empty())
       elfconv_runtime_error("--entry_symbol is only supported for i386 shared libraries.\n");
@@ -406,24 +419,34 @@ void ELFObject::ResolveI386Imports() {
     imported_data_vma = std::max(imported_data_vma, section.vma + section.size);
   }
   imported_data_vma = (imported_data_vma + 3) & ~uint64_t(3);
-  if (imported_data_vma > UINT32_MAX - 8) elfconv_runtime_error("No guest address space for i386 stdio imports.\n");
-  auto *stdio_bytes = static_cast<uint8_t *>(malloc(8));
-  const uint32_t stdio_handles[] = {1, 2};
+  if (imported_data_vma > UINT32_MAX - 12) elfconv_runtime_error("No guest address space for i386 stdio imports.\n");
+  auto *stdio_bytes = static_cast<uint8_t *>(malloc(12));
+  const uint32_t stdio_handles[] = {1, 2, 3};
   memcpy(stdio_bytes, stdio_handles, sizeof(stdio_handles));
   sections.emplace_back(this, ELFSection::SEC_TYPE_DATA, ".elfconv.stdio",
-                        imported_data_vma, 8, stdio_bytes);
+                        imported_data_vma, 12, stdio_bytes);
   bool entry_found = entry_symbol.empty();
+  std::unordered_set<uint64_t> function_addresses;
+  for (const auto &function : func_symbols) function_addresses.insert(function.addr);
+  for (const auto &[address, _] : func_symbols_map) function_addresses.insert(address);
   Elf_Scn *dynamic_scn = nullptr;
   while ((dynamic_scn = elf_nextscn(elf, dynamic_scn))) {
     GElf_Shdr shdr;
     if (!gelf_getshdr(dynamic_scn, &shdr)) continue;
-    if (!entry_symbol.empty() && shdr.sh_type == SHT_DYNSYM) {
+    if (shdr.sh_type == SHT_DYNSYM) {
       Elf_Data *symbols = elf_getdata(dynamic_scn, nullptr);
       if (!symbols || !shdr.sh_entsize) elfconv_runtime_error("Invalid i386 exports.\n");
       for (size_t i = 0; i < shdr.sh_size / shdr.sh_entsize; ++i) {
         GElf_Sym symbol;
         if (!gelf_getsym(symbols, i, &symbol)) elfconv_runtime_error("Invalid i386 export.\n");
         const char *name = elf_strptr(elf, shdr.sh_link, symbol.st_name);
+        if (name && symbol.st_shndx != SHN_UNDEF &&
+            symbol.st_shndx != SHN_ABS && GELF_ST_TYPE(symbol.st_info) == STT_FUNC) {
+          const uint64_t address = symbol.st_value + load_bias;
+          if (function_addresses.insert(address).second)
+            func_symbols.emplace_back(ELFSymbol::SYM_TYPE_FUNC, name, address,
+                                      GetIncludedSection(address), symbol.st_size);
+        }
         if (name && entry_symbol == name && symbol.st_shndx != SHN_UNDEF &&
             GELF_ST_TYPE(symbol.st_info) == STT_FUNC &&
             GELF_ST_BIND(symbol.st_info) != STB_LOCAL) {
@@ -444,6 +467,8 @@ void ELFObject::ResolveI386Imports() {
   if (!entry_found) elfconv_runtime_error("Exported i386 entry not found: %s.\n", entry_symbol.c_str());
   auto patch = [&](uint64_t address, uint32_t value) {
     for (auto &section : sections) {
+      // .tbss has no image bytes and can overlap ordinary data VMAs.
+      if (section.is_tls && !section.has_contents) continue;
       if (section.size >= 4 && address >= section.vma &&
           address - section.vma <= section.size - 4) {
         memcpy(section.bytes + address - section.vma, &value, 4);
@@ -452,6 +477,39 @@ void ELFObject::ResolveI386Imports() {
     }
     elfconv_runtime_error("Unmapped i386 relocation at 0x%lx.\n", address);
   };
+  auto read_word = [&](uint64_t address) {
+    for (const auto &section : sections) {
+      if (section.is_tls && !section.has_contents) continue;
+      if (section.size < 4 || address < section.vma ||
+          address - section.vma > section.size - 4) continue;
+      uint32_t value;
+      memcpy(&value, section.bytes + address - section.vma, 4);
+      return value;
+    }
+    elfconv_runtime_error("Unmapped i386 relocation addend.\n");
+    return uint32_t(0);
+  };
+  uint64_t next_import_vma = imported_data_vma + 12;
+  std::map<std::string, uint32_t> import_thunks;
+  auto import_thunk = [&](const std::string &name) {
+    auto existing = import_thunks.find(name);
+    if (existing != import_thunks.end()) return existing->second;
+    if (next_import_vma > UINT32_MAX)
+      elfconv_runtime_error("No guest address space for i386 import thunks.\n");
+    const uint32_t address = next_import_vma++;
+    auto *bytes = static_cast<uint8_t *>(malloc(1));
+    if (!bytes) elfconv_runtime_error("Cannot allocate i386 import thunk.\n");
+    *bytes = 0xc3;  // Adapter wrappers replace this instruction during lifting.
+    sections.emplace_back(this, ELFSection::SEC_TYPE_CODE, ".elfconv.import." + name,
+                          address, 1, bytes);
+    i386_imports.emplace(address, name);
+    func_symbols.emplace_back(ELFSymbol::SYM_TYPE_FUNC, name, address, nullptr, 1);
+    function_addresses.insert(address);
+    import_thunks.emplace(name, address);
+    return address;
+  };
+  const auto &tls_bindings = shared_tls_scope ? *shared_tls_scope : shared_tls_symbols;
+  uint32_t tlsdesc_entry = 0;
   Elf_Scn *scn = nullptr;
   while ((scn = elf_nextscn(elf, scn))) {
     GElf_Shdr shdr;
@@ -475,46 +533,78 @@ void ELFObject::ResolveI386Imports() {
       unsigned type = GELF_R_TYPE(rel.r_info);
       if (type == R_386_NONE) continue;
       rel.r_offset += load_bias;
+      if (type == R_386_TLS_DTPMOD32 || type == R_386_TLS_DTPOFF32 ||
+          type == R_386_TLS_TPOFF || type == R_386_TLS_TPOFF32 || type == R_386_TLS_DESC) {
+        I386TlsSymbol target{tls_module, static_cast<uint32_t>(sym.st_value)};
+        if (GELF_R_SYM(rel.r_info) && sym.st_shndx == SHN_UNDEF) {
+          auto found = tls_bindings.find(name);
+          if (found == tls_bindings.end())
+            elfconv_runtime_error("Unresolved i386 TLS symbol: %s.\n", name);
+          target = found->second;
+        } else if (GELF_R_SYM(rel.r_info) && GELF_ST_TYPE(sym.st_info) != STT_TLS) {
+          elfconv_runtime_error("i386 TLS relocation references a non-TLS symbol.\n");
+        }
+        if (!tls_libraries || !target.module || target.module > tls_libraries->size())
+          elfconv_runtime_error("Invalid i386 TLS module.\n");
+        const auto &library = (*tls_libraries)[target.module - 1];
+        if (!library.tls_size || target.offset >= library.tls_size)
+          elfconv_runtime_error("Invalid i386 TLS symbol offset.\n");
+        if (type == R_386_TLS_DTPMOD32) patch(rel.r_offset, target.module);
+        else if (type == R_386_TLS_DTPOFF32)
+          patch(rel.r_offset, GELF_R_SYM(rel.r_info) ? target.offset : read_word(rel.r_offset));
+        else if (type == R_386_TLS_TPOFF)
+          patch(rel.r_offset, read_word(rel.r_offset) + target.offset - library.tls_distance);
+        else if (type == R_386_TLS_TPOFF32)
+          patch(rel.r_offset, read_word(rel.r_offset) + library.tls_distance - target.offset);
+        else {
+          if (!tlsdesc_entry) tlsdesc_entry = import_thunk("tlsdesc");
+          patch(rel.r_offset + 4, read_word(rel.r_offset + 4) + target.offset - library.tls_distance);
+          patch(rel.r_offset, tlsdesc_entry);
+        }
+        continue;
+      }
       if (type == R_386_RELATIVE) {
         if (GELF_R_SYM(rel.r_info) != 0) elfconv_runtime_error("Invalid i386 relative relocation.\n");
-        bool mapped = false;
-        for (const auto &section : sections) {
-          if (section.size < 4 || rel.r_offset < section.vma ||
-              rel.r_offset - section.vma > section.size - 4) continue;
-          uint32_t addend;
-          memcpy(&addend, section.bytes + rel.r_offset - section.vma, 4);
-          patch(rel.r_offset, addend + load_bias);
-          mapped = true;
-          break;
+        patch(rel.r_offset, read_word(rel.r_offset) + load_bias);
+      } else if ((type == R_386_32 || type == R_386_PC32 ||
+                  type == R_386_GLOB_DAT || type == R_386_JMP_SLOT) &&
+                 sym.st_shndx == SHN_UNDEF &&
+                 GELF_ST_BIND(sym.st_info) == STB_WEAK && !bindings.count(name)) {
+        uint32_t value = 0;
+        if (type == R_386_32 || type == R_386_PC32) {
+          value = read_word(rel.r_offset);
+          if (type == R_386_PC32) value -= rel.r_offset;
         }
-        if (!mapped) elfconv_runtime_error("Unmapped i386 relative relocation.\n");
-      } else if (type == R_386_32 && sym.st_shndx != SHN_UNDEF) {
-        bool mapped = false;
-        for (const auto &section : sections) {
-          if (section.size < 4 || rel.r_offset < section.vma ||
-              rel.r_offset - section.vma > section.size - 4) continue;
-          uint32_t addend;
-          memcpy(&addend, section.bytes + rel.r_offset - section.vma, 4);
-          patch(rel.r_offset, addend + static_cast<uint32_t>(sym.st_value) +
-                (sym.st_shndx == SHN_ABS ? 0 : load_bias));
-          mapped = true;
-          break;
+        patch(rel.r_offset, value);
+      } else if ((type == R_386_32 || type == R_386_PC32 ||
+                  type == R_386_GLOB_DAT || type == R_386_JMP_SLOT) &&
+                 (sym.st_shndx != SHN_UNDEF || bindings.count(name) ||
+                  (GELF_ST_TYPE(sym.st_info) == STT_FUNC &&
+                   GELF_ST_BIND(sym.st_info) != STB_WEAK && type != R_386_JMP_SLOT))) {
+        const uint32_t symbol_address = sym.st_shndx != SHN_UNDEF
+            ? sym.st_value + (sym.st_shndx == SHN_ABS ? 0 : load_bias)
+            : bindings.count(name) ? bindings.at(name) : import_thunk(name);
+        uint32_t value = symbol_address;
+        if (type == R_386_32 || type == R_386_PC32) {
+          value += read_word(rel.r_offset);
+          if (type == R_386_PC32) value -= rel.r_offset;
         }
-        if (!mapped) elfconv_runtime_error("Unmapped i386 symbol relocation.\n");
-      } else if ((type == R_386_GLOB_DAT || type == R_386_JMP_SLOT) &&
-                 sym.st_shndx != SHN_UNDEF) {
-        patch(rel.r_offset, static_cast<uint32_t>(sym.st_value +
-              (sym.st_shndx == SHN_ABS ? 0 : load_bias)));
-      } else if (type == R_386_GLOB_DAT &&
-                 (std::string(name) == "stdout" || std::string(name) == "stderr")) {
-        patch(rel.r_offset, static_cast<uint32_t>(imported_data_vma +
-              (std::string(name) == "stderr" ? 4 : 0)));
-      } else if (type == R_386_GLOB_DAT && GELF_ST_BIND(sym.st_info) == STB_WEAK &&
-                 sym.st_shndx == SHN_UNDEF) {
-        patch(rel.r_offset, 0);
+        patch(rel.r_offset, value);
+      } else if ((type == R_386_GLOB_DAT || type == R_386_32 || type == R_386_PC32) &&
+                 (std::string(name) == "stdout" || std::string(name) == "stderr" ||
+                  std::string(name) == "stdin")) {
+        uint32_t value = static_cast<uint32_t>(imported_data_vma +
+              (std::string(name) == "stderr" ? 4 : std::string(name) == "stdin" ? 8 : 0));
+        if (type == R_386_32 || type == R_386_PC32) {
+          value += read_word(rel.r_offset);
+          if (type == R_386_PC32) value -= rel.r_offset;
+        }
+        patch(rel.r_offset, value);
       } else if (type == R_386_COPY && sym.st_size == 4 &&
-                 (std::string(name) == "stdout" || std::string(name) == "stderr")) {
-        patch(rel.r_offset, std::string(name) == "stdout" ? 1 : 2);
+                 (std::string(name) == "stdout" || std::string(name) == "stderr" ||
+                  std::string(name) == "stdin")) {
+        patch(rel.r_offset, std::string(name) == "stdout" ? 1 :
+                            std::string(name) == "stderr" ? 2 : 3);
         // Guest stdio handle, never a host FILE pointer.
       } else if (type == R_386_JMP_SLOT) {
         uint64_t entry = 0;
@@ -560,6 +650,17 @@ void ELFObject::ResolveI386Imports() {
   std::reverse(i386_finalizers.begin(), i386_finalizers.end());
   for (const auto &section : sections) {
     if (section.sec_name == ".fini") i386_finalizers.push_back(section.vma);
+  }
+  for (const auto *functions : {&i386_initializers, &i386_finalizers}) {
+    for (uint32_t address : *functions) {
+      if (!function_addresses.insert(address).second) continue;
+      auto *section = GetIncludedSection(address);
+      if (!section && std::any_of(bindings.begin(), bindings.end(),
+          [address](const auto &symbol) { return symbol.second == address; })) continue;
+      if (!section || !(bfd_section_flags(section) & SEC_CODE))
+        elfconv_runtime_error("Invalid i386 initializer/finalizer address: 0x%x.\n", address);
+      func_symbols.emplace_back(ELFSymbol::SYM_TYPE_FUNC, "elf_callback", address, section);
+    }
   }
   // Declare both local-symbol PLT stubs and non-lazy GOT stubs for unit ownership.
   for (const auto &section : sections) {
@@ -638,6 +739,8 @@ void ELFObject::LoadSectionsBFD() {
     }
 
     sections.emplace_back(this, sec_type, sec_name, vma, size, sec_bytes);
+    sections.back().is_tls = (bfd_flags & SEC_THREAD_LOCAL) != 0;
+    sections.back().has_contents = (bfd_flags & SEC_HAS_CONTENTS) != 0;
   }
 }
 

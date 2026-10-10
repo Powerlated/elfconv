@@ -72,6 +72,18 @@ else()
   set(ELFCONV_FLOAT_EXCEPTION 0)
 endif()
 
+set(thread_compile_flags)
+set(thread_link_flags)
+if(ELFCONV_PTHREADS)
+  if(NOT ELFCONV_TARGET STREQUAL "i386-wasm")
+    message(FATAL_ERROR "ELFCONV_PTHREADS currently supports i386-wasm only")
+  endif()
+  set(thread_compile_flags -pthread)
+  set(thread_link_flags -pthread -sPROXY_TO_PTHREAD=1 -sPTHREAD_POOL_SIZE=2
+    -sDEFAULT_PTHREAD_STACK_SIZE=2097152 -sOFFSCREENCANVAS_SUPPORT=1
+    "-sOFFSCREENCANVASES_TO_PTHREAD=#canvas")
+endif()
+
 function(_elfconv_execute description)
   execute_process(
     COMMAND ${ARGN}
@@ -159,7 +171,22 @@ if(ELFCONV_ENTRY_SYMBOL)
   endif()
   list(APPEND elfconv_entry_args --entry_symbol "${ELFCONV_ENTRY_SYMBOL}")
 endif()
-if(ELFCONV_INCREMENTAL_UNITS)
+if(ELFCONV_SHARED_LIBRARIES)
+  if(NOT ELFCONV_TARGET MATCHES "^i386-" OR ELFCONV_INCREMENTAL_UNITS)
+    message(FATAL_ERROR "Bundled libraries require i386 conversion without linker-map units")
+  endif()
+  foreach(library IN LISTS ELFCONV_SHARED_LIBRARIES)
+    if(NOT EXISTS "${library}" OR library MATCHES ",")
+      message(FATAL_ERROR "Invalid bundled library path: ${library}")
+    endif()
+  endforeach()
+  list(JOIN ELFCONV_SHARED_LIBRARIES "," library_paths)
+  list(APPEND elfconv_entry_args --shared_libraries "${library_paths}")
+  if(ELFCONV_TARGET STREQUAL "i386-wasm")
+    set(ELFCONV_PER_ELF ON)
+  endif()
+endif()
+if(ELFCONV_INCREMENTAL_UNITS OR ELFCONV_PER_ELF)
   if(NOT ELFCONV_TARGET STREQUAL "i386-wasm")
     message(FATAL_ERROR "Incremental unit conversion currently supports i386-wasm only")
   endif()
@@ -274,17 +301,21 @@ if(ELFCONV_TARGET STREQUAL "i386-wasm")
   if(NOT ELFCONV_WASM_OPT_LEVEL MATCHES "^[0123sz]$")
     message(FATAL_ERROR "ELFCONV_WASM_OPT_LEVEL must be 0, 1, 2, 3, s, or z")
   endif()
-  set(main_object "${ELFCONV_OUTPUT_DIR}/${ELFCONV_NAME}.wasm.o")
+  if(ELFCONV_PTHREADS)
+    set(main_object "${ELFCONV_OUTPUT_DIR}/${ELFCONV_NAME}.pthread.wasm.o")
+  else()
+    set(main_object "${ELFCONV_OUTPUT_DIR}/${ELFCONV_NAME}.wasm.o")
+  endif()
   if(NOT ELFCONV_NO_COMPILED AND
      (NOT EXISTS "${main_object}" OR "${main_ir}" IS_NEWER_THAN "${main_object}" OR
       "${ELFCONV_EMCC}" IS_NEWER_THAN "${main_object}"))
     _elfconv_execute("i386 bitcode compilation"
-      "${ELFCONV_EMCC}" "-O${ELFCONV_WASM_OPT_LEVEL}" -c "${main_ir}" -o "${main_object}")
+      "${ELFCONV_EMCC}" "-O${ELFCONV_WASM_OPT_LEVEL}" ${thread_compile_flags} -c "${main_ir}" -o "${main_object}")
   endif()
   if(NOT EXISTS "${main_object}")
     message(FATAL_ERROR "Missing compiled Wasm object: ${main_object}")
   endif()
-  if(ELFCONV_WASM_JSPI)
+  if(ELFCONV_WASM_JSPI OR ELFCONV_PTHREADS)
     set(ELFCONV_BROWSER_JSPI true)
     set(suspension_flags -sJSPI=1)
   else()
@@ -296,7 +327,7 @@ if(ELFCONV_TARGET STREQUAL "i386-wasm")
     set(debug_flags -g2)
   endif()
   _elfconv_execute("i386 browser link"
-    "${ELFCONV_EMCC}" "-O${ELFCONV_WASM_OPT_LEVEL}" ${debug_flags} ${ELFCONV_RUNTIME_INCLUDE_FLAGS} -std=c++17
+    "${ELFCONV_EMCC}" "-O${ELFCONV_WASM_OPT_LEVEL}" ${thread_link_flags} ${debug_flags} ${ELFCONV_RUNTIME_INCLUDE_FLAGS} -std=c++17
     ${ELFCONV_RUNTIME_DEFINITIONS} -DELF_IS_I386 -DADDRESS_SIZE_BITS=32
     -sUSE_SDL=2 "-sLEGACY_GL_EMULATION=${ELFCONV_LEGACY_GL}"
     -sMIN_WEBGL_VERSION=2 -sMAX_WEBGL_VERSION=2
@@ -305,7 +336,7 @@ if(ELFCONV_TARGET STREQUAL "i386-wasm")
     "${main_object}" ${ELFCONV_COMMON_RUNTIME_SOURCES} "${ELFCONV_RUNTIME_DIR}/I386Imports.cpp"
     -o "${ELFCONV_OUTPUT_DIR}/${ELFCONV_NAME}.js"
   )
-  configure_file("${ELFCONV_ROOT}/src/browser/i386.html.in"
+  configure_file("${ELFCONV_BROWSER_DIR}/i386.html.in"
     "${ELFCONV_OUTPUT_DIR}/${ELFCONV_NAME}.html" @ONLY)
   return()
 endif()
