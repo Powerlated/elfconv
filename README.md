@@ -146,6 +146,8 @@ cmake --install build
 
 Set `ELFCONV_ARCH=aarch64` when building the AArch64 semantics instead. Configure
 the dependency and project builds with the same LLVM installation.
+After rebuilding `elflift`, rerun conversion. Incremental caches automatically
+invalidate when the lifter binary changes.
 
 ### Browser
 

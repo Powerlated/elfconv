@@ -178,9 +178,9 @@ llvm::CallInst *AddTerminatingTailCall(llvm::BasicBlock *source_block, llvm::Val
                                        llvm::Value *pc_value) {
   CHECK(nullptr != dest_func) << "Target function/block does not exist!";
 
-  LOG_IF(ERROR, source_block->getTerminator())
-      << "Block already has a terminator; not adding fall-through call to: "
-      << (dest_func ? dest_func->getName().str() : "<unreachable>");
+  CHECK(!source_block->hasTerminator())
+      << "Cannot append a tail call to a terminated block: "
+      << dest_func->getName().str();
 
   llvm::IRBuilder<> ir(source_block);
 

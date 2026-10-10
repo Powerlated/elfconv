@@ -829,7 +829,7 @@ class SleighLifter::PcodeToLLVMEmitIntoBlock {
   }
 
   LiftStatus TerminateBlockWithCondition(llvm::Value *condition) {
-    if (this->target_block->getTerminator() == nullptr) {
+    if (!this->target_block->hasTerminator()) {
       llvm::IRBuilder<> ir(this->target_block);
 
       ir.CreateCondBr(condition, GetTrueOut(), GetFalseOut());
@@ -838,7 +838,7 @@ class SleighLifter::PcodeToLLVMEmitIntoBlock {
   }
 
   void TerminateBlock() {
-    if (this->target_block->getTerminator() == nullptr) {
+    if (!this->target_block->hasTerminator()) {
       llvm::IRBuilder ir(this->target_block);
       ir.CreateBr(GetTrueOut());
     }

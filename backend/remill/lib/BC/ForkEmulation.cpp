@@ -67,7 +67,7 @@ void TraceLifter::Impl::JoinBasicBlocksForFork() {
     bb_queue.pop();
     visited.insert(t_bb);
 
-    llvm::Instruction *t_endbr = t_bb->getTerminator();
+    llvm::Instruction *t_endbr = t_bb->getTerminatorOrNull();
 
     // if `t_endbr` is not branched to the specified basic block, t_bb must not be the joining bb.
     // This is necessary because JoinBasicBlocksForFork will be called before calling AddTerminatingCall against all basic blocks.

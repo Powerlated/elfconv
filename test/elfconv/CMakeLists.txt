@@ -27,6 +27,11 @@ target_include_directories(llvm_migration_test BEFORE PRIVATE
   "${googletest_SOURCE_DIR}/googletest/include")
 target_link_libraries(llvm_migration_test PRIVATE remill GTest::gtest_main)
 gtest_discover_tests(llvm_migration_test)
+if(CMAKE_ELFCONV_X86_BUILD)
+  add_dependencies(llvm_migration_test x86)
+  target_compile_definitions(llvm_migration_test PRIVATE
+    ELFCONV_TEST_SEMANTICS="${CMAKE_BINARY_DIR}/backend/remill/lib/Arch/X86/Runtime/x86.bc")
+endif()
 
 add_executable(i386_imports_test I386ImportsTests.cpp)
 

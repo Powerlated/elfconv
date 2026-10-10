@@ -972,7 +972,7 @@ bool TraceLifter::Impl::Lift(uint64_t addr, const char *fn_name,
 
     // Add terminator to the all basic block to avoid error on CFG flat
     for (auto &block : *func) {
-      if (!block.getTerminator()) {
+      if (!block.hasTerminator()) {
         AddTerminatingTailCall(&block, intrinsics->missing_block, *intrinsics, trace_addr);
       }
     }

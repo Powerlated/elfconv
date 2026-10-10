@@ -10,6 +10,7 @@
 #include <llvm/IR/Verifier.h>
 #include <remill/BC/InstructionLifter.h>
 #include <remill/BC/Util.h>
+#include <remill/BC/IntrinsicTable.h>
 
 remill::ArchName remill::EcvReg::target_elf_arch;
 
@@ -91,3 +92,44 @@ TEST(LlvmMigration, OptimizerPreservesGuestLibcCallSemantics) {
   ASSERT_NE(probe, nullptr);
   EXPECT_EQ(probe(), 103);
 }
+
+#ifdef ELFCONV_TEST_SEMANTICS
+TEST(LlvmMigration, TailCallTerminatesEmptyAndNonemptyBlocks) {
+  llvm::LLVMContext context;
+  auto module = remill::LoadModuleFromFile(&context, ELFCONV_TEST_SEMANTICS);
+  ASSERT_NE(module, nullptr);
+  remill::IntrinsicTable intrinsics(module.get());
+  for (bool nonempty : {false, true}) {
+    auto *function = llvm::Function::Create(intrinsics.lifted_function_type,
+        llvm::GlobalValue::ExternalLinkage, nonempty ? "nonempty" : "empty", *module);
+    auto *entry = llvm::BasicBlock::Create(context, "entry", function);
+    if (nonempty) {
+      llvm::IRBuilder<> builder(entry);
+      builder.CreateStore(builder.getInt8(7), function->getArg(remill::kStatePointerArgNum));
+    }
+    auto *call = remill::AddTerminatingTailCall(
+        entry, intrinsics.function_return, intrinsics, 0,
+        function->getArg(remill::kPCArgNum));
+    ASSERT_FALSE(llvm::verifyFunction(*function));
+    EXPECT_EQ(call->getCalledFunction(), intrinsics.function_return);
+    EXPECT_TRUE(call->isTailCall());
+    EXPECT_TRUE(llvm::isa<llvm::ReturnInst>(entry->getTerminator()));
+  }
+}
+
+TEST(LlvmMigration, TailCallRejectsExistingControlFlow) {
+  llvm::LLVMContext context;
+  auto module = remill::LoadModuleFromFile(&context, ELFCONV_TEST_SEMANTICS);
+  ASSERT_NE(module, nullptr);
+  remill::IntrinsicTable intrinsics(module.get());
+  auto *function = llvm::Function::Create(intrinsics.lifted_function_type,
+      llvm::GlobalValue::ExternalLinkage, "terminated", *module);
+  auto *entry = llvm::BasicBlock::Create(context, "entry", function);
+  llvm::ReturnInst::Create(context, entry);
+  EXPECT_DEATH(
+      remill::AddTerminatingTailCall(entry, intrinsics.function_return, intrinsics, 0,
+                                    function->getArg(remill::kPCArgNum)),
+      "Cannot append a tail call to a terminated block");
+  EXPECT_FALSE(llvm::verifyFunction(*function));
+}
+#endif
