@@ -1,3 +1,9 @@
+// Maps loaded guest ELF code to lifted functions and resolves cross-unit calls.
+// Unit ownership comes from ELF images or linker-map object ranges; host import
+// wrappers have a separate owner. Content fingerprints cache each unit's code
+// and external bindings independently of shared image, loader, and TLS metadata.
+// Every unit uses the same bundle-wide guest layout and lifted symbol names.
+
 #include "TraceManager.h"
 
 #include "Lift.h"
