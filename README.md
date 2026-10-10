@@ -39,6 +39,8 @@ An ahead-of-time binary translator that converts Linux applications to WebAssemb
   - x87 arithmetic uses 64-bit `double`, not extended 80-bit precision.
     The ten-byte guest encoding and register layout are retained, but values
     are rounded to binary64 for arithmetic. Extended precision and range are lost.
+    i386 `FXSAVE`/`FXRSTOR` preserve stored x87 encodings, control/status/tags,
+    MXCSR, and XMM state. MMX/x87 alias tracking remains incomplete.
 - **Linking**: No general Linux shared-object loader
   - AArch64 conversion requires statically linked binaries.
   - `i386-wasm` resolves the documented samples' libc/SDL2/OpenGL imports to
@@ -47,10 +49,19 @@ An ahead-of-time binary translator that converts Linux applications to WebAssemb
     (no ASLR), with relative relocations and GOT/PLT import resolution.
     Standalone i386 shared libraries can select an exported `int(int,char**)`
     entry with `ELFCONV_ENTRY_SYMBOL` (lifter: `--entry_symbol`). Constructors
-    run before the entry and finalizers after it returns. Defined symbols bind
-    within that ELF; dependencies still use host ABI adapters, not loaded Linux
-    libraries. Runtime `dlopen`, multi-library symbol interposition, TLS,
-    unsupported relocations, and unknown imports are not supported.
+    run before the entry and finalizers after it returns. i386
+    conversion can bundle additional ELF libraries with `ELFCONV_SHARED_LIBRARIES`
+    (lifter: `--shared_libraries`) for guest `dlopen`/`dlsym`/`dlclose`/`dlerror`.
+    Symbols remain guest addresses; dependency constructors and library
+    reference counts are honored. Libraries must be supplied at conversion time.
+    Defined symbols bind within their ELF, with unresolved references resolved
+    against the bundled set or existing host adapters. General Linux loader
+    search/interposition, unsupported relocations, and unknown imports remain
+    unsupported. i386 ELF TLS supports local/initial-exec, general/local-dynamic,
+    and GNU2 descriptors, with per-CPU-state storage and thread-local destructors.
+    `ELFCONV_PTHREADS=ON` enables guest create/join, mutexes, and condition
+    variables on Emscripten workers; requires JSPI and cross-origin isolation.
+    See [bundled-library usage](examples/README.md#bundled-dynamic-libraries).
     Raw i386 syscalls are rejected explicitly by the runtime.
 - **System Calls**: Partial Linux syscall implementation
   - See [`src/runtime/syscalls/`](https://github.com/yomaytk/elfconv/blob/main/src/runtime/syscalls) for currently supported syscalls

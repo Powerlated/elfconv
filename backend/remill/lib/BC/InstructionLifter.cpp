@@ -130,12 +130,6 @@ LiftStatus InstructionLifter::LiftIntoBlock(Instruction &arch_inst, llvm::BasicB
     // ir.CreateStore(ir.CreateCall(impl->intrinsics->delay_slot_begin, temp_args), mem_ptr_ref);
   }
 
-  // Begin an atomic block.
-  // (FIXME) In the current design, we don't consider the atomic instructions.
-  if (arch_inst.is_atomic_read_modify_write) {
-    // llvm::Value *temp_args[] = {ir.CreateLoad(impl->memory_ptr_type, mem_ptr_ref)};
-    // ir.CreateStore(ir.CreateCall(impl->intrinsics->atomic_begin, temp_args), mem_ptr_ref);
-  }
 
   // Lift every operand of the target instruction.
   if (arch_inst.lift_config.target_elf_arch == kArchAArch64LittleEndian) {
@@ -192,7 +186,11 @@ LiftStatus InstructionLifter::LiftIntoBlock(Instruction &arch_inst, llvm::BasicB
     }
 
     if (status == kLiftedInstruction) {
+      if (arch_inst.is_atomic_read_modify_write)
+        ir.CreateCall(impl->intrinsics->atomic_begin, {runtime_ptr});
       ir.CreateCall(isel_func, args);
+      if (arch_inst.is_atomic_read_modify_write)
+        ir.CreateCall(impl->intrinsics->atomic_end, {runtime_ptr});
     }
   }
 

@@ -6,28 +6,20 @@ endif()
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 find_program(ELFCONV_QEMU_I386_CC NAMES gcc REQUIRED)
 find_program(ELFCONV_QEMU_I386_NODE NAMES node REQUIRED)
+find_program(ELFCONV_QEMU_I386_OBJCOPY NAMES objcopy REQUIRED)
 if(NOT ELFCONV_EMCC)
   find_program(ELFCONV_EMCC NAMES em++ REQUIRED)
 endif()
 
-foreach(profile IN ITEMS core full shift-defined double-shift-defined rotate-defined bit-count-defined x87-sm64-defined pie shared)
-  if(profile STREQUAL "core" OR profile STREQUAL "full")
-    set(fixture_args --profile "${profile}")
-  else()
-    set(fixture_args --source "${CMAKE_CURRENT_SOURCE_DIR}/${profile}.c")
-  endif()
-  if(profile STREQUAL "pie")
-    list(APPEND fixture_args --pie)
-  endif()
-  if(profile STREQUAL "shared")
-    list(APPEND fixture_args --shared)
-  endif()
+foreach(profile IN ITEMS core full)
+  set(fixture_args --profile "${profile}")
   string(REPLACE "-" "_" test_suffix "${profile}")
   add_test(NAME qemu_i386_${test_suffix}
-    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/run.py"
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/../run_i386.py"
       --lifter "$<TARGET_FILE:elflift>"
       --emcc "${ELFCONV_EMCC}"
       --cc "${ELFCONV_QEMU_I386_CC}"
+      --objcopy "${ELFCONV_QEMU_I386_OBJCOPY}"
       --node "${ELFCONV_QEMU_I386_NODE}"
       --cmake "${CMAKE_COMMAND}"
       ${fixture_args}

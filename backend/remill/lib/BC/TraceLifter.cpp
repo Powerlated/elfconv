@@ -506,9 +506,10 @@ bool TraceLifter::Impl::Lift(uint64_t addr, const char *fn_name,
       switch (inst.category) {
         case Instruction::kCategoryInvalid: {
           llvm::IRBuilder<> ir_inv(block);
-          ir_inv.CreateCall(module->getFunction("__ecv_warning"),
+          auto *warning = module->getFunction("__ecv_warning");
+          ir_inv.CreateCall(warning,
                             {arena_ptr, state_ptr,
-                             llvm::ConstantInt::get(llvm::Type::getInt64Ty(context), inst_addr),
+                             llvm::ConstantInt::get(warning->getFunctionType()->getParamType(2), inst_addr),
                              runtime_ptr});
           DirectBranchWithSaveParents(GetOrCreateNextBlock(), block);
           break;

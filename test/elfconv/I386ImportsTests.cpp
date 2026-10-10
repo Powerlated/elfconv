@@ -15,6 +15,15 @@
 
 extern "C" const uint32_t _ecv_i386_initializers[] = {0};
 extern "C" const uint32_t _ecv_i386_finalizers[] = {0};
+extern "C" const I386DynamicLibrary _ecv_i386_libraries[] = {};
+extern "C" const uint32_t _ecv_i386_library_count = 0;
+extern "C" const uint32_t _ecv_i386_tls_static_size = 0;
+extern "C" const uint32_t _ecv_i386_tls_static_alignment = 16;
+extern "C" {
+const uint8_t *_ecv_data_sec_name_ptr_array[] = {
+    reinterpret_cast<const uint8_t *>(".data")};
+const uint8_t *_ecv_data_sec_bytes_ptr_array[] = {nullptr};
+}
 extern "C" const uint64_t _ecv_data_sec_num = 1;
 extern "C" const uint64_t _ecv_data_sec_vma_array[] = {0x08000000};
 extern "C" const uint64_t _ecv_data_sec_size_array[] = {0x01000000};
@@ -177,5 +186,55 @@ TEST(I386LibcImports, FileHandlesAndI386StatLayoutAreGuestVisible) {
   EXPECT_EQ(h.at<uint32_t>(kData + 0x140), uint32_t(host.st_mtim.tv_sec));
   EXPECT_EQ(h.at<uint32_t>(kData + 0x148), uint32_t(host.st_ctim.tv_sec));
   unlink(path);
+}
+
+TEST(I386LibcImports, BoundedComparisonAllowsUnterminatedArenaBoundary) {
+  ImportHarness h;
+  const uint32_t tail = MEMORY_ARENA_SIZE - 2;
+  memcpy(h.arena + tail, "Ab", 2);
+  h.string(kString, "aBextra");
+  h.call(__ecv_i386_strncasecmp, tail, kString, 2u);
+  EXPECT_EQ(h.state.gpr.rax.dword, 0u);
+  h.string(kString, "Abextra");
+  h.call(__ecv_i386_strncmp, tail, kString, 2u);
+  EXPECT_EQ(h.state.gpr.rax.dword, 0u);
+}
+
+TEST(I386LibcImports, FortifiedCopiesRejectOverflowBeforeWriting) {
+  ImportHarness h;
+  h.string(kString, "abc");
+  h.call(__ecv_i386___stpcpy_chk, kOutput, kString, 4u);
+  EXPECT_EQ(h.state.gpr.rax.dword, kOutput + 3);
+  EXPECT_EQ(std::string(reinterpret_cast<char *>(h.arena + kOutput)), "abc");
+  EXPECT_DEATH(h.call(__ecv_i386___strcpy_chk, kOutput, kString, 3u), "");
+  h.string(kFormat, "%d");
+  h.call(__ecv_i386___snprintf_chk, kOutput, 3u, 1u, 3u, kFormat, 1234u);
+  EXPECT_EQ(h.state.gpr.rax.dword, 4u);
+  EXPECT_EQ(std::string(reinterpret_cast<char *>(h.arena + kOutput)), "12");
+  EXPECT_DEATH(h.call(__ecv_i386___snprintf_chk, kOutput, 4u, 1u, 3u, kFormat, 1u), "");
+}
+TEST(I386PthreadImports, RecursiveAttributesSurviveRejectedTypeAndPreserveErrno) {
+  ImportHarness h;
+  errno = EDOM;
+  h.call(__ecv_i386_pthread_mutexattr_init, kData);
+  ASSERT_EQ(h.state.gpr.rax.dword, 0u);
+  h.call(__ecv_i386_pthread_mutexattr_settype, kData, 1u);
+  ASSERT_EQ(h.state.gpr.rax.dword, 0u);
+  h.call(__ecv_i386_pthread_mutexattr_settype, kData, UINT32_MAX);
+  EXPECT_EQ(h.state.gpr.rax.dword, uint32_t(host_errno_to_i386(EINVAL)));
+  h.call(__ecv_i386_pthread_mutex_init, kOutput, kData);
+  ASSERT_EQ(h.state.gpr.rax.dword, 0u);
+  h.call(__ecv_i386_pthread_mutexattr_destroy, kData);
+  h.call(__ecv_i386_pthread_mutex_trylock, kOutput);
+  ASSERT_EQ(h.state.gpr.rax.dword, 0u);
+  h.call(__ecv_i386_pthread_mutex_trylock, kOutput);
+  EXPECT_EQ(h.state.gpr.rax.dword, 0u);
+  h.call(__ecv_i386_pthread_mutex_unlock, kOutput);
+  EXPECT_EQ(h.state.gpr.rax.dword, 0u);
+  h.call(__ecv_i386_pthread_mutex_unlock, kOutput);
+  EXPECT_EQ(h.state.gpr.rax.dword, 0u);
+  h.call(__ecv_i386_pthread_mutex_destroy, kOutput);
+  EXPECT_EQ(h.state.gpr.rax.dword, 0u);
+  EXPECT_EQ(errno, EDOM);
 }
 }  // namespace

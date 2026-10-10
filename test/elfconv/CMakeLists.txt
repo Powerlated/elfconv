@@ -40,4 +40,18 @@ target_link_options(i386_imports_test PRIVATE -Wl,--gc-sections)
 
 gtest_discover_tests(i386_imports_test)
 
+add_executable(i386_tls_test I386TlsTests.cpp)
+find_package(Threads REQUIRED)
+target_link_libraries(i386_tls_test GTest::gtest_main Threads::Threads)
+target_include_directories(i386_tls_test PRIVATE
+  ${CMAKE_SOURCE_DIR}
+  ${CMAKE_SOURCE_DIR}/src
+  ${CMAKE_SOURCE_DIR}/backend/remill/include
+)
+target_compile_definitions(i386_tls_test PRIVATE ELF_IS_I386 ADDRESS_SIZE_BITS=32)
+target_compile_options(i386_tls_test PRIVATE -ffunction-sections -fdata-sections)
+target_link_options(i386_tls_test PRIVATE -Wl,--gc-sections)
+gtest_discover_tests(i386_tls_test)
+
 add_subdirectory(qemu-i386)
+add_subdirectory(i386)

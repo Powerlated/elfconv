@@ -25,66 +25,81 @@ struct State;
 
 extern "C" const uint8_t *MemoryArenaPtr;
 
-#define __remill_read_memory_macro8(rt_m, addr) *(uint8_t *) (MemoryArenaPtr + addr)
-#define __remill_read_memory_macro16(rt_m, addr) *(uint16_t *) (MemoryArenaPtr + addr)
-#define __remill_read_memory_macro32(rt_m, addr) *(uint32_t *) (MemoryArenaPtr + addr)
-#define __remill_read_memory_macro64(rt_m, addr) *(uint64_t *) (MemoryArenaPtr + addr)
-#define __remill_read_memory_macro128(rt_m, addr) *(uint128_t *) (MemoryArenaPtr + addr)
-#define __remill_read_memory_macros8(rt_m, addr) *(int8_t *) (MemoryArenaPtr + addr)
-#define __remill_read_memory_macros16(rt_m, addr) *(int16_t *) (MemoryArenaPtr + addr)
-#define __remill_read_memory_macros32(rt_m, addr) *(int32_t *) (MemoryArenaPtr + addr)
-#define __remill_read_memory_macros64(rt_m, addr) *(int64_t *) (MemoryArenaPtr + addr)
-#define __remill_read_memory_macros128(rt_m, addr) *(int128_t *) (MemoryArenaPtr + addr)
-#define __remill_read_memory_macrof32(rt_m, addr) *(float32_t *) (MemoryArenaPtr + addr)
-#define __remill_read_memory_macrof64(rt_m, addr) *(float64_t *) (MemoryArenaPtr + addr)
-#define __remill_read_memory_macrof80(rt_m, addr) *(float80_t *) (MemoryArenaPtr + addr)
+// Guest machine loads must remain observable across pthread synchronization.
+#if ADDRESS_SIZE_BITS == 32
+#define ECV_GUEST_VOLATILE volatile
+#else
+#define ECV_GUEST_VOLATILE
+#endif
+
+#define __remill_read_memory_macro8(rt_m, addr) *(ECV_GUEST_VOLATILE uint8_t *) (MemoryArenaPtr + addr)
+#define __remill_read_memory_macro16(rt_m, addr) *(ECV_GUEST_VOLATILE uint16_t *) (MemoryArenaPtr + addr)
+#define __remill_read_memory_macro32(rt_m, addr) *(ECV_GUEST_VOLATILE uint32_t *) (MemoryArenaPtr + addr)
+#define __remill_read_memory_macro64(rt_m, addr) *(ECV_GUEST_VOLATILE uint64_t *) (MemoryArenaPtr + addr)
+#define __remill_read_memory_macro128(rt_m, addr) *(ECV_GUEST_VOLATILE uint128_t *) (MemoryArenaPtr + addr)
+#define __remill_read_memory_macros8(rt_m, addr) *(ECV_GUEST_VOLATILE int8_t *) (MemoryArenaPtr + addr)
+#define __remill_read_memory_macros16(rt_m, addr) *(ECV_GUEST_VOLATILE int16_t *) (MemoryArenaPtr + addr)
+#define __remill_read_memory_macros32(rt_m, addr) *(ECV_GUEST_VOLATILE int32_t *) (MemoryArenaPtr + addr)
+#define __remill_read_memory_macros64(rt_m, addr) *(ECV_GUEST_VOLATILE int64_t *) (MemoryArenaPtr + addr)
+#define __remill_read_memory_macros128(rt_m, addr) *(ECV_GUEST_VOLATILE int128_t *) (MemoryArenaPtr + addr)
+#define __remill_read_memory_macrof32(rt_m, addr) *(ECV_GUEST_VOLATILE float32_t *) (MemoryArenaPtr + addr)
+#define __remill_read_memory_macrof64(rt_m, addr) *(ECV_GUEST_VOLATILE float64_t *) (MemoryArenaPtr + addr)
+#define __remill_read_memory_macrof80(rt_m, addr) \
+  ([&]() { \
+    float80_t value; \
+    const auto *source = (ECV_GUEST_VOLATILE const uint8_t *) (MemoryArenaPtr + addr); \
+    for (unsigned i = 0; i < sizeof(value.data); ++i) value.data[i] = source[i]; \
+    return value; \
+  }())
 
 #define __remill_write_memory_macro8(rt_m, addr, src) \
   do { \
-    auto dst = (uint8_t *) (MemoryArenaPtr + addr); \
+    auto dst = (ECV_GUEST_VOLATILE uint8_t *) (MemoryArenaPtr + addr); \
     *dst = src; \
   } while (0);
 
 #define __remill_write_memory_macro16(rt_m, addr, src) \
   do { \
-    auto dst = (uint16_t *) (MemoryArenaPtr + addr); \
+    auto dst = (ECV_GUEST_VOLATILE uint16_t *) (MemoryArenaPtr + addr); \
     *dst = src; \
   } while (0);
 
 #define __remill_write_memory_macro32(rt_m, addr, src) \
   do { \
-    auto dst = (uint32_t *) (MemoryArenaPtr + addr); \
+    auto dst = (ECV_GUEST_VOLATILE uint32_t *) (MemoryArenaPtr + addr); \
     *dst = src; \
   } while (0);
 
 #define __remill_write_memory_macro64(rt_m, addr, src) \
   do { \
-    auto dst = (uint64_t *) (MemoryArenaPtr + addr); \
+    auto dst = (ECV_GUEST_VOLATILE uint64_t *) (MemoryArenaPtr + addr); \
     *dst = src; \
   } while (0);
 
 #define __remill_write_memory_macro128(rt_m, addr, src) \
   do { \
-    auto dst = (uint128_t *) (MemoryArenaPtr + addr); \
+    auto dst = (ECV_GUEST_VOLATILE uint128_t *) (MemoryArenaPtr + addr); \
     *dst = src; \
   } while (0);
 
 #define __remill_write_memory_macrof32(rt_m, addr, src) \
   do { \
-    auto dst = (float32_t *) (MemoryArenaPtr + addr); \
+    auto dst = (ECV_GUEST_VOLATILE float32_t *) (MemoryArenaPtr + addr); \
     *dst = src; \
   } while (0);
 
 #define __remill_write_memory_macrof64(rt_m, addr, src) \
   do { \
-    auto dst = (float64_t *) (MemoryArenaPtr + addr); \
+    auto dst = (ECV_GUEST_VOLATILE float64_t *) (MemoryArenaPtr + addr); \
     *dst = src; \
   } while (0);
 
 #define __remill_write_memory_macrof80(rt_m, addr, src) \
   do { \
-    auto dst = (float80_t *) (MemoryArenaPtr + addr); \
-    *dst = src; \
+    auto *dst = (ECV_GUEST_VOLATILE uint8_t *) (MemoryArenaPtr + addr); \
+    const auto &value = src; \
+    for (unsigned byte_index = 0; byte_index < sizeof(value.data); ++byte_index) \
+      dst[byte_index] = value.data[byte_index]; \
   } while (0);
 
 #define __remill_write_memory_macrof128(rt_m, addr, src) \

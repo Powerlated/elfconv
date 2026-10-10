@@ -1563,6 +1563,15 @@ IF_AVX(DEF_ISEL(VMOVDDUP_XMMdq_XMMq) = MOVDDUP<VV128W, V128>;)
 
 namespace {
 
+template <typename D, typename S>
+DEF_SEM(SQRTPS, D dst, S source) {
+  const auto input = FReadV32(source);
+  float32v4_t result = {};
+  _Pragma("unroll") for (unsigned lane = 0; lane < 4; ++lane)
+    result = FInsertV32(result, lane, SquareRoot32(rt_m, state, FExtractV32(input, lane)));
+  FWriteV32(dst, result);
+}
+
 template <typename D, typename S1, typename S2>
 DEF_SEM(SQRTSS, D dst, S1 old_dst, S2 src1) {
 
@@ -1633,6 +1642,8 @@ DEF_SEM(VRSQRTSS, D dst, S1 src1, S2 src2) {
 #endif  // HAS_FEATURE_AVX
 }  // namespace
 
+DEF_ISEL(SQRTPS_XMMps_MEMps) = SQRTPS<V128W, MV128>;
+DEF_ISEL(SQRTPS_XMMps_XMMps) = SQRTPS<V128W, V128>;
 DEF_ISEL(SQRTSS_XMMss_MEMss) = SQRTSS<V128W, V128, MV32>;
 DEF_ISEL(SQRTSS_XMMss_XMMss) = SQRTSS<V128W, V128, V128>;
 IF_AVX(DEF_ISEL(VSQRTSS_XMMdq_XMMdq_MEMd) = VSQRTSS<VV128W, V128, MV32>;)

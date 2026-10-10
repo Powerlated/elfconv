@@ -1780,6 +1780,11 @@ DEF_SEM(PINSRW, D dst, S1 src1, S2 src2, I8 src3) {
   auto index = URem(Read(src3), UInt8(NumVectorElems(dst_vec)));
   UWriteV16(dst, UInsertV16(dst_vec, index, value));
 }
+template <typename D, typename S1, typename S2>
+DEF_SEM(PINSRD, D dst, S1 src1, S2 src2, I8 src3) {
+  auto dst_vec = UReadV32(src1);
+  UWriteV32(dst, UInsertV32(dst_vec, Read(src3) & 3u, UInt32(Read(src2))));
+}
 
 DEF_SEM(DoMOVNTQ_MEMq_MMXq, MV64W dst, V64 src1) {
   UWriteV64(dst, UReadV64(src1));
@@ -1829,6 +1834,8 @@ DEF_ISEL(PINSRW_MMXq_MEMw_IMMb) = PINSRW<V64W, V64, M16>;
 DEF_ISEL(PINSRW_MMXq_GPR32_IMMb) = PINSRW<V64W, V64, R32>;
 DEF_ISEL(PINSRW_XMMdq_MEMw_IMMb) = PINSRW<V128W, V128, M16>;
 DEF_ISEL(PINSRW_XMMdq_GPR32_IMMb) = PINSRW<V128W, V128, R32>;
+DEF_ISEL(PINSRD_XMMdq_MEMd_IMMb) = PINSRD<V128W, V128, M32>;
+DEF_ISEL(PINSRD_XMMdq_GPR32d_IMMb) = PINSRD<V128W, V128, R32>;
 IF_AVX(DEF_ISEL(VPINSRW_XMMdq_XMMdq_MEMw_IMMb) = PINSRW<VV128W, V128, M16>);
 IF_AVX(DEF_ISEL(VPINSRW_XMMdq_XMMdq_GPR32d_IMMb) = PINSRW<VV128W, V128, R32>);
 
