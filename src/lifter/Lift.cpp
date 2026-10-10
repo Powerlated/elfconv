@@ -20,6 +20,7 @@
 
 #include <cstdint>
 #include <sstream>
+#include <string_view>
 #if defined(__linux__)
 #  include <signal.h>
 #  include <utils/Util.h>
@@ -166,6 +167,26 @@ static void EmitI386Libraries(llvm::Module &module, const BinaryLoader::ELFObjec
 int main(int argc, char *argv[]) {
   // set custom signal handler for SIGSEGV.
   lift_set_sigaction();
+  bool eflags_elision = true;
+  int remaining = 1;
+  bool options = true;
+  for (int i = 1; i < argc; ++i) {
+    const std::string_view argument(argv[i]);
+    if (options && argument == "-feflags-elision") {
+      eflags_elision = true;
+    } else if (options && argument == "-fno-eflags-elision") {
+      eflags_elision = false;
+    } else {
+      if (argument == "--") options = false;
+      argv[remaining++] = argv[i];
+    }
+  }
+  argc = remaining;
+  argv[argc] = nullptr;
+  google::SetUsageMessage(
+      "Lift ELF code to LLVM bitcode.\n"
+      "  -f[no-]eflags-elision  Enable/disable arithmetic flag liveness and elision.\n"
+      "Enabled by default; the last occurrence wins.");
   google::ParseCommandLineFlags(&argc, &argv, true);
   google::InitGoogleLogging(argv[0]);
 
@@ -232,6 +253,7 @@ int main(int argc, char *argv[]) {
                                     arch_name == remill::kArchX86,
                                 arch_name, FLAGS_fork_emulation == "1",
                                 !manager.elf_obj.is_stripped);
+  lift_config.eflags_elision = eflags_elision;
 #if defined(PRINT_FUNC_ADDR)
   if (FLAGS_dbg_fun_vma > 0) {
     lift_config.dbg_fun_vma = FLAGS_dbg_fun_vma;

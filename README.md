@@ -106,6 +106,10 @@ Dead flag stores and their unused computations are removed from semantic variant
 before bitcode emission. The latest size change includes the LLVM upgrade;
 it does not isolate EFLAGS savings.
 
+`-feflags-elision` enables arithmetic flag liveness and dead computation removal
+together (default). `-fno-eflags-elision` preserves all flag computations and skips
+the analysis. The last occurrence wins; there is no analysis-only option.
+
 
 ## Quick Start
 

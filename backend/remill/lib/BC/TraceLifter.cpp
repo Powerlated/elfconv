@@ -498,7 +498,7 @@ bool TraceLifter::Impl::Lift(uint64_t addr, const char *fn_name,
         continue;
       }
 
-      if (arch->IsX86()) {
+      if (lift_config.target_elf_arch == kArchX86 && lift_config.eflags_elision) {
         if (!decoded_instructions.contains(inst_addr)) analyze_flags(inst_addr);
         if (auto decoded = decoded_instructions.find(inst_addr);
             decoded != decoded_instructions.end()) {

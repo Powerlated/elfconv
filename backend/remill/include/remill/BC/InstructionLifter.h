@@ -68,6 +68,8 @@ class LiftConfig {
   bool fork_emulation;
   uint64_t dbg_fun_vma;
   bool has_symtab;  // Whether the binary has symbol table
+  // Liveness analysis and semantic pruning are one end-to-end pass.
+  bool eflags_elision = true;
 
   LiftConfig() = delete;
 

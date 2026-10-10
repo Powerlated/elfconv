@@ -161,7 +161,8 @@ LiftStatus InstructionLifter::LiftIntoBlock(Instruction &arch_inst, llvm::BasicB
     return status;
   }
 
-  if (arch_inst.lift_config.target_elf_arch == kArchX86 &&
+  if (arch_inst.lift_config.eflags_elision &&
+      arch_inst.lift_config.target_elf_arch == kArchX86 &&
       (arch_inst.flags_written & ~arch_inst.flags_needed)) {
     isel_func = WithLiveFlags(isel_func, impl->arch, arch_inst.flags_needed,
                               arch_inst.flags_written);
