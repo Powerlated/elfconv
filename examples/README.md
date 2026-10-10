@@ -237,17 +237,16 @@ slots, including executable copy relocations; host `FILE*` pointers are not expo
 
 ### Bundled dynamic libraries
 
-Whole-program i386 conversion accepts a semicolon-separated library list:
+The Python driver accepts repeated `--shared-library` arguments:
 
 ```sh
-cmake \
-  -DELFCONV_INPUT=/absolute/path/to/program \
-  -DELFCONV_TARGET=i386-wasm \
-  "-DELFCONV_SHARED_LIBRARIES=/absolute/path/libdependency.so;/absolute/path/libplugin.so" \
-  -DELFCONV_LIFTER="$PWD/build/src/lifter/elflift" \
-  -DELFCONV_EMCC=/path/to/emsdk/upstream/emscripten/em++ \
-  -DELFCONV_OUTPUT_DIR=/tmp/program-wasm \
-  -P cmake/ConvertElf.cmake
+python scripts/convert_elf.py \
+  --input /absolute/path/to/program --target i386-wasm \
+  --shared-library /absolute/path/libdependency.so \
+  --shared-library /absolute/path/libplugin.so \
+  --lifter "$PWD/build/src/lifter/elflift" \
+  --emcc /path/to/emsdk/upstream/emscripten/em++ \
+  --output-dir /tmp/program-wasm
 ```
 
 The equivalent lifter flag is `--shared_libraries=/path/a.so,/path/b.so`;
@@ -313,13 +312,14 @@ require guest-ABI adapters rather than native host pointers.
 
 Bundled i386 Wasm conversion lifts and caches each ELF separately, then links
 one Wasm module with shared guest layout/loader metadata and import adapters.
-This is the canonical Portal conversion path: use `ELFCONV_SHARED_LIBRARIES`
-with `i386-wasm` above. Cache: output directory's `.elfconv-incremental/`.
+Portal uses this per-ELF path. Cache: output directory's `.elfconv-incremental/`.
 Each uncached ELF runs lift → Wasm compilation as one parallel job.
-`ELFCONV_CONVERSION_JOBS` limits concurrent jobs (default 2); lower it for
-memory-constrained hosts. Target API: `CONVERSION_JOBS`.
+`--conversion-jobs` limits concurrent jobs (default 2); lower it for
+memory-constrained hosts. CMake: `ELFCONV_CONVERSION_JOBS`; target API: `CONVERSION_JOBS`.
 The manifest, shared metadata, registry/runtime compilation, and final link
 remain serial. Successful stages retain their cache keys if another job fails.
+TTY: live per-library progress tree. Redirected output: plain stage transitions.
+Tool output: `.elfconv-logs/`; failures print the log tail and full log path.
 
 
 This is an explicit AOT bundle, not a runtime native-ELF compiler or a general

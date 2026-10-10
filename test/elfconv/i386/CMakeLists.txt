@@ -48,7 +48,6 @@ foreach(profile IN ITEMS dead-eflags shift-defined double-shift-defined rotate-d
       --cc "${ELFCONV_I386_CC}"
       --objcopy "${ELFCONV_I386_OBJCOPY}"
       --node "${ELFCONV_I386_NODE}"
-      --cmake "${CMAKE_COMMAND}"
       ${fixture_args}
       --output-dir "${CMAKE_CURRENT_BINARY_DIR}/${profile}")
   set_tests_properties(i386_${test_suffix} PROPERTIES

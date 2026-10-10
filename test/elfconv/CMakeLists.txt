@@ -14,6 +14,16 @@ FetchContent_MakeAvailable(googletest)
 
 enable_testing()
 include(GoogleTest)
+find_package(Python3 3.11 REQUIRED COMPONENTS Interpreter)
+foreach(case IN ITEMS cache failure cancellation preload)
+  add_test(NAME conversion_driver_${case}
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/ConversionDriverTests.py" "${case}")
+  set_tests_properties(conversion_driver_${case} PROPERTIES TIMEOUT 15)
+endforeach()
+add_test(NAME conversion_driver_compiler
+  COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/ConversionDriverTests.py"
+    compiler "${CMAKE_CXX_COMPILER}")
+set_tests_properties(conversion_driver_compiler PROPERTIES TIMEOUT 30)
 
 if(CMAKE_ELFCONV_AARCH64_BUILD)
   add_executable(elfconv_test ../../src/utils/Util.cpp Run.cpp)

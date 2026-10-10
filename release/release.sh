@@ -106,12 +106,14 @@ main() {
   esac
   
 
-  # Package the CMake converter and runtime sources.
+  # Package the Python converter and runtime sources.
   mkdir -p "${OUTDIR}/src/browser" "${OUTDIR}/cmake" "${OUTDIR}/src/runtime" \
     "${OUTDIR}/src/utils" "${OUTDIR}/backend/remill/include" \
     "${OUTDIR}/thirdparty/nlohmann" "${OUTDIR}/xterm-pty"
   cp -R "${BROWSER_DIR}/." "${OUTDIR}/src/browser/"
   cp -R "${ELFCONV_DIR}/cmake/." "${OUTDIR}/cmake/"
+  mkdir -p "${OUTDIR}/scripts"
+  cp "${ELFCONV_DIR}/scripts/convert_elf.py" "${ELFCONV_DIR}/scripts/pack_preload.py" "${ELFCONV_DIR}/scripts/requirements.txt" "${OUTDIR}/scripts/"
   cp -R "${RUNTIME_DIR}/." "${OUTDIR}/src/runtime/"
   cp -R "${UTILS_DIR}/." "${OUTDIR}/src/utils/"
   cp -R "${ELFCONV_DIR}/backend/remill/include/." "${OUTDIR}/backend/remill/include/"

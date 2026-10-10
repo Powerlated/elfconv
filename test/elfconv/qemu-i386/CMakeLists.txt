@@ -21,7 +21,6 @@ foreach(profile IN ITEMS core full)
       --cc "${ELFCONV_QEMU_I386_CC}"
       --objcopy "${ELFCONV_QEMU_I386_OBJCOPY}"
       --node "${ELFCONV_QEMU_I386_NODE}"
-      --cmake "${CMAKE_COMMAND}"
       ${fixture_args}
       --output-dir "${CMAKE_CURRENT_BINARY_DIR}/${profile}")
   set_tests_properties(qemu_i386_${test_suffix} PROPERTIES

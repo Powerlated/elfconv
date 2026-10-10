@@ -115,12 +115,19 @@ the analysis. The last occurrence wins; there is no analysis-only option.
 
 ### Build
 
-Requirements: CMake 3.21+, Ninja, LLVM 23+, and Emscripten 6 for browser builds.
+Requirements: CMake 3.21+, Ninja, LLVM 23+, Python 3.11+, and Emscripten 6 for browser builds.
 Verified toolchains: LLVM 23.1.2 and Emscripten 6.0.12 (bundled LLVM 24).
 Set `LLVM_ROOT` to the LLVM installation used by Remill. The dependency superbuild
 fetches and installs gflags, glog, GoogleTest, and XED.
 The lifter expects the libdwarf 20210528 API; libdwarf 0.11.1 is incompatible.
 BFD, libelf, and Zstandard development headers/libraries are also required.
+Conversion uses Rich. Install into a virtual environment before configuring:
+
+```sh
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r scripts/requirements.txt
+```
 
 ```bash
 export LLVM_ROOT=/path/to/llvm
@@ -148,6 +155,9 @@ Set `ELFCONV_ARCH=aarch64` when building the AArch64 semantics instead. Configur
 the dependency and project builds with the same LLVM installation.
 After rebuilding `elflift`, rerun conversion. Incremental caches automatically
 invalidate when the lifter binary changes.
+Direct CLI: `python scripts/convert_elf.py --help`. CMake conversion targets
+invoke the same driver. Select the virtual environment with
+`-DPython3_EXECUTABLE="$PWD/.venv/bin/python"` if needed.
 
 ### Browser
 

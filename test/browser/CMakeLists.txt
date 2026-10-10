@@ -27,11 +27,9 @@ elfconv_add_conversion_target(browser-busybox
   DEPENDS browser-bash-init
 )
 add_custom_target(browser-bash
-  COMMAND "${CMAKE_COMMAND}"
-    "-DELFCONV_PACK_PRELOAD_ONLY=ON"
-    "-DELFCONV_MOUNT_SETTINGS=${CMAKE_CURRENT_LIST_DIR}/fixtures/testdir@/mnt/test"
-    "-DELFCONV_OUTPUT_DIR=${bash_output}"
-    -P "${ELFCONV_ROOT}/cmake/PackPreload.cmake"
+  COMMAND "${Python3_EXECUTABLE}" "${ELFCONV_ROOT}/scripts/pack_preload.py"
+    --mount "${CMAKE_CURRENT_LIST_DIR}/fixtures/testdir@/mnt/test"
+    --output-dir "${bash_output}"
   USES_TERMINAL
   VERBATIM
 )

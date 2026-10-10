@@ -98,10 +98,8 @@ if(NOT EXISTS "${elf}")
   message(FATAL_ERROR "SM64EX build did not produce ${elf}")
 endif()
 set(entry_args)
-set(entry_setting)
 if(ELFCONV_SM64EX_SHARED)
   set(entry_args --entry_symbol main)
-  set(entry_setting "-DELFCONV_ENTRY_SYMBOL=main")
   execute_process(
     COMMAND "${ELFCONV_SM64EX_CLANG}" -m32 "--sysroot=${sysroot}"
       "-B${sysroot}/usr/lib/i386-linux-gnu"
@@ -130,21 +128,23 @@ elseif(ELFCONV_SM64EX_MODE STREQUAL "bitcode")
     message(FATAL_ERROR "Lifting the SM64EX ELF failed with exit code ${result}")
   endif()
 else()
+  find_package(Python3 3.11 REQUIRED COMPONENTS Interpreter)
+  set(converter_flags)
+  if(ELFCONV_SM64EX_SHARED)
+    list(APPEND converter_flags --entry-symbol main)
+  endif()
+  if(ELFCONV_SM64EX_JSPI)
+    list(APPEND converter_flags --jspi)
+  endif()
   execute_process(
-    COMMAND "${CMAKE_COMMAND}"
-      "-DELFCONV_INPUT=${elf}"
-      -DELFCONV_TARGET=i386-wasm
-      "-DELFCONV_OUTPUT_DIR=${game}/${build_dir}"
-      ${entry_setting}
-      "-DELFCONV_LIFTER=${ELFCONV_LIFTER}"
-      "-DELFCONV_EMCC=${ELFCONV_EMCC}"
-      "-DELFCONV_WASM_OPT_LEVEL=${ELFCONV_SM64EX_WASM_OPT_LEVEL}"
-      "-DELFCONV_WASM_JSPI=${ELFCONV_SM64EX_JSPI}"
-      -DELFCONV_LEGACY_GL=0
-      -DELFCONV_INCREMENTAL_UNITS=ON
-      "-DELFCONV_LINK_MAP=${link_map}"
-      "-DELFCONV_OBJECT_BASE=${game}"
-      -P "${ELFCONV_ROOT}/cmake/ConvertElf.cmake"
+    COMMAND "${Python3_EXECUTABLE}" "${ELFCONV_ROOT}/scripts/convert_elf.py"
+      --input "${elf}" --target i386-wasm
+      --output-dir "${game}/${build_dir}"
+      --lifter "${ELFCONV_LIFTER}" --emcc "${ELFCONV_EMCC}"
+      --wasm-opt-level "${ELFCONV_SM64EX_WASM_OPT_LEVEL}"
+      --legacy-gl 0 --incremental-units
+      --link-map "${link_map}" --object-base "${game}"
+      ${converter_flags}
     RESULT_VARIABLE result
     COMMAND_ECHO STDOUT
   )
