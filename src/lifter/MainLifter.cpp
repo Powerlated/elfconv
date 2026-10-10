@@ -254,7 +254,7 @@ MainLifter::WrapImpl::SetDataSections(std::vector<BinaryLoader::ELFSection> &sec
     __sec_name->setUnnamedAddr(llvm::GlobalVariable::UnnamedAddr::Global);
     __sec_name->setAlignment(llvm::Align(1));
     data_sec_name_ptr_array.emplace_back(
-        llvm::ConstantExpr::getBitCast(__sec_name, llvm::Type::getInt8PtrTy(context)));
+        llvm::ConstantExpr::getBitCast(__sec_name, llvm::PointerType::get(context, 0)));
     // gen data section "vma"
     data_sec_vma_array.emplace_back(
         llvm::ConstantInt::get(llvm::Type::getInt64Ty(context), section.vma));
@@ -270,7 +270,7 @@ MainLifter::WrapImpl::SetDataSections(std::vector<BinaryLoader::ELFSection> &sec
     __sec_bytes->setUnnamedAddr(llvm::GlobalVariable::UnnamedAddr::Global);
     __sec_bytes->setAlignment(llvm::Align(1));
     data_sec_bytes_ptr_array.emplace_back(
-        llvm::ConstantExpr::getBitCast(__sec_bytes, llvm::Type::getInt8PtrTy(context)));
+        llvm::ConstantExpr::getBitCast(__sec_bytes, llvm::PointerType::get(context, 0)));
     data_sec_num++;
   }
 
@@ -280,11 +280,11 @@ MainLifter::WrapImpl::SetDataSections(std::vector<BinaryLoader::ELFSection> &sec
       llvm::ConstantInt::get(llvm::Type::getInt64Ty(context), data_sec_num), ecv_data_sec_num_name);
 
   /* generate global array */
-  SetGblArrayIr(llvm::Type::getInt8PtrTy(context), data_sec_name_ptr_array,
+  SetGblArrayIr(llvm::PointerType::get(context, 0), data_sec_name_ptr_array,
                 ecv_data_sec_name_array_name);
   SetGblArrayIr(llvm::Type::getInt64Ty(context), data_sec_vma_array, ecv_data_sec_vma_array_name);
   SetGblArrayIr(llvm::Type::getInt64Ty(context), data_sec_size_array, ecv_data_sec_size_array_name);
-  return SetGblArrayIr(llvm::Type::getInt8PtrTy(context), data_sec_bytes_ptr_array,
+  return SetGblArrayIr(llvm::PointerType::get(context, 0), data_sec_bytes_ptr_array,
                        ecv_data_sec_bytes_array_name);
 }
 
@@ -335,10 +335,10 @@ void MainLifter::WrapImpl::SetLiftedFunPtrTable(
   }
   /* insert guard */
   addr_list.push_back(llvm::ConstantInt::get(llvm::Type::getInt64Ty(context), 0));
-  fn_ptr_list.push_back(llvm::Constant::getNullValue(llvm::Type::getInt64PtrTy(context)));
+  fn_ptr_list.push_back(llvm::Constant::getNullValue(llvm::PointerType::get(context, 0)));
   /* define global fn ptr table */
   SetGblArrayIr(llvm::Type::getInt64Ty(context), addr_list, ecv_fun_vmas_name);
-  SetGblArrayIr(llvm::Type::getInt64PtrTy(context), fn_ptr_list, ecv_fun_ptrs_name);
+  SetGblArrayIr(llvm::PointerType::get(context, 0), fn_ptr_list, ecv_fun_ptrs_name);
 }
 
 // is not used now.
@@ -362,7 +362,7 @@ void MainLifter::WrapImpl::SetLiftedNoOptFunPtrTable(
 
   // Define global fn ptr table
   SetGblArrayIr(llvm::Type::getInt64Ty(context), addr_list, "_ecv_noopt_func_entrys");
-  SetGblArrayIr(llvm::Type::getInt64PtrTy(context), fn_ptr_list, "_ecv_noopt_fun_ptrs");
+  SetGblArrayIr(llvm::PointerType::get(context, 0), fn_ptr_list, "_ecv_noopt_fun_ptrs");
 }
 
 /* Set block address data */
@@ -375,9 +375,9 @@ void MainLifter::WrapImpl::SetBlockAddressData(
       *module, llvm::Type::getInt64Ty(context), true, llvm::GlobalValue::ExternalLinkage,
       llvm::ConstantInt::get(llvm::Type::getInt64Ty(context), block_address_ptrs_array.size()),
       ecv_block_address_array_size_name);
-  SetGblArrayIr(llvm::Type::getInt64PtrTy(context), block_address_ptrs_array,
+  SetGblArrayIr(llvm::PointerType::get(context, 0), block_address_ptrs_array,
                 ecv_block_address_ptrs_array_name);
-  SetGblArrayIr(llvm::Type::getInt64PtrTy(context), block_address_vmas_array,
+  SetGblArrayIr(llvm::PointerType::get(context, 0), block_address_vmas_array,
                 ecv_block_address_vmas_array_name);
   SetGblArrayIr(llvm::Type::getInt64Ty(context), block_address_sizes_array,
                 ecv_block_address_size_array_name);
@@ -423,7 +423,7 @@ void MainLifter::WrapImpl::SetNoOptVmaBBLists(
   // _ecv_noopt_inst_vmas
   SetGblArrayIr(llvm::Type::getInt64Ty(context), vmas, "_ecv_noopt_inst_vmas");
   // _ecv_noopt_bb_ptrs
-  SetGblArrayIr(llvm::Type::getInt64PtrTy(context), bb_addrs, "_ecv_noopt_bb_ptrs");
+  SetGblArrayIr(llvm::PointerType::get(context, 0), bb_addrs, "_ecv_noopt_bb_ptrs");
   // _ecv_noopt_list_size
   new llvm::GlobalVariable(
       *module, llvm::Type::getInt64Ty(context), true, llvm::GlobalValue::ExternalLinkage,
@@ -436,38 +436,38 @@ void MainLifter::WrapImpl::DeclareHelperFunction() {
 
   // uint64_t *__g_get_jmp_block_address(RuntimeManager*, uint64_t, uint64_t)
   llvm::Function::Create(
-      llvm::FunctionType::get(llvm::Type::getInt64PtrTy(context),
-                              {llvm::Type::getInt64PtrTy(context), llvm::Type::getInt64Ty(context),
+      llvm::FunctionType::get(llvm::PointerType::get(context, 0),
+                              {llvm::PointerType::get(context, 0), llvm::Type::getInt64Ty(context),
                                llvm::Type::getInt64Ty(context)},
                               false),
       llvm::Function::ExternalLinkage, g_get_indirectbr_block_address_func_name, *module);
 
   // uint64_t *_ecv_noopt_get_bb(RuntimeManager *, addr_t, addr_t)
   llvm::Function::Create(
-      llvm::FunctionType::get(llvm::Type::getInt64PtrTy(context),
-                              {llvm::Type::getInt64PtrTy(context), llvm::Type::getInt64Ty(context),
+      llvm::FunctionType::get(llvm::PointerType::get(context, 0),
+                              {llvm::PointerType::get(context, 0), llvm::Type::getInt64Ty(context),
                                llvm::Type::getInt64Ty(context)},
                               false),
       llvm::Function::ExternalLinkage, _ecv_noopt_get_bb_name, *module);
 
   // void _ecv_process_context_switch(RuntimeManager *);
   llvm::Function::Create(llvm::FunctionType::get(llvm::Type::getVoidTy(context),
-                                                 {llvm::Type::getInt64PtrTy(context)}, false),
+                                                 {llvm::PointerType::get(context, 0)}, false),
                          llvm::Function::ExternalLinkage, "_ecv_process_context_switch", *module);
 
   // void _ecv_save_call_history(State &state, RuntimeManager &rt_m, uint64_t, uint64_t);
   llvm::Function::Create(
       llvm::FunctionType::get(llvm::Type::getVoidTy(context),
-                              {llvm::Type::getInt64PtrTy(context),
-                               llvm::Type::getInt64PtrTy(context), llvm::Type::getInt64Ty(context),
+                              {llvm::PointerType::get(context, 0),
+                               llvm::PointerType::get(context, 0), llvm::Type::getInt64Ty(context),
                                llvm::Type::getInt64Ty(context)},
                               false),
       llvm::Function::ExternalLinkage, "_ecv_save_call_history", *module);
 
   // void _ecv_func_epilogue(State &, addr_t, RuntimeManager &);
   llvm::Function::Create(llvm::FunctionType::get(llvm::Type::getVoidTy(context),
-                                                 {llvm::Type::getInt64PtrTy(context),
-                                                  llvm::Type::getInt64PtrTy(context)},
+                                                 {llvm::PointerType::get(context, 0),
+                                                  llvm::PointerType::get(context, 0)},
                                                  false),
                          llvm::Function::ExternalLinkage, "_ecv_func_epilogue", *module);
 
@@ -495,10 +495,10 @@ void MainLifter::WrapImpl::AddTestFailedBlock() {
 /* Declare debug function */
 llvm::Function *MainLifter::WrapImpl::DeclareDebugFunction() {
 
-  auto rt_m_ty = llvm::Type::getInt64PtrTy(context);
+  auto rt_m_ty = llvm::PointerType::get(context, 0);
   auto void_ty = llvm::Type::getVoidTy(context);
   auto u64_ty = llvm::Type::getInt64Ty(context);
-  auto ptr_ty = llvm::Type::getInt64PtrTy(context);
+  auto ptr_ty = llvm::PointerType::get(context, 0);
   auto f64_ty = llvm::Type::getDoubleTy(context);
   auto extern_link = llvm::Function::ExternalLinkage;
 
@@ -594,7 +594,7 @@ llvm::GlobalVariable *MainLifter::WrapImpl::SetFuncSymbolNameTable(
     symbol_name_gvar->setUnnamedAddr(llvm::GlobalVariable::UnnamedAddr::Global);
     symbol_name_gvar->setAlignment(llvm::Align(1));
     func_symbol_ptr_list.emplace_back(
-        llvm::ConstantExpr::getBitCast(symbol_name_gvar, llvm::Type::getInt8PtrTy(context)));
+        llvm::ConstantExpr::getBitCast(symbol_name_gvar, llvm::PointerType::get(context, 0)));
     fn_vma_list.push_back(llvm::ConstantInt::get(llvm::Type::getInt64Ty(context), fn_addr));
   }
 
@@ -602,7 +602,7 @@ llvm::GlobalVariable *MainLifter::WrapImpl::SetFuncSymbolNameTable(
   func_symbol_ptr_list.emplace_back(func_symbol_ptr_list[0]);
   fn_vma_list.push_back(llvm::ConstantInt::get(llvm::Type::getInt64Ty(context), 0xFFFFFFFF));
 
-  SetGblArrayIr(llvm::Type::getInt8PtrTy(context), func_symbol_ptr_list,
+  SetGblArrayIr(llvm::PointerType::get(context, 0), func_symbol_ptr_list,
                 /* "_ecv_fn_symbol_table" */ ecv_fun_symbol_table_name);
   return SetGblArrayIr(llvm::Type::getInt64Ty(context), fn_vma_list,
                        /* "_ecv_fn_debug_vmas" */ ecv_fn_debug_vmas_name);

@@ -1635,7 +1635,7 @@ llvm::Type *VirtualRegsOpt::ERC2LLVMTy(ERC ecv_reg_class) {
     case ERC::Reg1DF: return llvm::VectorType::get(llvm::Type::getDoubleTy(context), 1, false);
     case ERC::Reg2D: return llvm::VectorType::get(llvm::Type::getInt64Ty(context), 2, false);
     case ERC::Reg2DF: return llvm::VectorType::get(llvm::Type::getDoubleTy(context), 2, false);
-    case ERC::RegP: return llvm::Type::getInt64PtrTy(context);
+    case ERC::RegP: return llvm::PointerType::get(context, 0);
     default: break;
   }
 
@@ -1698,7 +1698,7 @@ ERC VirtualRegsOpt::LLVMTy2ERC(llvm::Type *value_type) {
     return ERC::Reg2D;
   } else if (llvm::VectorType::get(llvm::Type::getDoubleTy(context), 2, false) == value_type) {
     return ERC::Reg2DF;
-  } else if (llvm::Type::getInt64PtrTy(context) == value_type) {
+  } else if (llvm::PointerType::get(context, 0) == value_type) {
     return ERC::RegP;
   }
 
@@ -1713,7 +1713,7 @@ llvm::Value *VirtualRegsOpt::GetDrvdValue(llvm::BasicBlock *t_bb, llvm::BasicBlo
   auto t_bag = bb_regs_bag_map.at(t_bb);
   auto t_bb_r_info = bb_reg_info_node_map.at(t_bb);
 
-  const llvm::DataLayout data_layout(impl->module);
+  const auto &data_layout = impl->module->getDataLayout();
 
   auto t_end_inst = t_bb->getTerminator();
   llvm::Value *req_value = nullptr;

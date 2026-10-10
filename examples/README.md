@@ -207,11 +207,11 @@ Enable `ELFCONV_SM64EX_SHARED` to build the main game as a PIC i386 `.so`
 (`-fPIC -shared -Wl,-z,defs`) instead of a PIE executable:
 
 ```sh
-cmake -S . -B build/llvm16 -DELFCONV_SM64EX_SHARED=ON
-cmake --build build/llvm16 --target sm64ex-native
+cmake -S . -B build -DELFCONV_SM64EX_SHARED=ON
+cmake --build build --target sm64ex-native
 examples/sm64ex/build/us_pc_shared/sm64-runner \
   "$PWD/examples/sm64ex/build/us_pc_shared/sm64.us.f3dex2e.so" --help
-cmake --build build/llvm16 --target sm64ex-wasm
+cmake --build build --target sm64ex-wasm
 python3 -m http.server 8080 --directory examples/sm64ex/build/us_pc_shared
 ```
 
@@ -244,7 +244,7 @@ cmake \
   -DELFCONV_INPUT=/absolute/path/to/program \
   -DELFCONV_TARGET=i386-wasm \
   "-DELFCONV_SHARED_LIBRARIES=/absolute/path/libdependency.so;/absolute/path/libplugin.so" \
-  -DELFCONV_LIFTER="$PWD/build/llvm16/src/lifter/elflift" \
+  -DELFCONV_LIFTER="$PWD/build/src/lifter/elflift" \
   -DELFCONV_EMCC=/path/to/emsdk/upstream/emscripten/em++ \
   -DELFCONV_OUTPUT_DIR=/tmp/program-wasm \
   -P cmake/ConvertElf.cmake

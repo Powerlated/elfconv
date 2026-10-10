@@ -301,6 +301,10 @@ Instruction::Instruction(void)
       flows(Instruction::InvalidInsn()) {}
 
 void Instruction::Reset(void) {
+  flags_read = kArithmeticFlags;
+  flags_written = 0;
+  flags_needed = kArithmeticFlags;
+  flags_conditional = true;
   pc = 0;
   next_pc = 0;
   delayed_pc = 0;

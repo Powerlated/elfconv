@@ -22,8 +22,12 @@ set(DEFAULT_BC_COMPILER_FLAGS
 )
 
 find_package(Clang CONFIG REQUIRED)
-find_program(CLANG_PATH NAMES clang HINTS "${LLVM_TOOLS_BINARY_DIR}" REQUIRED)
-find_program(LLVMLINK_PATH NAMES llvm-link HINTS "${LLVM_TOOLS_BINARY_DIR}" REQUIRED)
+unset(CLANG_PATH CACHE)
+unset(CLANG_PATH)
+unset(LLVMLINK_PATH CACHE)
+unset(LLVMLINK_PATH)
+find_program(CLANG_PATH NAMES clang HINTS "${LLVM_TOOLS_BINARY_DIR}" NO_DEFAULT_PATH NO_CACHE REQUIRED)
+find_program(LLVMLINK_PATH NAMES llvm-link HINTS "${LLVM_TOOLS_BINARY_DIR}" NO_DEFAULT_PATH NO_CACHE REQUIRED)
 
 file(WRITE "${CMAKE_BINARY_DIR}/emitllvm.test.cpp" "int main(int argc, char* argv[]){return 0;}\n\n")
 
@@ -34,13 +38,13 @@ execute_process(COMMAND "${CLANG_PATH}" "-emit-llvm" "-c" "emitllvm.test.cpp" "-
 )
 
 if(NOT "${AOUT_IS_NOT_BC}" STREQUAL "0")
-  message(STATUS "The following compiler is not suitable to generate bitcode: ${CLANG_PATH}")
+  message(FATAL_ERROR "The LLVM compiler cannot generate bitcode: ${CLANG_PATH}")
 else()
   message(STATUS "The following compiler has been selected to compile the bitcode: ${CLANG_PATH}")
   message(STATUS "The following linker has been selected to link the bitcode: ${LLVMLINK_PATH}")
 
-  set(CMAKE_BC_COMPILER "${CLANG_PATH}" CACHE PATH "Bitcode Compiler")
-  set(CMAKE_BC_LINKER "${LLVMLINK_PATH}" CACHE PATH "Bitcode Linker")
+  set(CMAKE_BC_COMPILER "${CLANG_PATH}" CACHE FILEPATH "Bitcode Compiler" FORCE)
+  set(CMAKE_BC_LINKER "${LLVMLINK_PATH}" CACHE FILEPATH "Bitcode Linker" FORCE)
 endif()
 
 #

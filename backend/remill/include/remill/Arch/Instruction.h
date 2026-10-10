@@ -190,6 +190,13 @@ class Instruction {
   uint64_t pc;
   uint64_t next_pc;
 
+  // X86 arithmetic flags in architectural EFLAGS bit positions.
+  static constexpr uint32_t kArithmeticFlags = 0x8d5;
+  uint32_t flags_read = kArithmeticFlags;
+  uint32_t flags_written = 0;
+  uint32_t flags_needed = kArithmeticFlags;
+  bool flags_conditional = true;
+
   // The update reg by the Post or Pre index operation.
   Operand prepost_updated_reg_op;
   Operand prepost_new_addr_op;

@@ -81,7 +81,6 @@ add_custom_command(
           -S -O1 -g0
           -c tests_aarch64.ll
           -o tests_aarch64.S
-          -mllvm -opaque-pointers
   DEPENDS tests_aarch64.ll
 )
 

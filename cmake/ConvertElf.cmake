@@ -108,19 +108,7 @@ function(_elfconv_prepare_browser)
   file(COPY_FILE "${generated_wasm}" "${output_wasm}")
   file(COPY_FILE "${ELFCONV_BROWSER_DIR}/coi-serviceworker.js" "${ELFCONV_OUTPUT_DIR}/coi-serviceworker.js")
 
-  file(READ "${generated_js}" generated_source)
-  foreach(symbol IN ITEMS me_forked me_execved)
-    string(REGEX MATCH "Module\\[\"_${symbol}\"\\][ \t]*=[ \t]*([0-9]+)" symbol_match "${generated_source}")
-    if(NOT symbol_match)
-      message(FATAL_ERROR "Generated JavaScript does not define Module[\"_${symbol}\"]")
-    endif()
-    set(${symbol}_address "${CMAKE_MATCH_1}")
-  endforeach()
-
-  file(READ "${ELFCONV_BROWSER_DIR}/process.js" process_source)
-  string(REGEX REPLACE "(var[ \t]+meForkedP[ \t]*=[ \t]*)[0-9]+;" "\\1${me_forked_address};" process_source "${process_source}")
-  string(REGEX REPLACE "(var[ \t]+meExecvedP[ \t]*=[ \t]*)[0-9]+;" "\\1${me_execved_address};" process_source "${process_source}")
-  file(WRITE "${output_js}" "${process_source}")
+  file(COPY_FILE "${ELFCONV_BROWSER_DIR}/process.js" "${output_js}")
 
   if(ELFCONV_INIT_WASM)
     file(COPY_FILE "${ELFCONV_BROWSER_DIR}/js-kernel.js" "${ELFCONV_OUTPUT_DIR}/js-kernel.js")
@@ -206,6 +194,9 @@ if(NOT ELFCONV_NO_LIFTED)
   else()
     set(elf_arch amd64)
     set(target_arch "${CMAKE_HOST_SYSTEM_PROCESSOR}")
+  endif()
+  if(ELFCONV_TARGET MATCHES "-wasm$")
+    set(target_arch emscripten32)
   endif()
   if(ELFCONV_TARGET MATCHES "-wasi32$")
     set(target_arch wasi32)
@@ -357,6 +348,8 @@ if(ELFCONV_TARGET MATCHES "-wasm$")
     "${ELFCONV_EMCC}" -O3 ${ELFCONV_RUNTIME_INCLUDE_FLAGS} ${runtime_definitions}
     -sASYNCIFY=0 -sINITIAL_MEMORY=536870912 -sSTACK_SIZE=16MB
     -sPTHREAD_POOL_SIZE=0 -pthread -sALLOW_MEMORY_GROWTH -sEXPORT_ES6
+    # The custom process runtime binds stable Wasm names directly.
+    -lexports.js
     -sENVIRONMENT=web,worker -o "${generated_js}" "${main_object}"
     ${ELFCONV_COMMON_RUNTIME_SOURCES} "${ELFCONV_RUNTIME_DIR}/syscalls/SyscallBrowser.cpp"
   )

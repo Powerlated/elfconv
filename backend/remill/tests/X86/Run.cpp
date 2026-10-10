@@ -730,6 +730,13 @@ static void FixGlibcMxcsrBug() {
 remill::ArchName remill::EcvReg::target_elf_arch = remill::kArchAMD64;
 extern "C" const uint8_t *MemoryArenaPtr = nullptr;
 
+extern "C" uint64_t __ecv_i386_random32() {
+  uint32_t value;
+  uint8_t success;
+  asm volatile("rdrand %0; setc %1" : "=r"(value), "=qm"(success) : : "cc");
+  return uint64_t(value) | (uint64_t(success) << 32);
+}
+
 class InstrTest : public ::testing::TestWithParam<const test::TestInfo *> {};
 
 template <typename T>

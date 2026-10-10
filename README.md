@@ -108,9 +108,8 @@ flag-free calls; added semantic variants increase bitcode size rather than reduc
 
 ### Build
 
-Requirements: CMake 3.21+, Ninja, and a C/C++ toolchain. The dev container uses
-LLVM 16. LLVM 23 currently fails to build the bundled Remill optimizer because
-LLVM removed `PassManagerBuilder.h`.
+Requirements: CMake 3.21+, Ninja, LLVM 23+, and Emscripten 6 for browser builds.
+Verified toolchains: LLVM 23.1.2 and Emscripten 6.0.12 (bundled LLVM 24).
 Set `LLVM_ROOT` to the LLVM installation used by Remill. The dependency superbuild
 fetches and installs gflags, glog, GoogleTest, and XED.
 The lifter expects the libdwarf 20210528 API; libdwarf 0.11.1 is incompatible.
@@ -143,6 +142,10 @@ the dependency and project builds with the same LLVM installation.
 
 ### Browser
 
+Activate Emscripten 6.0.12 with `emsdk install 6.0.12`, `emsdk activate 6.0.12`,
+then source that SDK's `emsdk_env.sh`. Rebuild semantics and converted artifacts
+after changing LLVM or Emscripten; do not reuse LLVM 16 bitcode.
+
 Configure the project with the ELF input and conversion target, then build
 `convert-elf`:
 
@@ -151,7 +154,7 @@ cmake -S . -B build \
   -DELFCONV_INPUT=/absolute/path/to/program \
   -DELFCONV_CONVERT_TARGET=aarch64-wasm \
   -DELFCONV_INIT_WASM=ON \
-  -DELFCONV_EMCC="$HOME/emsdk/upstream/emscripten/em++"
+  -DELFCONV_EMCC="$EMSDK/upstream/emscripten/em++"
 cmake --build build --target convert-elf
 python3 -m http.server 8080 --bind 127.0.0.1 --directory build
 ```

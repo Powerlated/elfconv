@@ -40,7 +40,8 @@ function(add_runtime_helper target_name address_bit_size little_endian)
     SOURCES ${AARCH64RUNTIME_SOURCEFILES}
     ADDRESS_SIZE ${address_bit_size}
     DEFINITIONS "LITTLE_ENDIAN=${little_endian}"
-    BCFLAGS "-std=${required_cpp_standard}"
+    # Semantics use hosted C++ headers; keep the separate -fno-builtin setting.
+    BCFLAGS "-std=${required_cpp_standard}" "-fhosted"
     INCLUDEDIRECTORIES "${REMILL_INCLUDE_DIR}" "${REMILL_SOURCE_DIR}"
     INSTALLDESTINATION "${REMILL_INSTALL_SEMANTICS_DIR}"
     ARCH aarch64

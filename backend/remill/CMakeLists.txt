@@ -38,6 +38,9 @@ message(STATUS "Compiler ID is ${CMAKE_C_COMPILER_ID}")
 
 # LLVM
 find_package(LLVM CONFIG REQUIRED)
+if(LLVM_VERSION_MAJOR LESS 23)
+  message(FATAL_ERROR "elfconv requires LLVM 23 or newer")
+endif()
 # https://github.com/JonathanSalwan/Triton/issues/1082#issuecomment-1030826696
 if(LLVM_LINK_LLVM_DYLIB)
   set(llvm_libs LLVM)
@@ -124,6 +127,14 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${LIFT_DEBUG_MACROS}")
 
 # add everything as public.
 add_library(remill_settings INTERFACE)
+
+if(NOT LLVM_ENABLE_RTTI)
+  if(MSVC)
+    target_compile_options(remill_settings INTERFACE /GR-)
+  else()
+    target_compile_options(remill_settings INTERFACE -fno-rtti)
+  endif()
+endif()
 
 target_include_directories(remill_settings INTERFACE
   $<BUILD_INTERFACE:${REMILL_INCLUDE_DIR}>
@@ -235,6 +246,7 @@ add_subdirectory(lib/Version)
 
 add_library(remill INTERFACE)
 target_link_libraries(remill INTERFACE
+  remill_settings
   ${LINKER_START_GROUP}
   ${llvm_libs}
   XED::XED

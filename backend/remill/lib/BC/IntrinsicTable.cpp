@@ -56,12 +56,7 @@ static llvm::Function *FindPureIntrinsic(llvm::Module *module, const char *name)
 
   // We want memory intrinsics to be marked as not accessing memory so that
   // they don't interfere with dead store elimination.
-#if LLVM_VERSION_NUMBER < LLVM_VERSION(16, 0)
-  function->addFnAttr(llvm::Attribute::ReadNone);
-#else
-  // In LLVM 16, `readnone` has been replaced by `memory(none)`.
   function->setDoesNotAccessMemory();
-#endif
   return function;
 }
 

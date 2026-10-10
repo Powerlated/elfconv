@@ -74,14 +74,14 @@ DEF_SEM_VOID_RUN(STP_Q, VIu64v2 src1, VIu64v2 src2, MVI256 dst) {
   auto src1_v = *reinterpret_cast<VIu128v1 *>(&src1);
   auto src2_v = *reinterpret_cast<VIu128v1 *>(&src2);
   _ecv_u128v2_t vec = {src1_v[0], src2_v[0]};
-  UWriteMVI128(dst, vec);
+  UWriteMVI128(rt_m, arena_ptr, dst, vec);
 }
 
 DEF_SEM_VOID_RUN(STP_Q_UPDATE_ADDR, VIu64v2 src1, VIu64v2 src2, MVI256 dst) {
   auto src1_v = *reinterpret_cast<VIu128v1 *>(&src1);
   auto src2_v = *reinterpret_cast<VIu128v1 *>(&src2);
   _ecv_u128v2_t vec = {src1[0], src2[0]};
-  UWriteMVI128(dst, vec);
+  UWriteMVI128(rt_m, arena_ptr, dst, vec);
 }
 #else
 DEF_SEM_VOID_RUN(STP_Q, R128 src1, R128 src2, MVI256 dst) {

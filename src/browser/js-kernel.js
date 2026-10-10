@@ -4053,10 +4053,12 @@ var Module = (() => {
 
     function freeProcessWorker(ecvPid) {
       let thisPr = processes.get(ecvPid);
-      processes.get(thisPr.ecvParPid).childs.delete(ecvPid);
+      if (thisPr.parent !== undefined) {
+        processes.get(thisPr.parent).childs.delete(ecvPid);
+      }
+      FS.rmdir(`/proc/${ecvPid}`);
       processes.delete(ecvPid);
       FS.streamMap.delete(ecvPid);
-      FS.rmdir(`/proc/${ecvPid}`);
       console.log(`Delete process ${ecvPid}. current processes: [${[...processes.keys()]}]`);
     }
 

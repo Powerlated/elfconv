@@ -29,6 +29,7 @@
 #include <iostream>
 #include <llvm/ADT/APInt.h>
 #include <llvm/ADT/SmallVector.h>
+#include <llvm/IR/AttributeMask.h>
 #include <llvm/IR/BasicBlock.h>
 #include <llvm/IR/Function.h>
 #include <llvm/IR/IRBuilder.h>
@@ -625,7 +626,7 @@ llvm::Value *Register::AddressOf(llvm::Value *state_ptr, llvm::IRBuilder<> &ir) 
 //
 void Arch::PrepareModuleDataLayout(llvm::Module *mod) const {
   mod->setDataLayout(DataLayout().getStringRepresentation());
-  mod->setTargetTriple(Triple().str());
+  mod->setTargetTriple(Triple());
 
   // Go and remove compile-time attributes added into the semantics. These
   // can screw up later compilation. We purposefully compile semantics with

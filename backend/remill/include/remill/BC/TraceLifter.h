@@ -24,6 +24,7 @@
 #include <functional>
 #include <llvm/IR/BasicBlock.h>
 #include <llvm/IR/Constant.h>
+#include <llvm/IR/Module.h>
 #include <queue>
 #include <set>
 #include <tuple>
@@ -294,7 +295,7 @@ class TraceLifter::Impl {
         debug_insn_name("debug_insn"),
         debug_call_stack_push_name("debug_call_stack_push"),
         debug_call_stack_pop_name("debug_call_stack_pop"),
-        data_layout(llvm::DataLayout(module)) {
+        data_layout(module->getDataLayout()) {
     inst_bytes.reserve(max_inst_bytes);
   }
 

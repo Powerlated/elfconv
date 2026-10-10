@@ -397,6 +397,59 @@ bool TraceLifter::Impl::Lift(uint64_t addr, const char *fn_name,
     CHECK(inst_work_list.empty());
     inst_work_list.insert(trace_addr);
 
+    // Decode each i386 straight-line region once; keep all flags live at its
+    // boundary. Unknown semantics and potentially faulting instructions stop it.
+    std::map<uint64_t, Instruction> decoded_instructions;
+    const auto analyze_flags = [&](uint64_t start) {
+      std::vector<Instruction *> region;
+      for (auto pc = start; !decoded_instructions.contains(pc);) {
+        if (pc != start && get_trace_decl(pc)) break;
+        if (!ReadInstructionBytes(pc)) break;
+        auto entry = decoded_instructions.try_emplace(pc).first;
+        auto &decoded = entry->second;
+        decoded.lift_config = lift_config;
+        if (!arch->DecodeInstruction(pc, inst_bytes, decoded,
+                                     arch->CreateInitialContext())) break;
+        bool safe = decoded.IsValid() && !decoded.is_atomic_read_modify_write &&
+                    !decoded.flags_conditional &&
+                    (decoded.category == Instruction::kCategoryNormal ||
+                     decoded.category == Instruction::kCategoryNoOp);
+        const auto &name = decoded.function;
+        bool known = decoded.category == Instruction::kCategoryNoOp;
+        for (const auto prefix : {"ADD_", "SUB_", "CMP_", "ADC_", "SBB_",
+                                  "INC_", "DEC_", "NEG_", "AND_", "OR_",
+                                  "XOR_", "TEST_", "MOV_", "LEA_", "SET",
+                                  "CMOV"}) {
+          known |= name.starts_with(prefix);
+        }
+        for (const auto &operand : decoded.operands) {
+          safe &= operand.type == Operand::kTypeRegister ||
+                  operand.type == Operand::kTypeImmediate ||
+                  (operand.type == Operand::kTypeAddress &&
+                   operand.addr.IsAddressCalculation());
+          // Segment/control-register writes can fault even without memory.
+          if (operand.type == Operand::kTypeRegister) {
+            const auto *reg = arch->RegisterByName(operand.reg.name);
+            safe &= reg && (reg->size <= 4) &&
+                    operand.reg.name != "CS" && operand.reg.name != "DS" &&
+                    operand.reg.name != "ES" && operand.reg.name != "FS" &&
+                    operand.reg.name != "GS" && operand.reg.name != "SS" &&
+                    !operand.reg.name.starts_with("CR") &&
+                    !operand.reg.name.starts_with("DR");
+          }
+        }
+        if (!safe || !known || decoded.next_pc <= pc) break;
+        region.push_back(&decoded);
+        pc = decoded.next_pc;
+      }
+      uint32_t live = Instruction::kArithmeticFlags;
+      for (auto it = region.rbegin(); it != region.rend(); ++it) {
+        auto &decoded = **it;
+        decoded.flags_needed = decoded.flags_written & live;
+        live = decoded.flags_read | (live & ~decoded.flags_written);
+      }
+    };
+
   // Decode instructions.
   inst_lifting_start:
     while (!inst_work_list.empty()) {
@@ -445,42 +498,22 @@ bool TraceLifter::Impl::Lift(uint64_t addr, const char *fn_name,
         continue;
       }
 
-      inst.Reset();
-      // set the specified config of lifting.
-      inst.lift_config = lift_config;
-
-      // TODO(Ian): not passing context around in trace lifter
-      std::ignore =
-          arch->DecodeInstruction(inst_addr, inst_bytes, inst, this->arch->CreateInitialContext());
-
       if (arch->IsX86()) {
-        // Local dead-EFLAGS elimination before emitting the semantic call.
-        // Register-only ADD/SUB/CMP neither read flags nor fault; each defines
-        // CF/PF/AF/ZF/SF/OF. Preserve flags at every other instruction boundary.
-        const auto overwrites_flags = [](const Instruction &decoded) {
-          if (!decoded.IsValid() || decoded.is_atomic_read_modify_write ||
-              decoded.category != Instruction::kCategoryNormal ||
-              !(decoded.function.compare(0, 4, "ADD_") == 0 ||
-                decoded.function.compare(0, 4, "SUB_") == 0 ||
-                decoded.function.compare(0, 4, "CMP_") == 0)) return false;
-          for (const auto &operand : decoded.operands) {
-            if (operand.type != Operand::kTypeRegister &&
-                operand.type != Operand::kTypeImmediate) return false;
-          }
-          return true;
-        };
-        if (overwrites_flags(inst)) {
-          const auto noflags = "NOFLAGS_" + inst.function;
-          if (module->getNamedGlobal("ISEL_" + noflags) &&
-              !get_trace_decl(inst.next_pc) && ReadInstructionBytes(inst.next_pc)) {
-            Instruction next;
-            if (arch->DecodeInstruction(inst.next_pc, inst_bytes, next,
-                                        arch->CreateInitialContext()) &&
-                overwrites_flags(next)) {
-              inst.function = noflags;
-            }
-          }
+        if (!decoded_instructions.contains(inst_addr)) analyze_flags(inst_addr);
+        if (auto decoded = decoded_instructions.find(inst_addr);
+            decoded != decoded_instructions.end()) {
+          inst = std::move(decoded->second);
+        } else {
+          inst.Reset();
+          inst.lift_config = lift_config;
+          std::ignore = arch->DecodeInstruction(inst_addr, inst_bytes, inst,
+                                                arch->CreateInitialContext());
         }
+      } else {
+        inst.Reset();
+        inst.lift_config = lift_config;
+        std::ignore = arch->DecodeInstruction(inst_addr, inst_bytes, inst,
+                                              arch->CreateInitialContext());
       }
 
       // Lift instruction
@@ -997,7 +1030,7 @@ void TraceLifter::Impl::MainIndirectJumpCode(uint64_t trace_addr) {
 void TraceLifter::Impl::GenIndirectJumpCode(uint64_t trace_addr) {
 
   auto u64ty = llvm::Type::getInt64Ty(context);
-  auto u64ptrty = llvm::Type::getInt64PtrTy(context);
+  auto u64ptrty = llvm::PointerType::get(context, 0);
 
   // Complete br_bb definition.
   llvm::IRBuilder<> br_ir(br_bb);
@@ -1050,13 +1083,13 @@ void TraceLifter::Impl::GenIndirectJumpCode(uint64_t trace_addr) {
 
   // Append the list to the global data.
   auto g_bb_addrs =
-      SetGblArrayIr(llvm::Type::getInt64PtrTy(context), bb_addrs, func->getName() + ".bb_addrs");
+      SetGblArrayIr(llvm::PointerType::get(context, 0), bb_addrs, func->getName() + ".bb_addrs");
   auto g_bb_addr_vmas = SetGblArrayIr(llvm::Type::getInt64Ty(context), bb_addr_vmas,
                                       func->getName() + ".bb_addr_vmas");
   manager.g_block_address_ptrs_array.push_back(
-      llvm::ConstantExpr::getBitCast(g_bb_addrs, llvm::Type::getInt64PtrTy(context)));
+      llvm::ConstantExpr::getBitCast(g_bb_addrs, llvm::PointerType::get(context, 0)));
   manager.g_block_address_vmas_array.push_back(
-      llvm::ConstantExpr::getBitCast(g_bb_addr_vmas, llvm::Type::getInt64PtrTy(context)));
+      llvm::ConstantExpr::getBitCast(g_bb_addr_vmas, llvm::PointerType::get(context, 0)));
   manager.g_block_address_size_array.push_back(
       llvm::ConstantInt::get(llvm::Type::getInt64Ty(context), bb_addrs.size()));
   manager.g_block_address_fn_vma_array.push_back(

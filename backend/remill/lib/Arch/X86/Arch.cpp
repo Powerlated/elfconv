@@ -1082,6 +1082,20 @@ bool X86Arch::ArchDecodeInstruction(uint64_t address, std::string_view inst_byte
     return false;
   }
 
+  inst.flags_read = 0;
+  inst.flags_written = 0;
+  inst.flags_needed = Instruction::kArithmeticFlags;
+  inst.flags_conditional = false;
+  if (const auto *flags = xed_decoded_inst_get_rflags_info(xedd)) {
+    inst.flags_read = xed_flag_set_mask(xed_simple_flag_get_read_flag_set(flags)) &
+                      Instruction::kArithmeticFlags;
+    inst.flags_written = xed_flag_set_mask(xed_simple_flag_get_written_flag_set(flags)) &
+                         Instruction::kArithmeticFlags;
+    // Conditional writes cannot establish a definite kill.
+    inst.flags_conditional = xed_simple_flag_get_may_write(flags) ||
+        (inst.flags_written && !xed_simple_flag_get_must_write(flags));
+  }
+
   auto len = xed_decoded_inst_get_length(xedd);
   auto extra_len = 0u;  // From fusing.
   const auto iform = xed_decoded_inst_get_iform_enum(xedd);

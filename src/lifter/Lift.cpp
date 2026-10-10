@@ -30,10 +30,9 @@
 #include "MainLifter.h"
 #include "TraceManager.h"
 
-#include <llvm/IR/LegacyPassManager.h>
-#include <llvm/Pass.h>
-#include <llvm/Transforms/IPO/PassManagerBuilder.h>
-#include <llvm/Transforms/IPO.h>
+#include <llvm/Passes/PassBuilder.h>
+#include <llvm/Transforms/IPO/Internalize.h>
+#include <llvm/Transforms/IPO/GlobalDCE.h>
 #include <llvm/Transforms/Utils/ModuleUtils.h>
 #include <remill/BC/HelperMacro.h>
 #include <remill/BC/InstructionLifter.h>
@@ -226,17 +225,6 @@ int main(int argc, char *argv[]) {
     manager.EnableUnitMode(FLAGS_unit_owner, arch.get(), &external_declarations);
   }
 
-  // Set wasm32-unknown-wasi and wasm32 data layout if necessary.
-  if (manager.target_arch == "wasi32") {
-    auto wasm32_dl =
-        llvm::DataLayout("e-m:e-p:32:32-p10:8:8-p20:8:8-i64:64-n32:64-S128-ni:1:10:20");
-    module->setDataLayout(wasm32_dl.getStringRepresentation());
-    llvm::Triple wasm32_triple;
-    wasm32_triple.setArch(llvm::Triple::wasm32);
-    wasm32_triple.setVendor(llvm::Triple::UnknownVendor);
-    wasm32_triple.setOS(llvm::Triple::WASI);
-    module->setTargetTriple(wasm32_triple.str());
-  }
 
   // Set various lifting config.
   auto lift_config = LiftConfig(FLAGS_float_exception == "1",
@@ -352,31 +340,43 @@ int main(int argc, char *argv[]) {
   }
 
   // Prepare and validate the LLVM Module.
-  auto host_arch = remill::Arch::Build(&context, os_name, remill::GetArchName(REMILL_ARCH));
-  host_arch->PrepareModule(module.get());
+  if (manager.target_arch == "emscripten32" || manager.target_arch == "wasi32") {
+    arch->PrepareModule(module.get());
+  } else {
+    auto host_arch = remill::Arch::Build(&context, os_name, remill::GetArchName(REMILL_ARCH));
+    host_arch->PrepareModule(module.get());
+  }
   if (arch_name == remill::kArchX86) {
     // Instruction selectors are a lifting-time registry, not runtime roots.
     llvm::removeFromUsedLists(*module, [](llvm::Constant *value) {
       auto *global = llvm::dyn_cast<llvm::GlobalValue>(value->stripPointerCasts());
-      return global && (global->getName().startswith("ISEL_") ||
-                        global->getName().startswith("COND_"));
+      return global && (global->getName().starts_with("ISEL_") ||
+                        global->getName().starts_with("COND_"));
     });
-    llvm::legacy::PassManager passes;
+    llvm::ModulePassManager passes;
     std::set<std::string> unit_exports;
     if (unit_mode) {
       for (const auto &[_, function_name] : addr_fun_name_map) {
         unit_exports.insert(function_name);
       }
     }
-    passes.add(llvm::createInternalizePass([&](const llvm::GlobalValue &global) {
-      return global.getName().startswith("_ecv_") || unit_exports.contains(global.getName().str());
+    passes.addPass(llvm::InternalizePass([&](const llvm::GlobalValue &global) {
+      return global.getName().starts_with("_ecv_") || unit_exports.contains(global.getName().str());
     }));
-    passes.add(llvm::createGlobalDCEPass());
-    passes.run(*module);
-    if (manager.target_arch == "emscripten32") {
-      module->setTargetTriple("wasm32-unknown-emscripten");
-      module->setDataLayout("e-m:e-p:32:32-p10:8:8-p20:8:8-i64:64-n32:64-S128-ni:1:10:20");
-    }
+    passes.addPass(llvm::GlobalDCEPass());
+    llvm::PassBuilder builder;
+    llvm::ModuleAnalysisManager analyses;
+    builder.registerModuleAnalyses(analyses);
+    passes.run(*module, analyses);
+  }
+  if (manager.target_arch == "emscripten32") {
+    module->setTargetTriple(llvm::Triple("wasm32-unknown-emscripten"));
+    module->setDataLayout(
+        "e-m:e-p:32:32-p10:8:8-p20:8:8-i64:64-i128:128-f128:64-n32:64-S128-ni:1:10:20");
+  } else if (manager.target_arch == "wasi32") {
+    module->setTargetTriple(llvm::Triple("wasm32-unknown-wasi"));
+    module->setDataLayout(
+        "e-m:e-p:32:32-p10:8:8-p20:8:8-i64:64-i128:128-n32:64-S128-ni:1:10:20");
   }
   // Make LLVM bitcode file.
   remill::StoreModuleToFile(module.get(), FLAGS_bc_out);

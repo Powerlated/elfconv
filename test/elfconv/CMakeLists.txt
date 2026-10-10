@@ -22,6 +22,12 @@ if(CMAKE_ELFCONV_AARCH64_BUILD)
   gtest_discover_tests(elfconv_test)
 endif()
 
+add_executable(llvm_migration_test LlvmMigrationTests.cpp)
+target_include_directories(llvm_migration_test BEFORE PRIVATE
+  "${googletest_SOURCE_DIR}/googletest/include")
+target_link_libraries(llvm_migration_test PRIVATE remill GTest::gtest_main)
+gtest_discover_tests(llvm_migration_test)
+
 add_executable(i386_imports_test I386ImportsTests.cpp)
 
 target_link_libraries(

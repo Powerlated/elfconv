@@ -25,29 +25,7 @@
 #include <llvm/Config/llvm-config.h>
 #pragma clang diagnostic pop
 
-#define LLVM_VERSION(major, minor) ((major * 100) + minor)
-
-#define LLVM_VERSION_NUMBER LLVM_VERSION(LLVM_VERSION_MAJOR, LLVM_VERSION_MINOR)
-
-#if LLVM_VERSION_NUMBER < LLVM_VERSION(15, 0)
-#  error "Minimum supported LLVM version is 15.0"
+#if LLVM_VERSION_MAJOR < 23
+#  error "Minimum supported LLVM version is 23"
 #endif
 
-#define IF_LLVM_LT_1500(...)
-#define IF_LLVM_LT_1500_(...)
-#define _IF_LLVM_LT_1500(...)
-#define IF_LLVM_GTE_1500(...) __VA_ARGS__
-#define IF_LLVM_GTE_1500_(...) __VA_ARGS__,
-#define _IF_LLVM_GTE_1500(...) , __VA_ARGS__
-
-#define IF_LLVM_LT(major, minor, ...) IF_LLVM_LT_##major##minor##0(__VA_ARGS__)
-
-#define IF_LLVM_LT_(major, minor, ...) IF_LLVM_LT_##major##minor##0##_(__VA_ARGS__)
-
-#define _IF_LLVM_LT(major, minor, ...) _IF_LLVM_LT_##major##minor##0(__VA_ARGS__)
-
-#define IF_LLVM_GTE(major, minor, ...) IF_LLVM_GTE_##major##minor##0(__VA_ARGS__)
-
-#define IF_LLVM_GTE_(major, minor, ...) IF_LLVM_GTE_##major##minor##0##_(__VA_ARGS__)
-
-#define _IF_LLVM_GTE(major, minor, ...) _IF_LLVM_GTE_##major##minor##0(__VA_ARGS__)

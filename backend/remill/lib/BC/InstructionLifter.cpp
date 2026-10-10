@@ -24,6 +24,10 @@
 #include <cstdint>
 #include <glog/logging.h>
 #include <type_traits>
+#include <llvm/Analysis/ValueTracking.h>
+#include <llvm/Passes/PassBuilder.h>
+#include <llvm/Transforms/Scalar/DCE.h>
+#include <llvm/Transforms/Utils/Cloning.h>
 
 namespace remill {
 
@@ -47,6 +51,46 @@ llvm::Function *GetInstructionFunction(llvm::Module *module, std::string_view fu
 
   auto sem = isel->getInitializer()->stripPointerCasts();
   return llvm::dyn_cast_or_null<llvm::Function>(sem);
+}
+
+// Specialize shared semantics once per live-flag mask, before caller IR exists.
+// Architectural register offsets avoid depending on State's LLVM GEP shape.
+llvm::Function *WithLiveFlags(llvm::Function *source, const Arch *arch,
+                              uint32_t needed, uint32_t written) {
+  const auto name = source->getName().str() + ".flags." + std::to_string(needed);
+  auto *module = source->getParent();
+  if (auto *cached = module->getFunction(name)) return cached;
+  llvm::ValueToValueMapTy mapping;
+  auto *variant = llvm::CloneFunction(source, mapping);
+  variant->setName(name);
+  variant->setLinkage(llvm::GlobalValue::InternalLinkage);
+  const auto *state = variant->getArg(1);
+  const std::pair<const char *, uint32_t> flags[] = {
+      {"CF", 0x1}, {"PF", 0x4}, {"AF", 0x10},
+      {"ZF", 0x40}, {"SF", 0x80}, {"OF", 0x800}};
+  for (auto &block : *variant) {
+    for (auto it = block.begin(); it != block.end();) {
+      auto *store = llvm::dyn_cast<llvm::StoreInst>(&*it++);
+      if (!store || store->isVolatile() || store->isAtomic() ||
+          !store->getValueOperand()->getType()->isIntegerTy(8)) continue;
+      int64_t offset = 0;
+      const auto *base = llvm::GetPointerBaseWithConstantOffset(
+          store->getPointerOperand(), offset, module->getDataLayout());
+      if (base != state) continue;
+      for (const auto &[reg_name, bit] : flags) {
+        if ((written & bit) && !(needed & bit) &&
+            offset == static_cast<int64_t>(arch->RegisterByName(reg_name)->offset)) {
+          store->eraseFromParent();
+          break;
+        }
+      }
+    }
+  }
+  llvm::PassBuilder builder;
+  llvm::FunctionAnalysisManager analyses;
+  builder.registerFunctionAnalyses(analyses);
+  llvm::DCEPass().run(*variant, analyses);
+  return variant;
 }
 
 }  // namespace
@@ -115,6 +159,12 @@ LiftStatus InstructionLifter::LiftIntoBlock(Instruction &arch_inst, llvm::BasicB
     printf("[Bug] Unsupported instruction at address: 0x%08lx (SemanticsFunction), instForm: %s\n",
            arch_inst.pc, arch_inst.function.c_str());
     return status;
+  }
+
+  if (arch_inst.lift_config.target_elf_arch == kArchX86 &&
+      (arch_inst.flags_written & ~arch_inst.flags_needed)) {
+    isel_func = WithLiveFlags(isel_func, impl->arch, arch_inst.flags_needed,
+                              arch_inst.flags_written);
   }
 
   // If this instruction appears within a delay slot, then we're going to assume
@@ -201,7 +251,7 @@ LiftStatus InstructionLifter::LiftIntoBlock(Instruction &arch_inst, llvm::BasicB
   auto [runtime_manager_ptr, _] = LoadRegAddress(block, state_ptr, kRuntimeVariableName);
   __debug_ir.CreateCall(
       _debug_memory_value_change_fn,
-      {__debug_ir.CreateLoad(llvm::Type::getInt64PtrTy(module->getContext()), runtime_manager_ptr),
+      {__debug_ir.CreateLoad(llvm::PointerType::get(module->getContext(), 0), runtime_manager_ptr),
        llvm::ConstantInt::get(llvm::Type::getInt64Ty(module->getContext()), arch_inst.pc)});
 #endif
 
@@ -372,7 +422,7 @@ InstructionLifter::LoadWordRegValOrZero(llvm::BasicBlock *block, llvm::Value *st
 
   auto val = LoadRegValue(block, state_ptr, reg_name);
   auto val_type = llvm::dyn_cast_or_null<llvm::IntegerType>(val->getType());
-  auto word_type = zero->getType();
+  auto word_type = llvm::cast<llvm::IntegerType>(zero->getType());
 
   CHECK(val_type) << "Register " << reg_name << " expected to be an integer.";
 
@@ -401,7 +451,7 @@ llvm::Value *InstructionLifter::LiftShiftRegisterOperand(Instruction &inst, llvm
   CHECK(arg_type->isIntegerTy()) << "Expected " << arch_reg.name << " to be an integral type "
                                  << "for instruction at " << std::hex << inst.pc;
 
-  const llvm::DataLayout data_layout(module);
+  const auto &data_layout = module->getDataLayout();
   auto reg = LoadRegValue(block, state_ptr, arch_reg.name);
   auto reg_type = reg->getType();
   auto reg_size = data_layout.getTypeSizeInBits(reg_type).getFixedValue();
@@ -540,7 +590,7 @@ static llvm::Value *ConvertToIntendedType(Instruction &inst, Operand &op, llvm::
       return new llvm::BitCastInst(val, intended_type, val->getName(), block);
     }
   } else if (val_type->isVectorTy()) {
-    const llvm::DataLayout data_layout(block->getModule());
+    const auto &data_layout = block->getModule()->getDataLayout();
     auto val_type = val->getType();
     CHECK(data_layout.getTypeAllocSizeInBits(val_type) ==
           data_layout.getTypeAllocSizeInBits(intended_type))
@@ -601,7 +651,7 @@ llvm::Value *InstructionLifter::LiftRegisterOperand(Instruction &inst, llvm::Bas
 
     auto val = LoadRegValue(block, state_ptr, arch_reg.name);
 
-    const llvm::DataLayout data_layout(module);
+    const auto &data_layout = module->getDataLayout();
     auto val_type = val->getType();
     auto val_size = data_layout.getTypeAllocSizeInBits(val_type);
     auto arg_size = data_layout.getTypeAllocSizeInBits(arg_type);
@@ -686,7 +736,7 @@ llvm::Value *InstructionLifter::LiftExpressionOperand(Instruction &inst, llvm::B
         << "Expected " << op.Serialize() << " to be an integral or float type "
         << "for instruction at " << std::hex << inst.pc;
 
-    const llvm::DataLayout data_layout(module);
+    const auto &data_layout = module->getDataLayout();
     auto val_type = val->getType();
     auto val_size = data_layout.getTypeAllocSizeInBits(val_type);
     auto arg_size = data_layout.getTypeAllocSizeInBits(arg_type);

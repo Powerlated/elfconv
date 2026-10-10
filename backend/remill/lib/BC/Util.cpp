@@ -253,7 +253,7 @@ std::pair<llvm::Value *, llvm::Type *> FindVarInFunction(llvm::Function *functio
       return RegNameTypeMap[__name.substr(0, name_size - 1).data()];
     } else {
       if ("RUNTIME" == __name || "STATE" == __name) {
-        return llvm::Type::getInt64PtrTy(context);
+        return llvm::PointerType::get(context, 0);
       } else if ("IGNORE_WRITE_TO_WZR" == __name) {
         return llvm::Type::getInt32Ty(context);
       } else {
@@ -478,7 +478,7 @@ llvm::Value *FindIndirectBrAddress(llvm::BasicBlock *block) {
   for (llvm::Instruction &llvm_inst : *block) {
     if (llvm::LoadInst *load_inst = llvm::dyn_cast<llvm::LoadInst>(&llvm_inst)) {
       llvm::Value *op = load_inst->getPointerOperand();
-      if (op->getName().startswith("X")) {
+      if (op->getName().starts_with("X")) {
         indirect_addr = load_inst;
         break;
       }
@@ -791,7 +791,7 @@ LiftedFunctionArgsWithPCValue(llvm::BasicBlock *block, const IntrinsicTable &int
 void ForEachISel(llvm::Module *module, ISelCallback callback) {
   for (auto &global : module->globals()) {
     const auto &name = global.getName();
-    if (name.startswith("ISEL_") || name.startswith("COND_")) {
+    if (name.starts_with("ISEL_") || name.starts_with("COND_")) {
       llvm::Function *sem = nullptr;
       if (global.hasInitializer()) {
         sem = llvm::dyn_cast<llvm::Function>(global.getInitializer()->stripPointerCasts());
@@ -964,7 +964,6 @@ static llvm::Type *RecontextualizeType(llvm::Type *type, llvm::LLVMContext &cont
     case llvm::Type::PPC_FP128TyID: return llvm::Type::getPPC_FP128Ty(context);
     case llvm::Type::LabelTyID: return llvm::Type::getLabelTy(context);
     case llvm::Type::MetadataTyID: return llvm::Type::getMetadataTy(context);
-    case llvm::Type::X86_MMXTyID: return llvm::Type::getX86_MMXTy(context);
     case llvm::Type::TokenTyID: return llvm::Type::getTokenTy(context);
     case llvm::Type::IntegerTyID: {
       auto int_type = llvm::dyn_cast<llvm::IntegerType>(type);
@@ -1184,197 +1183,20 @@ static llvm::Constant *MoveConstantIntoModule(llvm::Constant *c, llvm::Module *d
       return nullptr;
     }
   } else if (auto ce = llvm::dyn_cast<llvm::ConstantExpr>(c)) {
-    switch (ce->getOpcode()) {
-      case llvm::Instruction::Add: {
-        const auto b = llvm::dyn_cast<llvm::AddOperator>(ce);
-        auto ret = llvm::ConstantExpr::getAdd(
-            MoveConstantIntoModule(ce->getOperand(0), dest_module, value_map, type_map),
-            MoveConstantIntoModule(ce->getOperand(1), dest_module, value_map, type_map),
-            b->hasNoUnsignedWrap(), b->hasNoSignedWrap());
-        moved_c = ret;
-        return ret;
-      }
-      case llvm::Instruction::Sub: {
-        const auto b = llvm::dyn_cast<llvm::SubOperator>(ce);
-        auto ret = llvm::ConstantExpr::getSub(
-            MoveConstantIntoModule(ce->getOperand(0), dest_module, value_map, type_map),
-            MoveConstantIntoModule(ce->getOperand(1), dest_module, value_map, type_map),
-            b->hasNoUnsignedWrap(), b->hasNoSignedWrap());
-        moved_c = ret;
-        return ret;
-      }
-      case llvm::Instruction::And: {
-        auto ret = llvm::ConstantExpr::getAnd(
-            MoveConstantIntoModule(ce->getOperand(0), dest_module, value_map, type_map),
-            MoveConstantIntoModule(ce->getOperand(1), dest_module, value_map, type_map));
-        moved_c = ret;
-        return ret;
-      }
-      case llvm::Instruction::Or: {
-        auto ret = llvm::ConstantExpr::getOr(
-            MoveConstantIntoModule(ce->getOperand(0), dest_module, value_map, type_map),
-            MoveConstantIntoModule(ce->getOperand(1), dest_module, value_map, type_map));
-        moved_c = ret;
-        return ret;
-      }
-      case llvm::Instruction::Xor: {
-        auto ret = llvm::ConstantExpr::getXor(
-            MoveConstantIntoModule(ce->getOperand(0), dest_module, value_map, type_map),
-            MoveConstantIntoModule(ce->getOperand(1), dest_module, value_map, type_map));
-        moved_c = ret;
-        return ret;
-      }
-      case llvm::Instruction::ICmp: {
-        auto ret = llvm::ConstantExpr::getICmp(
-            ce->getPredicate(),
-            MoveConstantIntoModule(ce->getOperand(0), dest_module, value_map, type_map),
-            MoveConstantIntoModule(ce->getOperand(1), dest_module, value_map, type_map));
-        moved_c = ret;
-        return ret;
-      }
-      case llvm::Instruction::ZExt: {
-        auto ret = llvm::ConstantExpr::getZExt(
-            MoveConstantIntoModule(ce->getOperand(0), dest_module, value_map, type_map), type);
-        moved_c = ret;
-        return ret;
-      }
-      case llvm::Instruction::SExt: {
-        auto ret = llvm::ConstantExpr::getSExt(
-            MoveConstantIntoModule(ce->getOperand(0), dest_module, value_map, type_map), type);
-        moved_c = ret;
-        return ret;
-      }
-      case llvm::Instruction::Trunc: {
-        auto ret = llvm::ConstantExpr::getTrunc(
-            MoveConstantIntoModule(ce->getOperand(0), dest_module, value_map, type_map), type);
-        moved_c = ret;
-        return ret;
-      }
-      case llvm::Instruction::Select: {
-        auto ret = llvm::ConstantExpr::getSelect(
-            MoveConstantIntoModule(ce->getOperand(0), dest_module, value_map, type_map),
-            MoveConstantIntoModule(ce->getOperand(1), dest_module, value_map, type_map),
-            MoveConstantIntoModule(ce->getOperand(2), dest_module, value_map, type_map));
-        moved_c = ret;
-        return ret;
-      }
-      case llvm::Instruction::Shl: {
-        const auto b = llvm::dyn_cast<llvm::ShlOperator>(ce);
-        auto ret = llvm::ConstantExpr::getShl(
-            MoveConstantIntoModule(ce->getOperand(0), dest_module, value_map, type_map),
-            MoveConstantIntoModule(ce->getOperand(1), dest_module, value_map, type_map),
-            b->hasNoUnsignedWrap(), b->hasNoSignedWrap());
-        moved_c = ret;
-        return ret;
-      }
-      case llvm::Instruction::LShr: {
-        const auto b = llvm::dyn_cast<llvm::LShrOperator>(ce);
-        auto ret = llvm::ConstantExpr::getLShr(
-            MoveConstantIntoModule(ce->getOperand(0), dest_module, value_map, type_map),
-            MoveConstantIntoModule(ce->getOperand(1), dest_module, value_map, type_map),
-            b->isExact());
-        moved_c = ret;
-        return ret;
-      }
-      case llvm::Instruction::AShr: {
-        const auto b = llvm::dyn_cast<llvm::AShrOperator>(ce);
-        auto ret = llvm::ConstantExpr::getAShr(
-            MoveConstantIntoModule(ce->getOperand(0), dest_module, value_map, type_map),
-            MoveConstantIntoModule(ce->getOperand(1), dest_module, value_map, type_map),
-            b->isExact());
-        moved_c = ret;
-        return ret;
-      }
-      case llvm::Instruction::Mul: {
-        const auto b = llvm::dyn_cast<llvm::MulOperator>(ce);
-        auto ret = llvm::ConstantExpr::getMul(
-            MoveConstantIntoModule(ce->getOperand(0), dest_module, value_map, type_map),
-            MoveConstantIntoModule(ce->getOperand(1), dest_module, value_map, type_map),
-            b->hasNoUnsignedWrap(), b->hasNoSignedWrap());
-        moved_c = ret;
-        return ret;
-      }
-      case llvm::Instruction::IntToPtr: {
-        auto ret = llvm::ConstantExpr::getIntToPtr(
-            MoveConstantIntoModule(ce->getOperand(0), dest_module, value_map, type_map), type);
-        moved_c = ret;
-        return ret;
-      }
-      case llvm::Instruction::PtrToInt: {
-        auto ret = llvm::ConstantExpr::getPtrToInt(
-            MoveConstantIntoModule(ce->getOperand(0), dest_module, value_map, type_map), type);
-        moved_c = ret;
-        return ret;
-      }
-      case llvm::Instruction::BitCast: {
-        auto ret = llvm::ConstantExpr::getBitCast(
-            MoveConstantIntoModule(ce->getOperand(0), dest_module, value_map, type_map), type);
-        moved_c = ret;
-        return ret;
-      }
-      case llvm::Instruction::AddrSpaceCast: {
-        auto ret = llvm::ConstantExpr::getAddrSpaceCast(
-            MoveConstantIntoModule(ce->getOperand(0), dest_module, value_map, type_map), type);
-        moved_c = ret;
-        return ret;
-      }
-      case llvm::Instruction::GetElementPtr: {
-        const auto g = llvm::dyn_cast<llvm::GEPOperator>(ce);
-        const auto ni = g->getNumIndices();
-        const auto source_type =
-            ::remill::RecontextualizeType(g->getSourceElementType(), dest_context);
-        std::vector<llvm::Constant *> indices(ni);
-        for (auto i = 0u; i < ni; ++i) {
-          indices[i] =
-              MoveConstantIntoModule(ce->getOperand(i + 1u), dest_module, value_map, type_map);
-        }
-        auto ret = llvm::ConstantExpr::getGetElementPtr(
-            source_type,
-            MoveConstantIntoModule(ce->getOperand(0), dest_module, value_map, type_map), indices,
-            g->isInBounds(), g->getInRangeIndex());
-        moved_c = ret;
-        return ret;
-      }
-      default:
-        if (auto bop = llvm::dyn_cast<llvm::BinaryOperator>(ce)) {
-          auto ret = llvm::ConstantExpr::get(
-              ce->getOpcode(),
-              MoveConstantIntoModule(ce->getOperand(0), dest_module, value_map, type_map),
-              MoveConstantIntoModule(ce->getOperand(1), dest_module, value_map, type_map));
-          moved_c = ret;
-          return ret;
-
-        } else if (auto uop = llvm::dyn_cast<llvm::UnaryOperator>(ce)) {
-#if LLVM_VERSION_NUMBER < LLVM_VERSION(16, 0)
-          // In LLVM 16, cast is the only unary constexpr.
-          if (!uop->isCast()) {
-            auto ret = llvm::ConstantExpr::get(
-                ce->getOpcode(),
-                MoveConstantIntoModule(ce->getOperand(0), dest_module, value_map, type_map));
-            moved_c = ret;
-            return ret;
-          }
-#endif
-          CHECK(uop->isCast());
-          auto ret = llvm::ConstantExpr::getCast(
-              ce->getOpcode(),
-              MoveConstantIntoModule(ce->getOperand(0), dest_module, value_map, type_map),
-              RecontextualizeType(ce->getType(), dest_context, type_map));
-          moved_c = ret;
-          return ret;
-
-        } else if (in_same_context) {
-          LOG(ERROR) << "Unsupported CE when moving across module boundaries: "
-                     << LLVMThingToString(ce);
-          moved_c = ce;
-          return ce;
-
-        } else {
-          LOG(FATAL) << "Unsupported CE when moving across context boundaries: "
-                     << LLVMThingToString(ce);
-          return nullptr;
-        }
+    llvm::SmallVector<llvm::Constant *, 8> operands;
+    operands.reserve(ce->getNumOperands());
+    for (const auto &operand : ce->operands()) {
+      operands.push_back(MoveConstantIntoModule(
+          llvm::cast<llvm::Constant>(operand.get()), dest_module, value_map, type_map));
     }
+    llvm::Type *source_type = nullptr;
+    if (const auto *gep = llvm::dyn_cast<llvm::GEPOperator>(ce)) {
+      source_type = RecontextualizeType(gep->getSourceElementType(), dest_context, type_map);
+    }
+    // LLVM reconstructs its supported expressions and preserves opcode flags,
+    // including GEP no-wrap/inrange, with destination-context types/operands.
+    moved_c = ce->getWithOperands(operands, type, false, source_type);
+    return llvm::cast<llvm::Constant>(moved_c);
   } else if (auto ca = llvm::dyn_cast<llvm::ConstantAggregate>(c); ca) {
     if (auto a = llvm::dyn_cast<llvm::ConstantArray>(ca); a) {
       std::vector<llvm::Constant *> new_elems;
@@ -1904,17 +1726,13 @@ llvm::Value *LoadFromMemory(const IntrinsicTable &intrinsics, llvm::IRBuilder<> 
   const auto initial_addr = addr;
   auto module = intrinsics.error->getParent();
   auto &context = module->getContext();
-  llvm::DataLayout dl(module);
+  const auto &dl = module->getDataLayout();
   llvm::Value *args_2[2] = {mem_ptr, addr};
   auto index_type = llvm::Type::getIntNTy(context, dl.getPointerSizeInBits(0));
 
   switch (type->getTypeID()) {
     case llvm::Type::HalfTyID: {
-      llvm::Type *types[] = {llvm::Type::getFloatTy(context)};
-      auto converter =
-          llvm::Intrinsic::getDeclaration(module, llvm::Intrinsic::convert_from_fp16, types);
-      llvm::Value *conv_args[] = {ir.CreateCall(intrinsics.read_memory_16, args_2)};
-      return ir.CreateFPTrunc(ir.CreateCall(converter, conv_args), type);
+      return ir.CreateBitCast(ir.CreateCall(intrinsics.read_memory_16, args_2), type);
     }
 
     case llvm::Type::FloatTyID: return ir.CreateCall(intrinsics.read_memory_f32, args_2);
@@ -1927,9 +1745,6 @@ llvm::Value *LoadFromMemory(const IntrinsicTable &intrinsics, llvm::IRBuilder<> 
       // ir.CreateCall(intrinsics.read_memory_f80, args_3);
       return ir.CreateLoad(type, res);
     }
-
-    case llvm::Type::X86_MMXTyID:
-      return ir.CreateBitCast(ir.CreateCall(intrinsics.read_memory_64, args_2), type);
 
     case llvm::Type::IntegerTyID:
       switch (dl.getTypeAllocSize(type)) {
@@ -2056,18 +1871,14 @@ llvm::Value *StoreToMemory(const IntrinsicTable &intrinsics, llvm::IRBuilder<> &
   const auto initial_addr = addr;
   auto module = intrinsics.error->getParent();
   auto &context = module->getContext();
-  llvm::DataLayout dl(module);
+  const auto &dl = module->getDataLayout();
   llvm::Value *args_3[3] = {mem_ptr, addr, val_to_store};
   auto index_type = llvm::Type::getInt32Ty(context);
 
   auto type = val_to_store->getType();
   switch (type->getTypeID()) {
     case llvm::Type::HalfTyID: {
-      llvm::Type *types[] = {llvm::Type::getFloatTy(context)};
-      auto converter =
-          llvm::Intrinsic::getDeclaration(module, llvm::Intrinsic::convert_to_fp16, types);
-      llvm::Value *conv_args[] = {ir.CreateFPExt(val_to_store, llvm::Type::getFloatTy(context))};
-      args_3[2] = ir.CreateCall(converter, conv_args);
+      args_3[2] = ir.CreateBitCast(val_to_store, llvm::Type::getInt16Ty(context));
 
       return ir.CreateCall(intrinsics.write_memory_16, args_3);
     }
@@ -2084,12 +1895,6 @@ llvm::Value *StoreToMemory(const IntrinsicTable &intrinsics, llvm::IRBuilder<> &
       args_3[2] = res;
       // (FIXME) fix for not using write_memory_f80. f64 is dummy.
       return ir.CreateCall(intrinsics.write_memory_f64, args_3);
-    }
-
-    case llvm::Type::X86_MMXTyID: {
-      auto i64_type = llvm::Type::getInt64Ty(context);
-      args_3[2] = ir.CreateBitCast(val_to_store, i64_type);
-      return ir.CreateCall(intrinsics.write_memory_64, args_3);
     }
 
     case llvm::Type::IntegerTyID:

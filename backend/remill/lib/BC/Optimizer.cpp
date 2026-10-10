@@ -1,123 +1,61 @@
 /*
- * Copyright (c) 2018 Trail of Bits, Inc.
- *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
  *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
  */
 
 #include "remill/BC/Optimizer.h"
 
-#include "remill/Arch/Arch.h"
-#include "remill/BC/Util.h"
-#include "remill/BC/Version.h"
-
 #include <glog/logging.h>
-#include <remill/Triple.h>
 #include <llvm/Analysis/TargetLibraryInfo.h>
-#include <llvm/IR/Constants.h>
-#include <llvm/IR/DataLayout.h>
-#include <llvm/IR/DebugInfo.h>
-#include <llvm/IR/IRBuilder.h>
-#include <llvm/IR/InstIterator.h>
-#include <llvm/IR/LLVMContext.h>
-#include <llvm/IR/LegacyPassManager.h>
-#include <llvm/IR/MDBuilder.h>
-#include <llvm/IR/Metadata.h>
-#include <llvm/IR/Module.h>
-#include <llvm/IR/Type.h>
-#include <llvm/Transforms/IPO.h>
-#include <llvm/Transforms/IPO/PassManagerBuilder.h>
-#include <llvm/Transforms/Scalar.h>
-#include <llvm/Transforms/Utils/Cloning.h>
-#include <llvm/Transforms/Utils/Local.h>
-#include <llvm/Transforms/Utils/ValueMapper.h>
+#include <llvm/IR/Verifier.h>
+#include <llvm/Passes/PassBuilder.h>
+#include <llvm/Support/raw_ostream.h>
 
 namespace remill {
 
-void OptimizeModule(const remill::Arch *arch, llvm::Module *module,
+void OptimizeModule(const remill::Arch *, llvm::Module *module,
                     std::function<llvm::Function *(void)> generator, OptimizationGuide guide) {
+  if (guide.verify_input) CHECK(!llvm::verifyModule(*module, &llvm::errs()));
 
-  llvm::legacy::FunctionPassManager func_manager(module);
-  llvm::legacy::PassManager module_manager;
+  llvm::PipelineTuningOptions tuning;
+  tuning.SLPVectorization = guide.slp_vectorize;
+  tuning.LoopVectorization = guide.loop_vectorize;
+  tuning.LoopUnrolling = true;
+  tuning.MergeFunctions = false;
+  tuning.InlinerThreshold = 250;
+  llvm::PassBuilder builder(nullptr, tuning);
+  llvm::LoopAnalysisManager loops;
+  llvm::FunctionAnalysisManager functions;
+  llvm::CGSCCAnalysisManager calls;
+  llvm::ModuleAnalysisManager modules;
 
-  auto TLI = new llvm::TargetLibraryInfoImpl(llvm::Triple(module->getTargetTriple()));
+  llvm::TargetLibraryInfoImpl libraries(module->getTargetTriple());
+  libraries.disableAllFunctions();  // Lifted imports are not native libc calls.
+  functions.registerPass([&] { return llvm::TargetLibraryAnalysis(libraries); });
+  builder.registerModuleAnalyses(modules);
+  builder.registerCGSCCAnalyses(calls);
+  builder.registerFunctionAnalyses(functions);
+  builder.registerLoopAnalyses(loops);
+  builder.crossRegisterProxies(loops, functions, calls, modules);
 
-  TLI->disableAllFunctions();  // `-fno-builtin`.
-
-  llvm::PassManagerBuilder builder;
-  // TODO(alex): Some of the optimization passes that the builder adds still rely on typed pointers
-  // so we cannot use them. We should switch to using the new pass manager and choose which passes
-  // we want.
-  builder.OptLevel = 3;
-  builder.SizeLevel = 0;
-  builder.Inliner = llvm::createFunctionInliningPass(250);
-  builder.LibraryInfo = TLI;  // Deleted by `llvm::~PassManagerBuilder`.
-  builder.DisableUnrollLoops = false;  // Unroll loops!
-#if LLVM_VERSION_NUMBER < LLVM_VERSION(16, 0)
-  builder.RerollLoops = false;
-#endif
-  builder.SLPVectorize = guide.slp_vectorize;
-  builder.LoopVectorize = guide.loop_vectorize;
-  builder.VerifyInput = guide.verify_input;
-  builder.VerifyOutput = guide.verify_output;
-  builder.MergeFunctions = false;
-
-  builder.populateFunctionPassManager(func_manager);
-  builder.populateModulePassManager(module_manager);
-  func_manager.doInitialization();
-  llvm::Function *func = nullptr;
-  while (nullptr != (func = generator())) {
-    func_manager.run(*func);
+  auto function_passes = builder.buildFunctionSimplificationPipeline(
+      llvm::OptimizationLevel::O3, llvm::ThinOrFullLTOPhase::None);
+  while (auto *function = generator()) {
+    if (!function->isDeclaration()) function_passes.run(*function, functions);
   }
-  func_manager.doFinalization();
-  module_manager.run(*module);
+  auto module_passes = builder.buildPerModuleDefaultPipeline(llvm::OptimizationLevel::O3);
+  module_passes.run(*module, modules);
+  if (guide.verify_output) CHECK(!llvm::verifyModule(*module, &llvm::errs()));
 }
 
-// Optimize a normal module. This might not contain special Remill-specific
-// intrinsics functions like `__remill_jump`, etc.
 void OptimizeBareModule(llvm::Module *module, OptimizationGuide guide) {
-  llvm::legacy::FunctionPassManager func_manager(module);
-  llvm::legacy::PassManager module_manager;
-
-  auto TLI = new llvm::TargetLibraryInfoImpl(llvm::Triple(module->getTargetTriple()));
-
-  TLI->disableAllFunctions();  // `-fno-builtin`.
-
-  llvm::PassManagerBuilder builder;
-  // TODO(alex): Some of the optimization passes that the builder adds still rely on typed pointers
-  // so we cannot use them. We should switch to using the new pass manager and choose which passes
-  // we want.
-  builder.OptLevel = 3;
-  builder.SizeLevel = 0;
-  builder.Inliner = llvm::createFunctionInliningPass(250);
-  builder.LibraryInfo = TLI;  // Deleted by `llvm::~PassManagerBuilder`.
-  builder.DisableUnrollLoops = false;  // Unroll loops!
-#if LLVM_VERSION_NUMBER < LLVM_VERSION(16, 0)
-  builder.RerollLoops = false;
-#endif
-  builder.SLPVectorize = guide.slp_vectorize;
-  builder.LoopVectorize = guide.loop_vectorize;
-  builder.VerifyInput = guide.verify_input;
-  builder.VerifyOutput = guide.verify_output;
-  builder.MergeFunctions = false;
-
-  builder.populateFunctionPassManager(func_manager);
-  builder.populateModulePassManager(module_manager);
-  func_manager.doInitialization();
-  for (auto &func : *module) {
-    func_manager.run(func);
-  }
-  func_manager.doFinalization();
-  module_manager.run(*module);
+  auto function = module->begin();
+  OptimizeModule(nullptr, module, [&]() -> llvm::Function * {
+    return function == module->end() ? nullptr : &*function++;
+  }, guide);
 }
 
 }  // namespace remill

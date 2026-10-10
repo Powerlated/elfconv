@@ -18,6 +18,13 @@ int main(void) {
     CASE("carry-read", "addl $1, %0\n\tadcl $0, %0");
     CASE("partial-write", "addl $1, %0\n\tincl %0");
     CASE("flag-read", "addl $1, %0\n\tpushfl\n\tpopl %0");
+    CASE("across-mov-lea",
+         "addl $1, %0\n\tmovl %0, %0\n\tleal 4(%0), %0\n\tsubl $2, %0");
+    CASE("zf-cf-live", "addl $1, %0\n\tsetz %b0\n\tincl %0");
+    CASE("carry-before-kill", "addl $1, %0\n\tadcl $0, %0\n\tcmpl $0, %0");
+    CASE("logical-kill", "subl $1, %0\n\tmovl %0, %0\n\txorl $7, %0");
+    CASE("zero-shift-boundary", "addl $1, %0\n\tshll $0, %0");
+    CASE("branch-boundary", "addl $1, %0\n\tjnc 1f\n\tmovl $7, %0\n1:");
   }
   return 0;
 }

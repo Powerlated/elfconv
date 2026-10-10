@@ -232,37 +232,6 @@ DEF_ISEL_Rn_In(CMP_OrAX_IMMz, CMP);
 
 namespace {
 
-// Used only when the next non-faulting instruction overwrites arithmetic flags.
-template <typename D, typename S1, typename S2>
-DEF_SEM(ADD_NOFLAGS, D dst, S1 src1, S2 src2) {
-  WriteZExt(dst, UAdd(Read(src1), Read(src2)));
-}
-
-template <typename D, typename S1, typename S2>
-DEF_SEM(SUB_NOFLAGS, D dst, S1 src1, S2 src2) {
-  WriteZExt(dst, USub(Read(src1), Read(src2)));
-}
-
-template <typename S1, typename S2>
-DEF_SEM(CMP_NOFLAGS, S1 src1, S2 src2) {}
-
-}  // namespace
-
-DEF_ISEL_RnW_Rn_In(NOFLAGS_ADD_GPRv_IMMz, ADD_NOFLAGS);
-DEF_ISEL_RnW_Rn_In(NOFLAGS_ADD_GPRv_IMMb, ADD_NOFLAGS);
-DEF_ISEL_RnW_Rn_Rn(NOFLAGS_ADD_GPRv_GPRv_01, ADD_NOFLAGS);
-DEF_ISEL_RnW_Rn_Rn(NOFLAGS_ADD_GPRv_GPRv_03, ADD_NOFLAGS);
-DEF_ISEL_RnW_Rn_In(NOFLAGS_SUB_GPRv_IMMz, SUB_NOFLAGS);
-DEF_ISEL_RnW_Rn_In(NOFLAGS_SUB_GPRv_IMMb, SUB_NOFLAGS);
-DEF_ISEL_RnW_Rn_Rn(NOFLAGS_SUB_GPRv_GPRv_29, SUB_NOFLAGS);
-DEF_ISEL_RnW_Rn_Rn(NOFLAGS_SUB_GPRv_GPRv_2B, SUB_NOFLAGS);
-DEF_ISEL_Rn_In(NOFLAGS_CMP_GPRv_IMMz, CMP_NOFLAGS);
-DEF_ISEL_Rn_In(NOFLAGS_CMP_GPRv_IMMb, CMP_NOFLAGS);
-DEF_ISEL_Rn_Rn(NOFLAGS_CMP_GPRv_GPRv_39, CMP_NOFLAGS);
-DEF_ISEL_Rn_Rn(NOFLAGS_CMP_GPRv_GPRv_3B, CMP_NOFLAGS);
-
-namespace {
-
 template <typename T, typename U, typename V>
 ALWAYS_INLINE static void WriteFlagsMul(State &state, T lhs, T rhs, U res, V res_trunc) {
   const auto new_of = Overflow<tag_mul>::Flag(lhs, rhs, res);
