@@ -1,6 +1,7 @@
 /* Minimal SDL2 testautomation harness for the vendored Pixels and Surface suites.
  * The suite functions and assertions remain upstream SDL2 test code.
  */
+#include <stdio.h>
 #include "SDL.h"
 #include "SDL_test.h"
 
@@ -21,7 +22,8 @@ int main(void)
         SDL_Log("SDL_Init failed: %s", SDL_GetError());
         return 1;
     }
-    result = SDLTest_RunSuites(test_suites, NULL, 0, NULL, 1);
+    result = SDLTest_RunSuites(test_suites, "elfconv-sdl2-oracles-2.30.11", 0, NULL, 1);
+    printf("SDL2 surface/pixel oracle result: %d\n", result);
     SDL_Quit();
     return result;
 }
