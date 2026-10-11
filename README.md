@@ -187,6 +187,8 @@ Set `ELFCONV_ARCH=aarch64` when building the AArch64 semantics instead. Configur
 the dependency and project builds with the same LLVM installation.
 After rebuilding `elflift`, rerun conversion. Incremental caches automatically
 invalidate when the lifter binary changes.
+For `i386-wasm`, runtime sources compile as independent cached objects, with up
+to eight concurrent jobs by default; set `--conversion-jobs` to change the limit.
 Direct CLI: `python scripts/convert_elf.py --help`. CMake conversion targets
 invoke the same driver. Select the virtual environment with
 `-DPython3_EXECUTABLE="$PWD/.venv/bin/python"` if needed.

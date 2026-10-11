@@ -78,7 +78,7 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--object-base", type=Path)
     result.add_argument("--wasm-opt-level", choices=list("0123sz"), default="3")
     result.add_argument("--legacy-gl", choices=("0", "1"), default="1")
-    result.add_argument("--conversion-jobs", type=int, default=2)
+    result.add_argument("--conversion-jobs", type=int, default=8)
     result.add_argument("--debug-func-addr", default="0")
     for name in ("init-wasm", "debug", "float-status", "text-ir", "no-lifted",
                  "no-compiled", "ready-js", "incremental-units", "jspi", "pthreads"):
@@ -444,8 +444,41 @@ class Driver:
                 if not a.no_compiled:
                     await self.run(name, "compiling", [emcc, f"-O{a.wasm_opt_level}", *self.thread_compile,
                                                        *self.exception_flags, "-c", ir, "-o", obj])
-                await self.run("Final link", "linking", [emcc, *self.browser_link_flags(False), obj,
-                    *COMMON, ROOT / "src/runtime/I386Imports.cpp", "-o", self.output / f"{name}.js"])
+
+                sources = [*COMMON, ROOT / "src/runtime/I386Imports.cpp"]
+                headers = sorted(path for directory in (ROOT / "src/runtime", ROOT / "src/utils",
+                                                        ROOT / "backend/remill/include")
+                                 for path in directory.rglob("*") if path.suffix in (".h", ".hpp", ".inc"))
+                header_key = key([(str(path), digest(path)) for path in headers])
+                runtime_flags: list[object] = [
+                    f"-O{a.wasm_opt_level}", *self.thread_compile, *self.exception_flags,
+                    *(["-g2"] if a.wasm_opt_level == "0" else []), *self.includes, "-std=c++17",
+                    *self.definitions, "-DELF_IS_I386", "-DADDRESS_SIZE_BITS=32", "-sUSE_SDL=2",
+                    f"-DECV_LEGACY_GL={a.legacy_gl}"]
+                semaphore = asyncio.Semaphore(a.conversion_jobs)
+
+                async def compile_runtime(source: Path) -> Path:
+                    runtime_obj = self.cache / f"single-runtime-{source.stem}.wasm.o"
+                    async with semaphore:
+                        await self.stage(f"Runtime/{source.name}", "compiling",
+                            [emcc, *runtime_flags, "-c", source, "-o", runtime_obj], [runtime_obj],
+                            [digest(source), header_key, self.compiler_identity[emcc]],
+                            self.cache / f"single-runtime-{source.stem}.compile.key")
+                    self.display.update(f"Runtime/{source.name}", "done")
+                    return runtime_obj
+
+                tasks = [asyncio.create_task(compile_runtime(source)) for source in sources]
+                try:
+                    runtime_objects = await asyncio.gather(*tasks)
+                finally:
+                    for task in tasks:
+                        if not task.done():
+                            task.cancel()
+                    await asyncio.gather(*tasks, return_exceptions=True)
+
+                await self.run("Final link", "linking",
+                    [emcc, *self.browser_link_flags(False), obj, *runtime_objects,
+                     "-o", self.output / f"{name}.js"])
                 self.html()
             else:
                 definitions = [*self.definitions, "-DTARGET_IS_BROWSER=1", f'-DELFNAME="{name}"']
