@@ -1,7 +1,7 @@
 /* Tests for preadv and pwritev.
    Copyright (C) 2016-2024 Free Software Foundation, Inc.
    Adapted from glibc misc/tst-preadvwritev-common.c and
-   misc/tst-preadvwritev.c at e6e432d7a0a7c17e381acc42b312ad7029b53ab3.
+   misc/tst-preadvwritev.c at 3d1aed874918c466a4477af1da35983ab036690e.
    This file is part of the GNU C Library.
 
    GNU LGPL version 2.1 or (at your option) any later version applies.

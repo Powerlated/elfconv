@@ -1,13 +1,13 @@
 glibc filesystem oracle
 
 Source: glibc misc/tst-preadvwritev-common.c plus misc/tst-preadvwritev.c,
-commit e6e432d7a0a7c17e381acc42b312ad7029b53ab3 (glibc-2.40).
+commit 3d1aed874918c466a4477af1da35983ab036690e (peeled glibc-2.40 tag).
 License: GNU LGPL 2.1-or-later; COPYING.LIB contains the notice and terms.
 Dependencies: existing test/elfconv/run_i386.py, i386 libc toolchain, Emscripten, Node.
 
 | Behavior | Upstream test | Adaptation | Native/Wasm modes | Gaps |
 |---|---|---|---|---|
-| vectored writes at two explicit offsets; lengths; content roundtrip across two iovecs | do_test_with_offset(0), common source | Replaced glibc support-test temp-file/check helpers with mkstemp and direct diagnostics; retained return/count/content comparisons | Existing ELF conversion runner: native reference then lifted Wasm | No rename/unlink, descriptor-sharing semantics, mmap alias/protection assertions. Direct arena accesses cannot establish mmap aliasing or OS page protections; neither is claimed. |
+| vectored writes at two explicit offsets, lengths, and roundtrip content across two iovecs | do_test_with_offset(0), common source | Replaced glibc support-test temp-file/check helpers with mkstemp and direct diagnostics; retained return/count/content comparisons. The two upstream extents use the same byte patterns; reads at both offsets and exact counts check placement but do not distinguish swapped/duplicated patterns by content. | Existing ELF conversion runner: native reference then lifted Wasm | No rename/unlink, descriptor-sharing semantics, mmap alias/protection assertions. Direct arena accesses cannot establish mmap aliasing or OS page protections; neither is claimed. |
 
 Run from configured build directory after enabling ELFCONV_I386_TESTS:
 `ctest --test-dir build -R '^i386_glibc_preadvwritev$' --output-on-failure`
