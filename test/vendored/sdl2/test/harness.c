@@ -8,7 +8,7 @@
 extern SDLTest_TestSuiteReference pixelsTestSuite;
 extern SDLTest_TestSuiteReference surfaceTestSuite;
 
-static const SDLTest_TestSuiteReference *test_suites[] = {
+static SDLTest_TestSuiteReference *test_suites[] = {
     &pixelsTestSuite,
     &surfaceTestSuite,
     NULL
