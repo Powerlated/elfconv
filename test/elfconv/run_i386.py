@@ -4,6 +4,7 @@ import argparse
 import difflib
 from pathlib import Path
 import os
+import subprocess
 import sys
 
 
