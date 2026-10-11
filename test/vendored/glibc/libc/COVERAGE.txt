@@ -1,0 +1,41 @@
+glibc public-libc oracles
+
+Source pin: glibc b72fcafcc9d307790bd24ebba65f52994ca5598e
+https://sourceware.org/git/glibc.git
+License: LGPL-2.1-or-later; COPYING.LESSERv2 is the upstream license text.
+Source headers retain copyright/license notices. Upstream COPYING.LIB is a
+symlink; the license text is vendored directly as COPYING.LESSERv2.
+
+Coverage map (glibc test-skeleton/private helper dependencies replaced with a
+standard main and local array_length expression; behavior assertions retained):
+- sscanf integer/float assignment, malformed/partial conversion, return counts,
+  residual characters, and long zero input: tst-sscanf.c, from
+  stdio-common/tst-sscanf.c. en_US.ISO-8859-1 locale cases fall back if absent.
+- sprintf zero-precision wide string, large field width, positional args,
+  malformed-format boundaries, and multibyte precision: tst-sprintf.c, from
+  stdio-common/tst-sprintf.c. de_DE.UTF-8 branch fails if locale is absent.
+- Restartable UTF-8 mbrtowc split sequences, incomplete state, output preservation,
+  NUL processing, and invalid terminators: tst-mbrtowc.c, from
+  wcsmbs/tst-mbrtowc.c. Requires C.UTF-8 or C.utf8.
+
+The copied sources have no glibc private runtime dependencies. Add this slice by
+`add_subdirectory(test/vendored/glibc/libc)` after Python3, ELFCONV_I386_CC/NODE/
+OBJCOPY, and ELFCONV_EMCC are available. It uses existing run_i386.py differential
+runner. After parent integration, run:
+cmake --build <build> --target elflift
+ctest --test-dir <build> -R '^i386_glibc_' --output-on-failure
+
+If glibc locales are missing, provision them with:
+`sudo localedef -i de_DE -f UTF-8 de_DE.UTF-8`
+`sudo localedef -i en_US -f ISO-8859-1 en_US.ISO-8859-1`
+The mbrtowc test fails if C.UTF-8 and C.utf8 are both unavailable.
+Prerequisites: i386-capable Linux, GCC multilib and 32-bit libc development files,
+GNU objcopy, built x86 elflift, Emscripten em++, Node, Python 3.
+
+C23 binary-prefix scanf: stdio-common/tst-scanf-binary-c23.c and its shared main
+were inspected; broad variants depend on glibc test support and C23 symbols. No
+binary-prefix scanf test is included, and this slice makes no claim whether
+native scanf has C23 behavior. Existing parse-adapters.c distinguishes
+__isoc23_strtol from legacy strtol only; scanf remains unclassified/uncovered.
+
+No test/build/lint/formatter was run.
