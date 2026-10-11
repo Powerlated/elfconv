@@ -4,19 +4,19 @@ if(NOT ELFCONV_GLIBC_PTHREAD_BROWSER_TESTS)
   return()
 endif()
 
-if(NOT ELFCONV_I386_PTHREAD_BROWSER_RUNNER)
-  message(FATAL_ERROR
-    "ELFCONV_GLIBC_PTHREAD_BROWSER_TESTS requires ELFCONV_I386_PTHREAD_BROWSER_RUNNER; "
-    "run_i386.py's Node mode does not execute real Emscripten threads")
-endif()
 find_package(Python3 3.11 REQUIRED COMPONENTS Interpreter)
+if(NOT ELFCONV_I386_NODE)
+  find_program(ELFCONV_I386_NODE NAMES node REQUIRED)
+endif()
 
 foreach(test IN ITEMS tsd3 tsd4)
   add_test(NAME i386_glibc_pthread_${test}
-    COMMAND "${Python3_EXECUTABLE}" "${ELFCONV_I386_PTHREAD_BROWSER_RUNNER}"
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_LIST_DIR}/run_browser.py"
       --lifter "$<TARGET_FILE:elflift>"
       --emcc "${ELFCONV_EMCC}"
       --cc "${ELFCONV_I386_CC}"
+      --node "${ELFCONV_I386_NODE}"
+      --browser-dir "${CMAKE_SOURCE_DIR}/test/browser"
       --source "${CMAKE_CURRENT_LIST_DIR}/tst-${test}.c"
       --output-dir "${CMAKE_CURRENT_BINARY_DIR}/${test}")
   set_tests_properties(i386_glibc_pthread_${test} PROPERTIES

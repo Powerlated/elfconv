@@ -14,29 +14,26 @@ glibc's `test-skeleton.c` wrapper with `main`; the explanatory comment in
 
 ## Browser integration
 
-`convert_elf.py` supports `--pthreads`; it enables Emscripten `-pthread`, JSPI,
-`PROXY_TO_PTHREAD`, and a worker pool. Generated pthread pages require a
-JSPI-capable browser and cross-origin isolation (`SharedArrayBuffer`), so serve
-the generated HTML from a secure origin with COOP/COEP headers (the existing
-browser test server/service-worker pattern is relevant). Node invocation by
-`run_i386.py` is not a valid threaded oracle: its existing compile/conversion
-path does not enable `--pthreads` and does not launch real guest threads.
+`convert_elf.py --pthreads` enables Emscripten `-pthread`, JSPI,
+`PROXY_TO_PTHREAD`, and the worker pool. `run_browser.py` compiles the native
+reference with `-pthread`, converts with `--pthreads`, and launches the generated
+page using the installed Playwright Chromium setup. It reuses
+`test/browser/test-server.js`, which serves localhost with COOP and COEP headers.
+The browser test fails unless `crossOriginIsolated`, `SharedArrayBuffer`, and
+both JSPI APIs are available; it also checks browser abort/exit status, page
+errors, and exact stdout parity. Unsupported-instruction diagnostics fail before
+browser launch. Node itself does not execute the guest: it launches Playwright,
+which drives real Chromium workers.
 
-The per-slice CMake file requires an explicit
-`ELFCONV_I386_PTHREAD_BROWSER_RUNNER` when browser tests are enabled. Main
-integration must provide that runner with `--lifter`, `--emcc`, `--cc`,
-`--source`, and `--output-dir` options and register it only on a JSPI-capable,
-cross-origin-isolated browser lane. The runner must compile the native reference
-with `-pthread`, convert with `--pthreads`, serve and launch the generated page,
-and fail on browser abort, missing completion, nonzero status, unsupported
-imports, or output/status mismatch. Do not normalize native-versus-lifted
-failures.
+Prerequisites are the existing i386 differential-test toolchain plus Chromium
+installed for Playwright (`npm install --prefix test/browser` and
+`npx --prefix test/browser playwright install chromium`). CTest registration is
+opt-in with `ELFCONV_GLIBC_PTHREAD_BROWSER_TESTS=ON`.
 
 ## Main verification
 
-After the browser runner is integrated and CMake is configured with
-`-DELFCONV_GLIBC_PTHREAD_BROWSER_TESTS=ON` and
-`-DELFCONV_I386_PTHREAD_BROWSER_RUNNER=/path/to/runner.py`, run:
+With CMake configured for i386 tests and
+`-DELFCONV_GLIBC_PTHREAD_BROWSER_TESTS=ON`, run:
 
 ```sh
 cmake --build build --target elflift
