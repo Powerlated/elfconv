@@ -572,6 +572,7 @@ IMPORT(getifaddrs) {
       data = netextra_alloc(runtime, sizeof(struct rtnl_link_stats));
       if (data) memcpy(guest(arena, data, sizeof(struct rtnl_link_stats)), p->ifa_data, sizeof(struct rtnl_link_stats));
     }
+#endif
     if ((p->ifa_addr && !address) || (p->ifa_netmask && !netmask) ||
         (p->ifa_broadaddr && !broad)
 #ifdef __linux__

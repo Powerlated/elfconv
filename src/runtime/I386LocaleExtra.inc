@@ -203,7 +203,8 @@ bool host_langinfo_item(uint32_t guest_item, nl_item &host_item) {
   }
 }
 uint32_t wide_guest_pointer(uint8_t *arena, uint32_t base, const wchar_t *p) {
-  return p ? base + uint32_t(reinterpret_cast<const uint8_t *>(p) - guest(arena, base, 1)) : 0;
+  return p ? base + uint32_t(reinterpret_cast<const uint8_t *>(p) -
+      static_cast<const uint8_t *>(guest(arena, base, 1))) : 0;
 }
 }
 
@@ -365,8 +366,8 @@ IMPORT(wcsnrtombs) {
   const uint32_t count = call.word(2), len = call.word(3);
   if (!src && count) { errno = EFAULT; call.result(UINT32_MAX); return; }
   const wchar_t *in = src ? wide_buffer(arena, src, count) : nullptr;
-  mbstate_t state = load_mbstate(arena, statep);
-  mbstate_t *state_arg = statep ? &state : implicit_mbstate(0);
+  mbstate_t host_state = load_mbstate(arena, statep);
+  mbstate_t *state_arg = statep ? &host_state : implicit_mbstate(0);
   uint32_t dst = call.word(0);
   size_t result = wcsnrtombs(dst ? static_cast<char *>(guest(arena, dst, len)) : nullptr,
       &in, count, len, state_arg);
@@ -380,18 +381,18 @@ IMPORT(mbstowcs) {
 IMPORT(mbrtowc) {
   CALL; uint32_t dst = call.word(0), src = call.word(1), statep = call.word(3), count = call.word(2);
   mbstate_t local_state = load_mbstate(arena, statep);
-  mbstate_t *state = statep ? &local_state : implicit_mbstate(1);
+  mbstate_t *state_arg = statep ? &local_state : implicit_mbstate(1);
   const char *input = src ? (count ? static_cast<const char *>(guest(arena, src, count)) : "") : "";
   const size_t input_count = src ? count : 1;
-  size_t result = mbrtowc(src && dst ? wide_buffer(arena, dst, 1) : nullptr, input, input_count, state);
-  if (statep) save_mbstate(arena, statep, *state);
+  size_t result = mbrtowc(src && dst ? wide_buffer(arena, dst, 1) : nullptr, input, input_count, state_arg);
+  if (statep) save_mbstate(arena, statep, *state_arg);
   call.result(result == size_t(-1) ? UINT32_MAX : result == size_t(-2) ? UINT32_MAX - 1 : uint32_t(result));
 }
 IMPORT(mbsrtowcs) {
   CALL; uint32_t srcp = call.word(1), statep = call.word(3), src; memcpy(&src, guest(arena, srcp, 4), 4);
-  const char *in = src ? text(arena, src) : nullptr; mbstate_t state = load_mbstate(arena, statep);
+  const char *in = src ? text(arena, src) : nullptr; mbstate_t host_state = load_mbstate(arena, statep);
   if (!src) { errno = EFAULT; call.result(UINT32_MAX); return; }
-  mbstate_t *state_arg = statep ? &state : implicit_mbstate(2);
+  mbstate_t *state_arg = statep ? &host_state : implicit_mbstate(2);
   uint32_t dst = call.word(0), n = call.word(2);
   size_t result = mbsrtowcs(dst ? wide_buffer(arena, dst, n) : nullptr, &in, n, state_arg);
   if (src && in) src = uint32_t(reinterpret_cast<const uint8_t *>(in) - arena); else if (src && !in) src = 0;
@@ -401,15 +402,15 @@ IMPORT(mbsnrtowcs) {
   CALL; uint32_t srcp = call.word(1), statep = call.word(4), src; memcpy(&src, guest(arena, srcp, 4), 4);
   uint32_t dst = call.word(0), n = call.word(3), len = call.word(2);
   if (!src && len) { errno = EFAULT; call.result(UINT32_MAX); return; }
-  const char *in = src ? static_cast<const char *>(guest(arena, src, len ? len : 1)) : nullptr; mbstate_t state = load_mbstate(arena, statep);
-  mbstate_t *state_arg = statep ? &state : implicit_mbstate(3);
+  const char *in = src ? static_cast<const char *>(guest(arena, src, len ? len : 1)) : nullptr; mbstate_t host_state = load_mbstate(arena, statep);
+  mbstate_t *state_arg = statep ? &host_state : implicit_mbstate(3);
   size_t result = mbsnrtowcs(dst ? wide_buffer(arena, dst, n) : nullptr, &in, len, n, state_arg);
   if (src && in) src = uint32_t(reinterpret_cast<const uint8_t *>(in) - arena); else if (src && !in) src = 0;
   memcpy(guest(arena, srcp, 4), &src, 4); if (statep) save_mbstate(arena, statep, *state_arg); call.result(result == size_t(-1) ? UINT32_MAX : uint32_t(result));
 }
 IMPORT(wcrtomb) {
-  CALL; uint32_t dst = call.word(0), statep = call.word(2); mbstate_t state = load_mbstate(arena, statep);
-  mbstate_t *state_arg = statep ? &state : implicit_mbstate(4);
+  CALL; uint32_t dst = call.word(0), statep = call.word(2); mbstate_t host_state = load_mbstate(arena, statep);
+  mbstate_t *state_arg = statep ? &host_state : implicit_mbstate(4);
   size_t result = wcrtomb(dst ? static_cast<char *>(guest(arena, dst, MB_CUR_MAX)) : nullptr, wchar_t(call.word(1)), state_arg);
   if (statep) save_mbstate(arena, statep, *state_arg); call.result(result == size_t(-1) ? UINT32_MAX : uint32_t(result));
 }
