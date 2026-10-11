@@ -10,20 +10,8 @@ find_program(ELFCONV_I386_OBJCOPY NAMES objcopy REQUIRED)
 if(NOT ELFCONV_EMCC)
   find_program(ELFCONV_EMCC NAMES em++ REQUIRED)
 endif()
-set(ELFCONV_VENDORED_ROOT "${CMAKE_SOURCE_DIR}/test/vendored")
-foreach(vendor_slice IN ITEMS
-    glibc/libc
-    glibc/loader
-    glibc/filesystem
-    glibc/pthread
-    sdl2)
-  set(vendor_source_dir "${ELFCONV_VENDORED_ROOT}/${vendor_slice}")
-  if(EXISTS "${vendor_source_dir}/CMakeLists.txt")
-    string(REPLACE "/" "_" vendor_binary_name "${vendor_slice}")
-    add_subdirectory("${vendor_source_dir}"
-      "${CMAKE_CURRENT_BINARY_DIR}/vendored/${vendor_binary_name}")
-  endif()
-endforeach()
+add_subdirectory("${CMAKE_SOURCE_DIR}/test/vendored"
+  "${CMAKE_CURRENT_BINARY_DIR}/vendored")
 
 foreach(profile IN ITEMS dead-eflags shift-defined double-shift-defined rotate-defined bit-count-defined x87-sm64-defined fxsave-defined fadd-memory-defined x87-environment-defined rdrand-defined rsqrt-defined crypto-defined packed-sse-defined segment-push-defined cpu-defined weak-imports shared-data-imports pie shared dynamic dynamic-startup rtti libc-adapters math-adapters stdio-adapters dirent-adapters time-adapters stat-adapters parse-adapters wide-adapters environment-adapters tls tls-startup tls-gnu2 tls-initial-exec tls-local-dynamic)
   if(profile MATCHES "^dynamic")
