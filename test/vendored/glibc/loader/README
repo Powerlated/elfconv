@@ -1,7 +1,7 @@
 # glibc loader test slice
 
 - Upstream: glibc `setjmp/tst-setjmp.c`, commit `ef321e23c20eebc6d6fb4044425c00e6df27b05f` (release tag `glibc-2.39`). Source: `https://github.com/bminor/glibc/blob/ef321e23c20eebc6d6fb4044425c00e6df27b05f/setjmp/tst-setjmp.c`.
-- License: LGPL-2.1-or-later; see `../COPYING` and the retained source notice.
+- License: LGPL-2.1-or-later; see `../COPYING` and the full GNU license text referenced there.
 - Dependencies: i386 GCC/glibc multilib, Emscripten, Node, and the configured elfconv `elflift` target.
 
 Coverage map:
@@ -9,5 +9,7 @@ Coverage map:
 | Required behavior | Existing upstream test | Adaptation | Modes | Gaps |
 | --- | --- | --- | --- | --- |
 | setjmp/longjmp continuation; repeated nonzero jump values; `_setjmp`; non-macro `setjmp` entry | `setjmp/tst-setjmp.c` | Test body/assertions retained; glibc test-skeleton wrapper replaced by `main` calling `do_test` | Compiled i386 `-O2` without frame-pointer override; native and lifted via `run_i386.py` | No signal-mask, FPU/register preservation, or unwind/backtrace assertions; no EBP-only backtrace claims |
+
+Observed on the integration attempt: the native test passed; the lifted run failed during runtime compilation. No lifted setjmp behavior has therefore been demonstrated.
 
 Build integration is intentionally local to this slice. From the repository root, configure the existing i386 test build with the usual `ELFCONV_I386_TESTS=ON`, then add this directory from the enclosing test CMake via `add_subdirectory(test/vendored/glibc/loader)`. The directory's CMake file registers `i386_glibc_setjmp`; run it with `ctest -R '^i386_glibc_setjmp$'`.

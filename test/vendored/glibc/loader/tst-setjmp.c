@@ -6,9 +6,18 @@
    as published by the Free Software Foundation; either version 2.1 of
    the License, or (at your option) any later version.
 
-   This file is based on glibc setjmp/tst-setjmp.c at tag glibc-2.39.
-   The test body and assertions are retained; only glibc's test-skeleton
-   entry point is replaced with a standalone main for elfconv's runner.  */
+   The GNU C Library is distributed in the hope that it will be useful,
+   but WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+   GNU Lesser General Public License for more details.
+
+   You should have received a copy of the GNU Lesser General Public
+   License along with the GNU C Library; if not, see
+   <https://www.gnu.org/licenses/>.  */
+
+/* Based on glibc setjmp/tst-setjmp.c at commit
+   ef321e23c20eebc6d6fb4044425c00e6df27b05f.  Only glibc's
+   test-skeleton entry point is replaced with a standalone main.  */
 
 #include <stdio.h>
 #include <setjmp.h>
