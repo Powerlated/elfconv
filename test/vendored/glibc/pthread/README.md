@@ -20,10 +20,11 @@ reference with `-pthread`, converts with `--pthreads`, and launches the generate
 page using the installed Playwright Chromium setup. It reuses
 `test/browser/test-server.js`, which serves localhost with COOP and COEP headers.
 The browser test fails unless `crossOriginIsolated`, `SharedArrayBuffer`, and
-both JSPI APIs are available; it also checks browser abort/exit status, page
-errors, and exact stdout parity. Unsupported-instruction diagnostics fail before
-browser launch. Node itself does not execute the guest: it launches Playwright,
-which drives real Chromium workers.
+both JSPI APIs are available; it checks browser abort/exit status, page errors,
+and exact stdout/stderr parity. Separate `Module.print` and `Module.printErr`
+capture preserves the guest's stdout/stderr distinction. Unsupported-instruction
+diagnostics fail before browser launch. Node itself does not execute the guest:
+it launches Playwright, which drives real Chromium workers.
 
 Prerequisites are the existing i386 differential-test toolchain plus Chromium
 installed for Playwright (`npm install --prefix test/browser` and

@@ -80,6 +80,7 @@ def main():
         "ELFCONV_PTHREAD_SERVE_DIR": str(wasm_dir),
         "ELFCONV_PTHREAD_TEST_HTML": str(html),
         "ELFCONV_PTHREAD_NATIVE_STDOUT": str(output / "native.stdout"),
+        "ELFCONV_PTHREAD_NATIVE_STDERR": str(output / "native.stderr"),
         "ELFCONV_PTHREAD_OUTPUT_DIR": str(output),
     })
     browser = run("chromium", [args.node, str(playwright), "test", "--config",
@@ -88,15 +89,17 @@ def main():
         cwd=output, env=env, timeout=240)
     if browser.returncode:
         return 1
-    actual = (output / "lifted.stdout").read_text(errors="replace")
-    expected = native.stdout
-    if actual != expected:
-        diff = "".join(difflib.unified_diff(expected.splitlines(keepends=True),
-            actual.splitlines(keepends=True), fromfile="native", tofile="lifted"))
-        (output / "output.diff").write_text(diff)
-        print(diff, end="")
-        return 1
-    print(f"Native and browser stdout match; logs: {output}")
+    for stream in ("stdout", "stderr"):
+        actual = (output / f"lifted.{stream}").read_text(errors="replace")
+        expected = getattr(native, stream)
+        if actual != expected:
+            diff = "".join(difflib.unified_diff(expected.splitlines(keepends=True),
+                actual.splitlines(keepends=True), fromfile=f"native.{stream}",
+                tofile=f"lifted.{stream}"))
+            (output / f"{stream}.diff").write_text(diff)
+            print(diff, end="")
+            return 1
+    print(f"Native and browser stdout/stderr match; logs: {output}")
     return 0
 
 
