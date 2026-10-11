@@ -1,6 +1,6 @@
 set(ELFCONV_GLIBC_LOCALE_PATH "" CACHE PATH
   "Optional LOCPATH for generated glibc locales")
-foreach(profile IN ITEMS glibc_sscanf glibc_sprintf glibc_mbrtowc)
+foreach(profile IN ITEMS glibc_mbrtowc)
   string(REPLACE "glibc_" "" source_name "${profile}")
   add_test(NAME i386_${profile}
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/../../../elfconv/run_i386.py"

@@ -6,41 +6,16 @@ License: LGPL-2.1-or-later; COPYING.LESSERv2 is the upstream license text.
 Source headers retain copyright/license notices. Upstream COPYING.LIB is a
 symlink; the license text is vendored directly as COPYING.LESSERv2.
 
-Coverage map (glibc test-skeleton/private helper dependencies replaced with a
-standard main and local array_length expression; behavior assertions retained):
-- sscanf integer/float assignment, malformed/partial conversion, return counts,
-  residual characters, and long zero input: tst-sscanf.c, from
-  stdio-common/tst-sscanf.c. en_US.ISO-8859-1 locale cases fall back if absent.
-- sprintf zero-precision wide string, large field width, positional args,
-  malformed-format boundaries, and multibyte precision: tst-sprintf.c, from
-  stdio-common/tst-sprintf.c. de_DE.UTF-8 branch fails if locale is absent.
+Coverage map:
 - Restartable UTF-8 mbrtowc split sequences, incomplete state, output preservation,
   NUL processing, and invalid terminators: tst-mbrtowc.c, from
   wcsmbs/tst-mbrtowc.c. Requires C.UTF-8 or C.utf8.
 
-The copied sources have no glibc private runtime dependencies. Add this slice by
-`add_subdirectory(test/vendored/glibc/libc)` after Python3, ELFCONV_I386_CC/NODE/
-OBJCOPY, and ELFCONV_EMCC are available. It uses existing run_i386.py differential
-runner. After parent integration, run:
+`test/vendored/CMakeLists.txt` registers this slice. It uses the existing
+native-versus-lifted `run_i386.py` runner.
 cmake --build <build> --target elflift
 ctest --test-dir <build> -R '^i386_glibc_' --output-on-failure
 
-For isolated non-root glibc locales, use:
-`mkdir -p <build>/vendored-locales`
-`localedef --no-archive -i de_DE -f UTF-8 <build>/vendored-locales/de_DE.UTF-8`
-`localedef --no-archive -i en_US -f ISO-8859-1 <build>/vendored-locales/en_US.ISO-8859-1`
-Configure with `-DELFCONV_GLIBC_LOCALE_PATH=<build>/vendored-locales`; CTest sets
-LOCPATH for these tests when this option is nonempty. The mbrtowc test fails if
-neither C.UTF-8 nor C.utf8 is available. Do not use host locale installs.
-
-C23 binary-prefix scanf: stdio-common/tst-scanf-binary-c23.c and its shared main
-were inspected; broad variants depend on glibc test support and C23 symbols. No
-binary-prefix scanf test is included, and this slice makes no claim whether
-native scanf has C23 behavior. Existing parse-adapters.c distinguishes
-__isoc23_strtol from legacy strtol only; scanf remains unclassified/uncovered.
-
-Observed in parent integration: native sscanf and mbrtowc passed; sscanf's locale
-branch was absent on the initial native run. Emscripten conversion failed during
-runtime compilation; no lifted oracle execution passed. The Wasm locale adapter
-failure is not suppressed or presented as locale coverage. sprintf and later
-locale-provisioned native/lifted statuses remain untested.
+Observed in parent integration: native mbrtowc passed. Emscripten conversion failed
+during runtime compilation; no lifted oracle execution passed. The Wasm locale
+adapter failure is not suppressed or presented as locale coverage.

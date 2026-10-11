@@ -1,6 +1,6 @@
 # Agent instructions
 
-- Spawn subagents only when using GPT-6-Luna with high reasoning. If that model and reasoning level are unavailable, work directly without subagents; do not substitute another model.
+- GPT-6-Luna MUST NOT spawn subagents; work directly.
 - Main agent owns integration and verification.
 - Commit early and commit often. Prefer small, coherent commits; verify significant behavioral changes before committing them.
 - Commit messages: one line; no body. Keep unrelated user changes out of commits.
@@ -41,6 +41,7 @@
 
 ## Testing and verification
 
+- The generic word "test" refers to an i386 program lifted to Wasm and checked for correct behavior in Wasm; use the native-versus-Wasm `run_i386.py` path.
 - Use this repository's CMake/CTest and existing native-versus-Wasm fixtures; do not introduce another test framework without need.
 - Prefer finding and reusing existing repository or upstream behavior/conformance tests over writing new ones. Search first; add tests only for uncovered behavior.
 - Place vendored tests in `test/vendored/<vendor>/`.
@@ -61,5 +62,6 @@
 ## Environment safety
 
 - Steam: non-root user; writable runtime directories. Never store credentials in tracked files or chat.
+- Emscripten SDK is installed at `~/emsdk`; source `~/emsdk/emsdk_env.sh` to add its tools to `PATH`.
 - Diagnose sandbox/display/GPU failures before changing permissions. No blanket `xhost +`, privileged containers, or Docker-socket shortcuts.
 - Host-wide security-policy changes require explicit approval; document risk and restoration. Prefer narrow, scoped permissions.

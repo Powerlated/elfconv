@@ -239,11 +239,12 @@ IMPORT(memalign) {
   call.result(allocate_aligned(size,std::max(align,16u)));
 }
 IMPORT(mkfifo) { CALL; call.result(mkfifo(text(arena,call.word(0)),call.word(1))); }
-IMPORT(mmap64) {
-  CALL;
+namespace {
+void extra_mmap(Call &call, bool wide_offset) {
+  uint8_t *arena = call.arena;
   const uint32_t requested=call.word(0),length=call.word(1),prot=call.word(2);
   const int flags=int32_t(call.word(3)),fd=int32_t(call.word(4));
-  const uint64_t offset=call.wide(5);
+  const uint64_t offset=wide_offset?call.wide(5):call.word(5);
   std::lock_guard<std::mutex> mapping_lock(extra_mapping_mutex);
   constexpr uint32_t page=4096,map_fixed_noreplace=0x100000;
   constexpr uint32_t supported_map_flags=MAP_SHARED|MAP_PRIVATE|MAP_FIXED|MAP_ANONYMOUS|map_fixed_noreplace;
@@ -348,6 +349,9 @@ IMPORT(mmap64) {
   extra_mappings[address]={rounded,owned_fd,offset,flags,prot,file_bytes};
   call.result(address);
 }
+}
+IMPORT(mmap) { CALL; extra_mmap(call, false); }
+IMPORT(mmap64) { CALL; extra_mmap(call, true); }
 IMPORT(mount) {
   CALL;
 #ifdef __EMSCRIPTEN__
@@ -414,6 +418,7 @@ IMPORT(popen) {
   uint32_t h=extra_next_file++;
   if (h < 0x70000000) { pclose(f); errno=EMFILE; call.result(0); return; }
   extra_pipes.emplace(h,f); files.emplace(h,f); call.result(h);
+#endif
 }
 IMPORT(pclose) {
   CALL; uint32_t h=call.word(0); auto it=extra_pipes.find(h);

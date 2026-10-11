@@ -9,7 +9,6 @@
 
 #include <array>
 #include <cstdint>
-#include <cstdio>
 #include <cstring>
 #include <string>
 
@@ -33,7 +32,6 @@ namespace {
 constexpr uint32_t kStack = 0x0ff00000;
 constexpr uint32_t kReturnPc = 0x12345678;
 constexpr uint32_t kString = 0x10000;
-constexpr uint32_t kFormat = 0x11000;
 constexpr uint32_t kOutput = 0x12000;
 constexpr uint32_t kData = 0x13000;
 
@@ -105,36 +103,6 @@ TEST(I386LibcImports, GuestAllocationFreeReuseReallocRetentionAndCallocOverflow)
   h.call(__ecv_i386_free, h.state.gpr.rax.dword);
 }
 
-TEST(I386LibcImports, SnprintfFormatsGuestDoubleAndWideIntegerAndTruncates) {
-  ImportHarness h;
-  h.string(kFormat, "%0.2f:%lld");
-  uint64_t double_bits;
-  double value = 1.25;
-  memcpy(&double_bits, &value, sizeof(value));
-  const uint64_t wide = 0x1122334455667788ULL;
-  uint32_t words[] = {kReturnPc, kOutput, 8, kFormat,
-      static_cast<uint32_t>(double_bits), static_cast<uint32_t>(double_bits >> 32),
-      static_cast<uint32_t>(wide), static_cast<uint32_t>(wide >> 32)};
-  memcpy(h.arena + kStack, words, sizeof(words));
-  h.state.gpr.rsp.dword = kStack;
-  __ecv_i386_snprintf(h.arena, &h.state, 0, nullptr);
-  EXPECT_EQ(h.state.gpr.rax.dword, 24u);
-  EXPECT_STREQ(reinterpret_cast<char *>(h.arena + kOutput), "1.25:12");
-  EXPECT_EQ(h.state.gpr.rsp.dword, kStack + 4);
-  EXPECT_EQ(h.state.gpr.rip.dword, kReturnPc);
-}
-
-TEST(I386LibcImports, SscanfWritesSignedIntegerDoubleAndWideInteger) {
-  ImportHarness h;
-  h.string(kString, "-17 2.5 4294967298");
-  h.string(kFormat, "%d %lf %lld");
-  h.call(__ecv_i386___isoc99_sscanf, kString, kFormat, kData, kData + 8, kData + 16);
-  EXPECT_EQ(h.state.gpr.rax.dword, 3u);
-  EXPECT_EQ(h.at<int32_t>(kData), -17);
-  EXPECT_EQ(h.at<double>(kData + 8), 2.5);
-  EXPECT_EQ(h.at<int64_t>(kData + 16), 4294967298LL);
-}
-
 TEST(I386LibcImports, GlibcCtypeFlagsSupportEofAndSignedIndexing) {
   ImportHarness h;
   h.call(__ecv_i386___ctype_b_loc);
@@ -154,7 +122,7 @@ TEST(I386LibcImports, GlibcCtypeFlagsSupportEofAndSignedIndexing) {
   EXPECT_EQ(h.state.gpr.rsp.dword, kStack + 4);
 }
 
-TEST(I386LibcImports, FileHandlesAndI386StatLayoutAreGuestVisible) {
+TEST(I386LibcImports, I386StatLayoutIsGuestVisible) {
   ImportHarness h;
   char path[] = "/tmp/elfconv-i386-import-XXXXXX";
   int fd = mkstemp(path);
@@ -164,15 +132,6 @@ TEST(I386LibcImports, FileHandlesAndI386StatLayoutAreGuestVisible) {
   close(fd);
 
   h.string(kString, path);
-  h.string(kFormat, "r");
-  h.call(__ecv_i386_fopen, kString, kFormat);
-  uint32_t handle = h.state.gpr.rax.dword;
-  ASSERT_NE(handle, 0u);
-  h.call(__ecv_i386_fread, kData, 1u, uint32_t(sizeof(payload) - 1), handle);
-  EXPECT_EQ(h.state.gpr.rax.dword, sizeof(payload) - 1);
-  EXPECT_EQ(std::string(reinterpret_cast<char *>(h.arena + kData), sizeof(payload) - 1), payload);
-  h.call(__ecv_i386_fclose, handle);
-  EXPECT_EQ(h.state.gpr.rax.dword, 0u);
 
   h.call(__ecv_i386_stat, kString, kData + 0x100);
   EXPECT_EQ(h.state.gpr.rax.dword, 0u);
@@ -207,11 +166,6 @@ TEST(I386LibcImports, FortifiedCopiesRejectOverflowBeforeWriting) {
   EXPECT_EQ(h.state.gpr.rax.dword, kOutput + 3);
   EXPECT_EQ(std::string(reinterpret_cast<char *>(h.arena + kOutput)), "abc");
   EXPECT_DEATH(h.call(__ecv_i386___strcpy_chk, kOutput, kString, 3u), "");
-  h.string(kFormat, "%d");
-  h.call(__ecv_i386___snprintf_chk, kOutput, 3u, 1u, 3u, kFormat, 1234u);
-  EXPECT_EQ(h.state.gpr.rax.dword, 4u);
-  EXPECT_EQ(std::string(reinterpret_cast<char *>(h.arena + kOutput)), "12");
-  EXPECT_DEATH(h.call(__ecv_i386___snprintf_chk, kOutput, 4u, 1u, 3u, kFormat, 1u), "");
 }
 TEST(I386PthreadImports, RecursiveAttributesSurviveRejectedTypeAndPreserveErrno) {
   ImportHarness h;

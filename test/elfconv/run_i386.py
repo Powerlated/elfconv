@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compile one ELF, execute it natively and through elfconv, compare stdout."""
+"""Compile one ELF, execute it natively and through elfconv, compare output."""
 import argparse
 import difflib
 from pathlib import Path
@@ -32,30 +32,43 @@ def main():
                         default='global-dynamic')
     parser.add_argument('--source', type=Path,
                         help='Run a standalone instruction regression instead of an upstream profile')
+    parser.add_argument('--stdin-file', type=Path,
+                        help='Feed this file to both native and lifted executions')
+    parser.add_argument('--runtime-library-path', type=Path, action='append', default=[],
+                        help='Add a directory to native/lifted LD_LIBRARY_PATH (repeatable)')
     parser.add_argument('--extra-source', type=Path, action='append', default=[],
                         help='Add a source file to a standalone fixture')
     parser.add_argument('--compile-flag', action='append', default=[],
                         help='Add one compiler flag to a standalone fixture (repeatable)')
     parser.add_argument('--link-flag', action='append', default=[],
                         help='Add one linker argument after standalone fixture sources (repeatable)')
-    parser.add_argument('--runtime-library-path', type=Path, action='append', default=[],
-                        help='Add a directory to native/lifted LD_LIBRARY_PATH (repeatable)')
+    parser.add_argument('--pthreads', action='store_true',
+                        help='Link with pthread support and enable Emscripten pthreads')
+    parser.add_argument('--browser', action='store_true',
+                        help='Run lifted output in Chromium using the browser test harness')
+    parser.add_argument('--compare-stderr', action='store_true',
+                        help='Require stderr to match between native and lifted runs')
     args = parser.parse_args()
+    if args.browser and (not args.pthreads or not args.source):
+        parser.error('--browser requires --pthreads and --source')
     if args.startup_linked and not args.dynamic:
         parser.error('--startup-linked requires --dynamic')
     if args.tls and not args.dynamic:
         parser.error('--tls requires --dynamic')
-    if (args.extra_source or args.compile_flag or args.link_flag or args.runtime_library_path) and not args.source:
-        parser.error('--extra-source/--compile-flag/--link-flag/--runtime-library-path require --source')
+    if (args.extra_source or args.compile_flag or args.link_flag or args.runtime_library_path
+            or args.stdin_file or args.compare_stderr) and not args.source:
+        parser.error('--stdin-file/--extra-source/--compile-flag/--link-flag/'
+                     '--runtime-library-path/--compare-stderr require --source')
     root = Path(__file__).resolve().parents[2]
     source = root / 'test/elfconv' / ('i386' if args.source or args.dynamic or args.rtti else 'qemu-i386')
     output = args.output_dir.resolve()
     output.mkdir(parents=True, exist_ok=True)
     binary = output / (args.source.stem if args.source else 'qemu-i386-' + args.profile)
 
-    def run(stage, command, timeout):
+    def run(stage, command, timeout, env=None):
+        stdin = args.stdin_file.open('rb') if args.stdin_file and stage in ('native', 'lifted') else None
         try:
-            environment = None
+            environment = env
             if stage in ('native', 'lifted') and args.runtime_library_path:
                 environment = os.environ.copy()
                 paths = [str(path.resolve()) for path in args.runtime_library_path]
@@ -65,8 +78,8 @@ def main():
                 environment['LD_LIBRARY_PATH'] = os.pathsep.join(paths)
             result = subprocess.run(command, capture_output=True, text=True,
                                     errors='replace', timeout=timeout,
-                                    cwd=output if stage in ('native', 'lifted') or args.dynamic or args.rtti else None,
-                                    env=environment)
+                                    cwd=output if stage in ('native', 'lifted', 'browser') or args.dynamic or args.rtti else None,
+                                    env=environment, stdin=stdin)
         except subprocess.TimeoutExpired as error:
             for stream in ('stdout', 'stderr'):
                 data = getattr(error, stream) or b''
@@ -75,6 +88,9 @@ def main():
                 (output / (stage + '.' + stream)).write_text(data)
             print(f'{stage}: timed out after {timeout}s; logs: {output}')
             return None
+        finally:
+            if stdin is not None:
+                stdin.close()
         for stream in ('stdout', 'stderr'):
             (output / (stage + '.' + stream)).write_text(getattr(result, stream))
         print(f'{stage}: exit {result.returncode}')
@@ -122,8 +138,8 @@ def main():
             '-Wl,-soname,libplugin.so', '-o', str(plugin)], 120)
         if built is None or built.returncode:
             return 1
-        libraries = [provider, plugin]
     command = [args.cxx if args.rtti else args.cc, '-m32', '-O2', *linkage_flags,
+               *(['-pthread'] if args.pthreads else []),
                *args.compile_flag, '-fno-stack-protector', '-ffunction-sections', '-fdata-sections',
                '-Wl,--gc-sections']
     if args.source:
@@ -167,6 +183,7 @@ def main():
         '--lifter', args.lifter, '--emcc', args.emcc,
         *(['--entry-symbol', 'main'] if args.shared else []),
         *[argument for library in libraries for argument in ('--shared-library', str(library))],
+        *(['--pthreads'] if args.pthreads else []),
         '--legacy-gl', '0'], 600)
     if converted is None or converted.returncode:
         print(f'Conversion failed; logs: {output}/convert.stdout and convert.stderr')
@@ -179,12 +196,42 @@ def main():
                        'Unsupported instruction', 'kLiftedMismatchedISEL', 'Instruction decode of'))]
     if unsupported:
         print(f'Unsupported instruction sites: {len(unsupported)} (see conversion logs)')
-    lifted = run('lifted', [args.node, str(output / 'wasm' / (binary.name + '.js')),
-                          *(['guest-argument'] if args.shared else [])], 120)
-    if lifted is None:
-        return 1
+    if args.browser:
+        browser_dir = root / 'test/browser'
+        playwright = browser_dir / 'node_modules/@playwright/test/cli.js'
+        playwright_package = browser_dir / 'node_modules/@playwright/test'
+        if not playwright.is_file() or not playwright_package.is_dir():
+            print(f'Missing Playwright dependency in {browser_dir}/node_modules')
+            return 1
+        environment = os.environ.copy()
+        environment.update({
+            'ELFCONV_PLAYWRIGHT_PACKAGE': str(playwright_package),
+            'ELFCONV_PTHREAD_NODE': str(Path(args.node).resolve()),
+            'ELFCONV_PTHREAD_SERVE_DIR': str(output / 'wasm'),
+            'ELFCONV_PTHREAD_TEST_HTML': str(output / 'wasm' / (binary.name + '.html')),
+            'ELFCONV_PTHREAD_NATIVE_STDOUT': str(output / 'native.stdout'),
+            'ELFCONV_PTHREAD_NATIVE_STDERR': str(output / 'native.stderr'),
+            'ELFCONV_PTHREAD_OUTPUT_DIR': str(output),
+        })
+        browser_tests = args.source.resolve().parent
+        browser = run('browser', [args.node, str(playwright), 'test', '--config',
+            str(browser_tests / 'playwright.config.js'),
+            str(browser_tests / 'pthread.spec.js')], 240, env=environment)
+        if browser is None or browser.returncode:
+            return 1
+        lifted_stdout = (output / 'lifted.stdout').read_text(errors='replace')
+        lifted_stderr = (output / 'lifted.stderr').read_text(errors='replace')
+        lifted_returncode = 0
+    else:
+        lifted = run('lifted', [args.node, str(output / 'wasm' / (binary.name + '.js')),
+                              *(['guest-argument'] if args.shared else [])], 120)
+        if lifted is None:
+            return 1
+        lifted_stdout = lifted.stdout
+        lifted_stderr = lifted.stderr
+        lifted_returncode = lifted.returncode
     expected = native.stdout.splitlines(keepends=True)
-    actual = lifted.stdout.splitlines(keepends=True)
+    actual = lifted_stdout.splitlines(keepends=True)
     differences = list(difflib.unified_diff(expected, actual,
                        fromfile='native', tofile='lifted'))
     (output / 'output.diff').write_text(''.join(differences))
@@ -194,12 +241,12 @@ def main():
     if differences:
         print(''.join(differences[:80]), end='')
     print(f'Complete stdout, stderr, and diff: {output}')
-    if args.pie and lifted.stderr != native.stderr:
-        print('PIE stderr differs from native reference')
+    if (args.pie or args.browser or args.compare_stderr) and lifted_stderr != native.stderr:
+        print('Lifted stderr differs from native reference')
         return 1
     # Unsupported instructions cannot count as a successful conformance run,
     # even if the lifter emits a no-op and the output happens to match.
-    return int(bool(lifted.returncode or unsupported or differences))
+    return int(bool(lifted_returncode or unsupported or differences))
 
 
 if __name__ == '__main__':

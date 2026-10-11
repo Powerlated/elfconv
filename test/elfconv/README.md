@@ -85,37 +85,38 @@ sdl2_surface_pixel_prerequisite` (requires Git/network access and GCC multilib).
 Build this target before running the SDL CTest; CTest does not build it.
 
 Configure the normal lane with `-DELFCONV_I386_TESTS=ON` and run the standard
-build/CTest commands above. CTest names are `i386_glibc_sscanf`,
-`i386_glibc_sprintf`, `i386_glibc_mbrtowc`, `i386_glibc_setjmp`,
-`i386_glibc_preadvwritev`, and `i386_sdl2_surface_pixels`. Locale-sensitive
-libc tests can use isolated locales: run
-`localedef --no-archive -i de_DE -f UTF-8 <dir>/de_DE.UTF-8` and
-`localedef --no-archive -i en_US -f ISO-8859-1 <dir>/en_US.ISO-8859-1`, then
-configure `-DELFCONV_GLIBC_LOCALE_PATH=<dir>`. mbrtowc requires C.UTF-8 or
-C.utf8.
+build/CTest commands above. The stdio suite uses test names
+`i386_glibc_stdio_*` and covers the pinned upstream `stdio-common` tests plus
+generated printf/scanf cases; run it with
+`ctest --test-dir <build> -R '^i386_glibc_stdio_' --output-on-failure`.
+Configure `-DELFCONV_GLIBC_LOCALE_PATH=<dir>` for libc locales and
+`-DELFCONV_GLIBC_STDIO_LOCALE_PATH=<dir>` for stdio locales. Generate isolated
+locales with `localedef --no-archive -i de_DE -f UTF-8 <dir>/de_DE.UTF-8` and
+`localedef --no-archive -i en_US -f ISO-8859-1 <dir>/en_US.ISO-8859-1`.
+The mbrtowc test requires C.UTF-8 or C.utf8.
 
 The pthread tests are opt-in via `-DELFCONV_GLIBC_PTHREAD_BROWSER_TESTS=ON`.
 They require Python 3.11, Playwright Chromium (`npm install --prefix test/browser`
 and `npx --prefix test/browser playwright install chromium`), Emscripten
 pthread/JSPI support, and a cross-origin-isolated browser with SharedArrayBuffer.
+The shared `test/elfconv/run_i386.py` handles compile/native/convert orchestration;
 Node is only the Playwright driver, not a threaded guest oracle. Run those tests
 with `ctest --test-dir <build> -R '^i386_glibc_pthread_' --output-on-failure`.
 
 Native i386 references passed for the libc, loader, and filesystem slices; SDL's
-native reference exited 0 with 14 cases passing and 3 upstream-disabled. Native
-results are not lifted coverage. Glibc lifted attempts failed compiling the
-existing import runtime before guest execution (locale pointer/state errors and
-an unterminated POSIX conditional). SDL conversion likewise failed at runtime
-compilation; no lifted result passed. Do not treat these as skips. The pthread
-tests have no browser execution evidence here. Existing coverage maps:
-`test/vendored/glibc/libc/COVERAGE.txt` and
-`test/vendored/glibc/filesystem/COVERAGE`; SDL scope and upstream-disabled cases
-are retained in its test source and `test/vendored/sdl2/README`. License notices
-remain with each source slice.
+native reference exited 0 with 14 cases passing and 3 upstream-disabled. Stdio
+Wasm runs passed `bug1`, `bug3`, `bug4`, `bug6`, `bug-vfprintf-nargs`, and
+`tst-fgets`. `bug5` fails because its `system("cmp")` call returns `ENOSYS` in
+Emscripten. The full 476-test stdio run was interrupted before completion; no
+suite-wide result is claimed. Coverage maps: `test/vendored/glibc/libc/COVERAGE.txt`
+and `test/vendored/glibc/filesystem/COVERAGE`; SDL scope and upstream-disabled
+cases are retained in its test source and `test/vendored/sdl2/README`. License
+notices remain with each source slice.
 
 | Slice / upstream pin | Tests and required behavior | Adaptation, execution evidence, and gaps |
 |---|---|---|
-| glibc libc `b72fcafcc9d307790bd24ebba65f52994ca5598e` | `tst-sscanf.c` conversions/return counts/malformed input; `tst-sprintf.c` formatting and multibyte precision; `tst-mbrtowc.c` restartable UTF-8 state and invalid terminators. | Replaces test skeleton with `main`; assertions retained. Native passed; lifted blocked by runtime compilation. Isolated locales via `ELFCONV_GLIBC_LOCALE_PATH`; C23 scanf binary-prefix behavior and time APIs uncovered. |
+| glibc libc `b72fcafcc9d307790bd24ebba65f52994ca5598e` | `tst-mbrtowc.c`: restartable UTF-8 state, incomplete sequences, output preservation, NUL processing, and invalid terminators. | Native passed; lifted blocked by runtime compilation. Requires C.UTF-8 or C.utf8. |
+| glibc stdio-common `04e750e75b73957cf1c791535a3f4319534a52fc` | Complete vendored `stdio-common/` sources, support, and test data. 476 CTest entries cover the upstream `tests` list, generated printf/scanf matrices, and directly runnable helper tests. | Each test uses native-versus-lifted `run_i386.py` and compares stdout/stderr. Container/internal categories are unregistered; `tst-fwrite-bz29459` needs an upstream pipe wrapper. Six selected Wasm tests passed; `bug5` fails because `system()` is unavailable, and the full run was interrupted. |
 | glibc loader `ef321e23c20eebc6d6fb4044425c00e6df27b05f` | `tst-setjmp.c`: setjmp/longjmp continuation and repeated nonzero return values. | Standalone entry adaptation; native passed, lifted blocked. Signal masks, register/FPU preservation, exception metadata and unwind/backtraces uncovered. |
 | glibc filesystem `3d1aed874918c466a4477af1da35983ab036690e` (2.40 peeled commit) | `preadvwritev.c`: explicit-offset vectored I/O lengths and byte comparisons. | Temporary-file harness adaptation; native passed, lifted blocked. Identical extents cannot distinguish duplicated/swapped data; rename/unlink, descriptor sharing, mmap aliasing/protection uncovered. |
 | glibc pthread `04e750e75b73957cf1c791535a3f4319534a52fc` | `tst-tsd3.c`: two alternating key destructors, seven destructor calls, six reassignments, worker join and main-thread keys unset afterward. `tst-tsd4.c`: destructor reassigns its key; count must reach `PTHREAD_DESTRUCTOR_ITERATIONS`, and the main-thread key stays unset. | Assertions retained; test-skeleton replaced with `main`. Native passed; lifted conversion blocked by runtime compilation. Browser lane unobserved. Simultaneous key isolation, detach, attributes, ELF TLS, condition clocks/timed waits, cancellation/cleanup and destructor upper bound/order remain uncovered. |

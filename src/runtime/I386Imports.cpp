@@ -27,6 +27,7 @@
 #include <wchar.h>
 #include <wctype.h>
 #include <unistd.h>
+#include <getopt.h>
 #include <string>
 #include <vector>
 #include <map>
@@ -476,6 +477,36 @@ FILE *stream(uint32_t handle) {
   if (it != files.end()) return it->second;
   elfconv_runtime_error("Unsupported guest FILE handle.\n");
 }
+struct GuestMemStream {
+  char *host_buffer = nullptr;
+  size_t size = 0;
+  uint32_t buffer_output = 0, size_output = 0, guest_buffer = 0;
+};
+std::map<uint32_t, GuestMemStream> memstreams;
+int sync_memstream(uint8_t *arena, uint32_t handle) {
+  auto it = memstreams.find(handle);
+  if (it == memstreams.end()) return 0;
+  GuestMemStream &mem = it->second;
+  if (mem.size >= UINT32_MAX) { errno = EOVERFLOW; return -1; }
+  if (mem.size && !mem.host_buffer) { errno = EIO; return -1; }
+  const uint32_t bytes = uint32_t(mem.size + 1);
+  const uint32_t next = allocate(bytes);
+  if (!next) return -1;
+  auto *output = static_cast<char *>(guest(arena, next, bytes));
+  if (mem.size) memcpy(output, mem.host_buffer, mem.size);
+  output[mem.size] = 0;
+  const uint32_t size = uint32_t(mem.size);
+  memcpy(guest(arena, mem.buffer_output, 4), &next, 4);
+  memcpy(guest(arena, mem.size_output, 4), &size, 4);
+  if (mem.guest_buffer) release(mem.guest_buffer);
+  mem.guest_buffer = next;
+  return 0;
+}
+int sync_memstreams(uint8_t *arena) {
+  for (const auto &entry : memstreams)
+    if (sync_memstream(arena, entry.first) < 0) return -1;
+  return 0;
+}
 
 struct Arguments {
   uint8_t *arena;
@@ -522,37 +553,87 @@ std::basic_string<Char> format_impl(uint8_t *arena, const Char *input, Arguments
   auto ascii = [](Char value, const char *set) {
     return value > 0 && value < 128 && strchr(set, int(value));
   };
+  auto take_position = [&](const Char *&cursor, uint64_t &position) {
+    const Char *digits = cursor;
+    uint64_t value = 0;
+    bool overflow = false;
+    while (*cursor >= '0' && *cursor <= '9') {
+      const uint32_t digit = uint32_t(*cursor++ - '0');
+      if (value > (UINT64_MAX - digit) / 10) overflow = true;
+      else value = value * 10 + digit;
+    }
+    if (cursor == digits || *cursor != '$') { cursor = digits; return false; }
+    ++cursor;
+    position = overflow ? UINT64_MAX : value;
+    return true;
+  };
+  const uint32_t argument_base = args.address;
+  bool invalid_position = false;
+  auto argument_at = [&](uint64_t position) {
+    if (!position || position - 1 > (UINT32_MAX - argument_base) / 4) {
+      invalid_position = true;
+      errno = EOVERFLOW;
+      return Arguments{arena, 0};
+    }
+    const uint64_t address = uint64_t(argument_base) + (position - 1) * 4;
+    if (address > MEMORY_ARENA_SIZE - 4) {
+      invalid_position = true;
+      errno = EOVERFLOW;
+      return Arguments{arena, 0};
+    }
+    return Arguments{arena, uint32_t(address)};
+  };
   for (const Char *p = input; *p;) {
     if (*p != '%') { out += *p++; continue; }
     ++p;
     if (*p == '%') { out += *p++; continue; }
     std::basic_string<Char> spec(1, '%');
+    uint64_t value_position;
+    Arguments positional_value{arena, argument_base};
+    Arguments *value_arguments = &args;
+    if (take_position(p, value_position)) {
+      positional_value = argument_at(value_position);
+      if (invalid_position) { out.clear(); return out; }
+      value_arguments = &positional_value;
+    }
     while (ascii(*p, "-+ #0")) spec += *p++;
     if (*p == '*') {
-      int32_t width = args.word();
+      ++p;
+      uint64_t width_position;
+      int32_t width;
+      if (take_position(p, width_position)) {
+        Arguments positional_width = argument_at(width_position);
+        if (invalid_position) { out.clear(); return out; }
+        width = int32_t(positional_width.word());
+      } else width = int32_t(args.word());
       if (width == INT32_MIN) elfconv_runtime_error("Guest printf width overflow.\n");
       if (width < 0) { spec += '-'; width = -width; }
       const auto digits = std::to_string(width);
       spec.append(digits.begin(), digits.end());
-      ++p;
     } else while (*p >= '0' && *p <= '9') spec += *p++;
     if (*p == '.') {
       ++p;
       if (*p == '*') {
-        int32_t precision = args.word();
+        ++p;
+        uint64_t precision_position;
+        int32_t precision;
+        if (take_position(p, precision_position)) {
+          Arguments positional_precision = argument_at(precision_position);
+          if (invalid_position) { out.clear(); return out; }
+          precision = int32_t(positional_precision.word());
+        } else precision = int32_t(args.word());
         if (precision >= 0) {
           spec += '.';
           const auto digits = std::to_string(precision);
           spec.append(digits.begin(), digits.end());
         }
-        ++p;
       } else {
         spec += '.';
         while (*p >= '0' && *p <= '9') spec += *p++;
       }
     }
     char length = 0;
-    if (ascii(*p, "hljztL")) {
+    if (ascii(*p, "hljztLZ")) {
       length = char(*p++);
       if (*p == length && (length == 'h' || length == 'l')) {
         ++p;
@@ -563,7 +644,7 @@ std::basic_string<Char> format_impl(uint8_t *arena, const Char *input, Arguments
     if (!conversion) elfconv_runtime_error("Incomplete guest printf format.\n");
     if (strchr("diuoxX", conversion)) {
       bool wide = length == 'q' || length == 'j';
-      uint64_t value = wide ? args.wide() : args.word();
+      uint64_t value = wide ? value_arguments->wide() : value_arguments->word();
       if (length == 'h') value = uint16_t(value);
       if (length == 'H') value = uint8_t(value);
       spec += 'l'; spec += 'l'; spec += conversion;
@@ -577,17 +658,17 @@ std::basic_string<Char> format_impl(uint8_t *arena, const Char *input, Arguments
       double value;
       if (length == 'L') {
         float80_t extended;
-        memcpy(extended.data, guest(arena, args.address, 12), 10);
-        args.address += 12;
+        memcpy(extended.data, guest(arena, value_arguments->address, 12), 10);
+        value_arguments->address += 12;
         value = double(extended);
       } else {
-        const uint64_t bits = args.wide();
+        const uint64_t bits = value_arguments->wide();
         memcpy(&value, &bits, 8);
       }
       spec += conversion;
       append_format(out, spec, value);
     } else if (conversion == 's' && (length == 0 || length == 'l')) {
-      const uint32_t address = args.word();
+      const uint32_t address = value_arguments->word();
       if (length == 'l') {
         spec += 'l'; spec += 's';
         append_format(out, spec, address ? wide_text(arena, address) : L"(null)");
@@ -598,12 +679,12 @@ std::basic_string<Char> format_impl(uint8_t *arena, const Char *input, Arguments
     } else if (conversion == 'c' && (length == 0 || length == 'l')) {
       if (length == 'l') spec += 'l';
       spec += 'c';
-      append_format(out, spec, args.word());
+      append_format(out, spec, value_arguments->word());
     } else if (conversion == 'p' && !length) {
       spec += 'p';
-      append_format(out, spec, reinterpret_cast<void *>(uintptr_t(args.word())));
+      append_format(out, spec, reinterpret_cast<void *>(uintptr_t(value_arguments->word())));
     } else if (conversion == 'n') {
-      const uint32_t address = args.word();
+      const uint32_t address = value_arguments->word();
       const uint64_t count = out.size();
       const size_t size = length == 'q' || length == 'j' ? 8 : length == 'h' ? 2 : length == 'H' ? 1 : 4;
       memcpy(guest(arena, address, size), &count, size);
@@ -957,6 +1038,34 @@ IMPORT(setenv) {
   CALL;
   call.result(setenv(text(arena, call.word(0)), text(arena, call.word(1)), int32_t(call.word(2))));
 }
+IMPORT(unsetenv) { CALL; call.result(unsetenv(text(arena, call.word(0)))); }
+IMPORT(getopt) {
+  CALL;
+  const int argc = int32_t(call.word(0));
+  const uint32_t argv_address = call.word(1);
+  if (argc < 0 || uint64_t(argc + 1) * 4 > MEMORY_ARENA_SIZE) {
+    errno = EINVAL;
+    call.result(-1);
+    return;
+  }
+  auto *guest_argv = static_cast<uint8_t *>(guest(arena, argv_address, uint64_t(argc + 1) * 4));
+  std::vector<char *> host_argv;
+  host_argv.reserve(size_t(argc) + 1);
+  for (int i = 0; i < argc; ++i) {
+    uint32_t address;
+    memcpy(&address, guest_argv + size_t(i) * 4, 4);
+    host_argv.push_back(address ? const_cast<char *>(text(arena, address)) : nullptr);
+  }
+  host_argv.push_back(nullptr);
+  static RuntimeManager *active_runtime = nullptr;
+  static uint32_t active_argv = 0;
+  if (active_runtime != runtime || active_argv != argv_address) {
+    optind = 1;
+    active_runtime = runtime;
+    active_argv = argv_address;
+  }
+  call.result(::getopt(argc, host_argv.data(), text(arena, call.word(2))));
+}
 namespace {
 static_assert(sizeof(wchar_t) == 4, "Linux i386 wide-character ABI mismatch");
 wchar_t *wide_buffer(uint8_t *arena, uint32_t address, uint32_t count) {
@@ -1254,10 +1363,17 @@ IMPORT(freopen) {
 }
 IMPORT(fclose) {
   CALL;
-  uint32_t handle = call.word(0);
+  const uint32_t handle = call.word(0);
   FILE *file = stream(handle);
-  call.result(fclose(file));
+  int result = fclose(file);
+  auto mem = memstreams.find(handle);
+  if (mem != memstreams.end()) {
+    if (sync_memstream(arena, handle) < 0) result = EOF;
+    free(mem->second.host_buffer);
+    memstreams.erase(mem);
+  }
   files.erase(handle);
+  call.result(result);
 }
 IMPORT(fread) {
   CALL;
@@ -1279,12 +1395,44 @@ IMPORT(lseek64) {
 }
 IMPORT(feof) { CALL; call.result(feof(stream(call.word(0)))); }
 IMPORT(rewind) { CALL; rewind(stream(call.word(0))); }
-IMPORT(fflush) { CALL; call.result(fflush(call.word(0) ? stream(call.word(0)) : nullptr)); }
+IMPORT(fflush) {
+  CALL;
+  const uint32_t handle = call.word(0);
+  int result = fflush(handle ? stream(handle) : nullptr);
+  if (result == 0)
+    result = handle ? sync_memstream(arena, handle) : sync_memstreams(arena);
+  call.result(result);
+}
 IMPORT(fgetc) { CALL; call.result(fgetc(stream(call.word(0)))); }
 IMPORT(getc) { CALL; call.result(getc(stream(call.word(0)))); }
 IMPORT(ungetc) { CALL; call.result(ungetc(int32_t(call.word(0)), stream(call.word(1)))); }
 IMPORT(ferror) { CALL; call.result(ferror(stream(call.word(0)))); }
 IMPORT(fileno) { CALL; call.result(fileno(stream(call.word(0)))); }
+IMPORT(fmemopen) {
+  CALL;
+  const uint32_t buffer_address = call.word(0), size = call.word(1);
+  FILE *file = fmemopen(buffer_address ? guest(arena, buffer_address, size) : nullptr,
+                        size, text(arena, call.word(2)));
+  if (!file) { call.result(0); return; }
+  const uint32_t handle = next_file++;
+  files.emplace(handle, file);
+  call.result(handle);
+}
+IMPORT(open_memstream) {
+  CALL;
+  const uint32_t handle = next_file++;
+  auto inserted = memstreams.emplace(handle, GuestMemStream{});
+  GuestMemStream &mem = inserted.first->second;
+  mem.buffer_output = call.word(0);
+  mem.size_output = call.word(1);
+  memcpy(guest(arena, mem.buffer_output, 4), &mem.guest_buffer, 4);
+  const uint32_t size = 0;
+  memcpy(guest(arena, mem.size_output, 4), &size, 4);
+  FILE *file = open_memstream(&mem.host_buffer, &mem.size);
+  if (!file) { memstreams.erase(inserted.first); call.result(0); return; }
+  files.emplace(handle, file);
+  call.result(handle);
+}
 IMPORT(fgets) {
   CALL;
   const int size = int32_t(call.word(1));
@@ -1292,7 +1440,16 @@ IMPORT(fgets) {
   auto *buffer = static_cast<char *>(guest(arena, call.word(0), size));
   call.result(fgets(buffer, size, stream(call.word(2))) ? call.word(0) : 0);
 }
+IMPORT(fgets_unlocked) {
+  CALL;
+  const uint32_t destination = call.word(0);
+  const int size = int32_t(call.word(1));
+  if (size <= 0) { call.result(0); return; }
+  auto *buffer = static_cast<char *>(guest(arena, destination, size));
+  call.result(fgets(buffer, size, stream(call.word(2))) ? destination : 0);
+}
 IMPORT(fputs) { CALL; call.result(fputs(text(arena, call.word(0)), stream(call.word(1)))); }
+IMPORT(perror) { CALL; perror(call.word(0) ? text(arena, call.word(0)) : nullptr); }
 IMPORT(fdopen) {
   CALL;
   FILE *file = fdopen(int32_t(call.word(0)), text(arena, call.word(1)));
@@ -1417,6 +1574,20 @@ IMPORT(vsnprintf) { CALL; buffer_format(call, true, true); }
 IMPORT(__snprintf_chk) { CALL; buffer_format(call, true, false, true); }
 IMPORT(__sprintf_chk) { CALL; buffer_format(call, false, false, true); }
 IMPORT(__vsnprintf_chk) { CALL; buffer_format(call, true, true, true); }
+IMPORT(vasprintf) {
+  CALL;
+  const uint32_t output = call.word(0);
+  const uint32_t null_pointer = 0;
+  memcpy(guest(arena, output, 4), &null_pointer, 4);
+  auto result = format(arena, text(arena, call.word(1)), {arena, call.word(2)});
+  const uint32_t address = allocate(uint32_t(result.size() + 1));
+  if (!address) { call.result(-1); return; }
+  auto *buffer = static_cast<char *>(guest(arena, address, result.size() + 1));
+  memcpy(buffer, result.data(), result.size());
+  buffer[result.size()] = 0;
+  memcpy(guest(arena, output, 4), &address, 4);
+  call.result(uint32_t(result.size()));
+}
 IMPORT(mkdir) { CALL; call.result(mkdir(text(arena, call.word(0)), call.word(1))); }
 IMPORT(open) {
   CALL;
@@ -1444,6 +1615,7 @@ IMPORT(chown) { CALL; call.result(chown(text(arena, call.word(0)), call.word(1),
 IMPORT(lchown) { CALL; call.result(lchown(text(arena, call.word(0)), call.word(1), call.word(2))); }
 IMPORT(chdir) { CALL; call.result(chdir(text(arena, call.word(0)))); }
 IMPORT(rename) { CALL; call.result(rename(text(arena, call.word(0)), text(arena, call.word(1)))); }
+IMPORT(remove) { CALL; call.result(remove(text(arena, call.word(0)))); }
 IMPORT(unlink) { CALL; call.result(unlink(text(arena, call.word(0)))); }
 IMPORT(rmdir) { CALL; call.result(rmdir(text(arena, call.word(0)))); }
 IMPORT(link) { CALL; call.result(link(text(arena, call.word(0)), text(arena, call.word(1)))); }

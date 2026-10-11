@@ -153,6 +153,21 @@ IMPORT(__xpg_strerror_r) {
   call.result(length < size ? 0 : ERANGE);
 }
 IMPORT(abort) { abort(); }
+IMPORT(__isoc23_scanf) {
+  CALL;
+  call.result(scan_guest_file(arena, stdin, text(arena, call.word(0)),
+                             {arena, call.stack + 8}));
+}
+IMPORT(__isoc23_fscanf) {
+  CALL;
+  call.result(scan_guest_file(arena, stream(call.word(0)), text(arena, call.word(1)),
+                             {arena, call.stack + 12}));
+}
+IMPORT(__isoc23_sscanf) {
+  CALL;
+  call.result(scan_guest_string(arena, text(arena, call.word(0)), text(arena, call.word(1)),
+                               {arena, call.stack + 12}));
+}
 IMPORT(fscanf) {
   CALL;
   call.result(scan_guest_file(arena, stream(call.word(0)), text(arena, call.word(1)),

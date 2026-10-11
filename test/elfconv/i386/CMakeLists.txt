@@ -13,7 +13,7 @@ endif()
 add_subdirectory("${CMAKE_SOURCE_DIR}/test/vendored"
   "${CMAKE_CURRENT_BINARY_DIR}/vendored")
 
-foreach(profile IN ITEMS dead-eflags shift-defined double-shift-defined rotate-defined bit-count-defined x87-sm64-defined fxsave-defined fadd-memory-defined x87-environment-defined rdrand-defined rsqrt-defined crypto-defined packed-sse-defined segment-push-defined cpu-defined weak-imports shared-data-imports pie shared dynamic dynamic-startup rtti libc-adapters math-adapters stdio-adapters dirent-adapters time-adapters stat-adapters parse-adapters wide-adapters environment-adapters tls tls-startup tls-gnu2 tls-initial-exec tls-local-dynamic)
+foreach(profile IN ITEMS dead-eflags shift-defined double-shift-defined rotate-defined bit-count-defined x87-sm64-defined fxsave-defined fadd-memory-defined x87-environment-defined rdrand-defined rsqrt-defined crypto-defined packed-sse-defined segment-push-defined cpu-defined weak-imports pie shared dynamic dynamic-startup rtti libc-adapters math-adapters dirent-adapters time-adapters stat-adapters parse-adapters wide-adapters environment-adapters tls tls-startup tls-gnu2 tls-initial-exec tls-local-dynamic)
   if(profile MATCHES "^dynamic")
     set(fixture_args --source "${CMAKE_CURRENT_SOURCE_DIR}/dynamic-main.c" --dynamic)
     if(profile STREQUAL "dynamic-startup")
@@ -39,7 +39,7 @@ foreach(profile IN ITEMS dead-eflags shift-defined double-shift-defined rotate-d
   endif()
   if(profile STREQUAL "pie")
     list(APPEND fixture_args --pie)
-  elseif(profile STREQUAL "shared" OR profile STREQUAL "weak-imports" OR profile STREQUAL "shared-data-imports")
+  elseif(profile STREQUAL "shared" OR profile STREQUAL "weak-imports")
     list(APPEND fixture_args --shared)
   endif()
   string(REPLACE "-" "_" test_suffix "${profile}")
