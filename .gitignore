@@ -56,6 +56,9 @@ gtest_build/*
 build*/
 debugs/generated
 
+# Local binary-analysis tools and downloaded distributions.
+.tools/
+
 tools/build/*
 tools/dist/*
 tools/mcsema/*
