@@ -10,6 +10,9 @@
 - Delegate behavior slices, not symbol lists or single files: implementation, callers, build integration, and regression fixtures.
 - Establish shared ABI/helper contracts before dispatch: exact signatures, layouts, ownership, lifecycle, and existing helper locations.
 - Permit shared-file changes through explicit section ownership or isolated worktrees; main owns cross-slice integration.
+- Prefer one branch/worktree per cross-file slice; isolate generated files and build outputs too.
+- Commit shared contracts before parallel work. Worktrees prevent edit collisions, not ABI or interface dependencies.
+- Agents deliver coherent implementation/caller/build/fixture patches; main reviews and merges in dependency order, then verifies end-to-end.
 - Finish shared prerequisites first; batch independent slices. Verify completed waves and feed concrete failures into the next wave.
 - Require every assigned symbol accounted for, evidence-backed layouts, and explicit unsupported semantics. Undefined helpers, stubs, and error-only placeholders are not completion.
 - Dependency owners deliver pinned acquisition, reproducible builds, loader integration, and real behavior fixtures—not research or commands alone.
