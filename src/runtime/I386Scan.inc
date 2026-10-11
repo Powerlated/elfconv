@@ -19,8 +19,12 @@ struct GuestScanInput {
         result = suppressed ? sscanf(text + position, spec.c_str(), &consumed)
                             : sscanf(text + position, spec.c_str(), output, &consumed);
     } else {
-      result = suppressed ? swscanf(text + position, spec.c_str(), &consumed)
-                          : swscanf(text + position, spec.c_str(), output, &consumed);
+      if (file)
+        result = suppressed ? fwscanf(file, spec.c_str(), &consumed)
+                            : fwscanf(file, spec.c_str(), output, &consumed);
+      else
+        result = suppressed ? swscanf(text + position, spec.c_str(), &consumed)
+                            : swscanf(text + position, spec.c_str(), output, &consumed);
     }
     if (consumed >= 0) position += size_t(consumed);
     return result;
@@ -155,6 +159,10 @@ int scan_guest_string(uint8_t *arena, const char *input, const char *fmt, Argume
 }
 int scan_guest_wide_string(uint8_t *arena, const wchar_t *input, const wchar_t *fmt, Arguments arguments) {
   GuestScanInput<wchar_t> source{input};
+  return scan_guest_input(arena, source, fmt, arguments);
+}
+int scan_guest_wide_file(uint8_t *arena, FILE *file, const wchar_t *fmt, Arguments arguments) {
+  GuestScanInput<wchar_t> source{nullptr, file};
   return scan_guest_input(arena, source, fmt, arguments);
 }
 int scan_guest_file(uint8_t *arena, FILE *file, const char *fmt, Arguments arguments) {

@@ -219,6 +219,34 @@ IMPORT(getrusage) {
   }
   call.result(r);
 }
+IMPORT(getrlimit) {
+  CALL;
+  const uint32_t address = call.word(1);
+  if (!address) { errno = EFAULT; call.result(-1); return; }
+  struct rlimit limits;
+  const int result = ::getrlimit(int32_t(call.word(0)), &limits);
+  if (result == 0) {
+    const auto guest_limit = [](rlim_t value) {
+      return value == RLIM_INFINITY || value > UINT32_MAX
+          ? UINT32_MAX : uint32_t(value);
+    };
+    uint32_t values[2] = {guest_limit(limits.rlim_cur), guest_limit(limits.rlim_max)};
+    memcpy(guest(arena, address, sizeof(values)), values, sizeof(values));
+  }
+  call.result(result);
+}
+IMPORT(setrlimit) {
+  CALL;
+  const uint32_t address = call.word(1);
+  if (!address) { errno = EFAULT; call.result(-1); return; }
+  uint32_t values[2];
+  memcpy(values, guest(arena, address, sizeof(values)), sizeof(values));
+  struct rlimit limits = {
+    values[0] == UINT32_MAX ? RLIM_INFINITY : rlim_t(values[0]),
+    values[1] == UINT32_MAX ? RLIM_INFINITY : rlim_t(values[1])
+  };
+  call.result(::setrlimit(int32_t(call.word(0)), &limits));
+}
 IMPORT(isatty) { CALL; call.result(isatty(int32_t(call.word(0)))); }
 IMPORT(mallinfo) {
   CALL;call.return_argument_bytes=4;uint32_t address=call.word(0);
@@ -535,6 +563,14 @@ IMPORT(tmpnam) {
   uint32_t address=call.word(0);
   if(address){memcpy(guest(arena,address,L_tmpnam),name,strlen(name)+1);call.result(address);}
   else call.result(owned_string(arena,name));
+}
+IMPORT(mkstemp) {
+  CALL;
+  const uint32_t address = call.word(0);
+  std::string pattern(text(arena, address));
+  const int fd = ::mkstemp(pattern.data());
+  if (fd >= 0) memcpy(guest(arena, address, pattern.size() + 1), pattern.c_str(), pattern.size() + 1);
+  call.result(fd);
 }
 IMPORT(writev) {
   CALL; std::vector<struct iovec> v;

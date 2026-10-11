@@ -184,6 +184,7 @@ IMPORT(iscntrl) { CALL; call.result(iscntrl(int32_t(call.word(0))) ? 0x0002 : 0)
 IMPORT(ispunct) { CALL; call.result(ispunct(int32_t(call.word(0))) ? 0x0004 : 0); }
 IMPORT(isupper) { CALL; call.result(isupper(int32_t(call.word(0))) ? 0x0100 : 0); }
 IMPORT(putwc) { CALL; call.result(uint32_t(putwc(wchar_t(call.word(0)), stream(call.word(1))))); }
+IMPORT(fputws) { CALL; call.result(fputws(wide_text(arena, call.word(0)), stream(call.word(1)))); }
 IMPORT(strtok) {
   CALL;
   static std::map<RuntimeManager *, uint32_t> next;
@@ -199,6 +200,16 @@ IMPORT(swscanf) {
   CALL;
   call.result(scan_guest_wide_string(arena, wide_text(arena, call.word(0)),
                                     wide_text(arena, call.word(1)), {arena, call.stack + 12}));
+}
+IMPORT(__isoc23_swscanf) {
+  CALL;
+  call.result(scan_guest_wide_string(arena, wide_text(arena, call.word(0)),
+                                    wide_text(arena, call.word(1)), {arena, call.stack + 12}));
+}
+IMPORT(__isoc23_fwscanf) {
+  CALL;
+  call.result(scan_guest_wide_file(arena, stream(call.word(0)), wide_text(arena, call.word(1)),
+                                  {arena, call.stack + 12}));
 }
 IMPORT(ungetwc) { CALL; call.result(uint32_t(ungetwc(wint_t(call.word(0)), stream(call.word(1))))); }
 IMPORT(vfprintf) {

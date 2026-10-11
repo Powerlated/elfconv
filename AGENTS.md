@@ -45,6 +45,7 @@
 - Use this repository's CMake/CTest and existing native-versus-Wasm fixtures; do not introduce another test framework without need.
 - Prefer finding and reusing existing repository or upstream behavior/conformance tests over writing new ones. Search first; add tests only for uncovered behavior.
 - Place vendored tests in `test/vendored/<vendor>/`.
+- Vendored test sources MUST remain unchanged from their pinned vendor copies. If a test depends on a facility unavailable in the browser (for example, `cmp` via `system()`), exclude it from browser registration rather than adapting the vendored source.
 - Permanent tests protect consumer-visible behavior, boundaries, invariants, transitions, and failure cases. No source-text/wiring assertions or mock echoes.
 - Keep helper source in separate language-appropriate files; reuse shared build/test utilities. No embedded source strings for multi-language fixtures.
 - Exercise actual changed path after build. For instruction/ABI changes, compare native and lifted execution where practical.

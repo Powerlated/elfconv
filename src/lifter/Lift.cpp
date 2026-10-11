@@ -206,6 +206,27 @@ int main(int argc, char *argv[]) {
       elfconv_runtime_error("Bundled library units require --per_elf.\n");
   }
   manager.SetELFData();
+  if (FLAGS_arch == "i386") {
+    auto register_callback = [&](uint32_t address) {
+      printf("ELF callback 0x%x already registered: %d\n", address,
+             int(manager.disasm_funcs.count(address)));
+      if (manager.disasm_funcs.count(address)) return;
+      auto *section = manager.elf_obj.GetIncludedSection(address);
+      if (!section || !(bfd_section_flags(section) & SEC_CODE))
+        elfconv_runtime_error("Invalid i386 callback function address: 0x%x.\n", address);
+      uint64_t end = bfd_section_vma(section) + bfd_section_size(section);
+      const auto next = manager.disasm_funcs.upper_bound(address);
+      if (next != manager.disasm_funcs.end() &&
+          manager.elf_obj.GetIncludedSection(next->first) == section)
+        end = next->first;
+      if (end <= address)
+        elfconv_runtime_error("Invalid i386 callback function extent: 0x%x.\n", address);
+      const auto name = manager.GetUniqueLiftedFuncName("elf_callback", address);
+      manager.disasm_funcs.emplace(address, DisasmFunc(name, address, end - address));
+    };
+    for (const auto address : manager.elf_obj.i386_initializers) register_callback(address);
+    for (const auto address : manager.elf_obj.i386_finalizers) register_callback(address);
+  }
   if (FLAGS_per_elf) {
     if (FLAGS_arch != "i386" || !FLAGS_linker_map.empty())
       elfconv_runtime_error("--per_elf requires i386 without a linker map.\n");

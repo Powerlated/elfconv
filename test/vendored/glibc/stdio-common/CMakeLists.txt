@@ -32,7 +32,7 @@ target_compile_definitions(glibc_stdio_support PRIVATE
   "SYSCONFDIR_PATH=\"${CMAKE_CURRENT_BINARY_DIR}\""
 )
 target_compile_definitions(glibc_stdio_support PRIVATE TIMEOUTFACTOR=1)
-target_compile_options(glibc_stdio_support PRIVATE -D_GNU_SOURCE -m32 -pthread)
+target_compile_options(glibc_stdio_support PRIVATE -D_GNU_SOURCE -m32 -pthread -O0)
 target_compile_options(glibc_stdio_support PRIVATE -include limits.h)
 add_dependencies(elflift glibc_stdio_support)
 
@@ -57,6 +57,13 @@ list(APPEND glibc_stdio_test_names
   tst-unbputc)
 list(REMOVE_DUPLICATES glibc_stdio_test_names)
 
+# These upstream tests depend on process creation, unavailable in Wasm.
+list(REMOVE_ITEM glibc_stdio_test_names
+  bug5
+  test-popen
+  tst-popen
+  tst-popen2)
+
 find_program(ELFCONV_GLIBC_BASH bash REQUIRED)
 set(glibc_stdio_generated_dir "${CMAKE_CURRENT_BINARY_DIR}/generated")
 file(MAKE_DIRECTORY "${glibc_stdio_generated_dir}")
@@ -74,6 +81,8 @@ set(glibc_stdio_common_args
   --cc "${ELFCONV_I386_CC}"
   --objcopy "${ELFCONV_I386_OBJCOPY}"
   --node "${ELFCONV_I386_NODE}"
+  --wasm-opt-level 0
+  "--compile-flag=-O0"
   "--compile-flag=-I${glibc_stdio_compat}"
   "--compile-flag=-DOBJPFX=\"\""
   "--compile-flag=-D_GNU_SOURCE"

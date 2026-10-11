@@ -156,8 +156,12 @@ void invoke(uint8_t *arena, State *state, RuntimeManager *runtime, uint32_t targ
     auto it = std::lower_bound(runtime->addr_funptr_srt_list.begin(),
         runtime->addr_funptr_srt_list.end(), target,
         [](const auto &item, uint32_t value) { return item.first < value; });
-    if (it == runtime->addr_funptr_srt_list.end() || it->first != target)
-      elfconv_runtime_error("Unknown guest callback 0x%x.\n", target);
+    if (it == runtime->addr_funptr_srt_list.end() || it->first != target) {
+      const uint32_t previous = it == runtime->addr_funptr_srt_list.begin() ? 0 : uint32_t((it - 1)->first);
+      const uint32_t next = it == runtime->addr_funptr_srt_list.end() ? 0 : uint32_t(it->first);
+      elfconv_runtime_error("Unknown guest callback 0x%x (functions=%zu, previous=0x%x, next=0x%x).\n",
+                            target, runtime->addr_funptr_srt_list.size(), previous, next);
+    }
     function = it->second;
   }
   uint32_t saved_stack = state->gpr.rsp.dword;
@@ -1012,7 +1016,6 @@ IMPORT(__libc_start_main) {
   drain_tls_destructors(arena, state, runtime);
   __ecv_i386_drain_guest_atexit(arena, state, runtime);
   for (auto *p = _ecv_i386_finalizers; *p; ++p) invoke(arena, state, runtime, *p, nullptr, 0);
-  if (call.word(4)) invoke(arena, state, runtime, call.word(4), nullptr, 0);
   finish_libraries(arena, state, runtime);
   exit(status);
 }
@@ -1348,6 +1351,14 @@ IMPORT(fopen) {
   FILE *file = fopen(text(arena, call.word(0)), text(arena, call.word(1)));
   if (!file) { call.result(0); return; }
   uint32_t handle = next_file++;
+  files.emplace(handle, file);
+  call.result(handle);
+}
+IMPORT(tmpfile) {
+  CALL;
+  FILE *file = ::tmpfile();
+  if (!file) { call.result(0); return; }
+  const uint32_t handle = next_file++;
   files.emplace(handle, file);
   call.result(handle);
 }

@@ -42,6 +42,8 @@ def main():
                         help='Add one compiler flag to a standalone fixture (repeatable)')
     parser.add_argument('--link-flag', action='append', default=[],
                         help='Add one linker argument after standalone fixture sources (repeatable)')
+    parser.add_argument('--wasm-opt-level', choices=list('0123sz'),
+                        help='Set the Emscripten optimization level for the lifted test')
     parser.add_argument('--pthreads', action='store_true',
                         help='Link with pthread support and enable Emscripten pthreads')
     parser.add_argument('--browser', action='store_true',
@@ -182,6 +184,7 @@ def main():
         '--output-dir', str(output / 'wasm'),
         '--lifter', args.lifter, '--emcc', args.emcc,
         *(['--entry-symbol', 'main'] if args.shared else []),
+        *(['--wasm-opt-level', args.wasm_opt_level] if args.wasm_opt_level else []),
         *[argument for library in libraries for argument in ('--shared-library', str(library))],
         *(['--pthreads'] if args.pthreads else []),
         '--legacy-gl', '0'], 600)
