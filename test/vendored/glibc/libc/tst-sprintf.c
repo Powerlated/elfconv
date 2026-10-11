@@ -1,3 +1,7 @@
+/* Adapted from glibc stdio-common/tst-sprintf.c at
+   b72fcafcc9d307790bd24ebba65f52994ca5598e.  Distributed under LGPL-2.1-or-later;
+   see ../COPYING.LESSERv2. */
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <locale.h>
@@ -46,10 +50,7 @@ do_test (void)
     }
 
   /* We are testing a corner case of the sprintf format string here.  */
-  DIAG_PUSH_NEEDS_COMMENT;
-  DIAG_IGNORE_NEEDS_COMMENT (4.9, "-Wformat");
   int n = sprintf (buf, "%67108863.16\"%d", 7);
-  DIAG_POP_NEEDS_COMMENT;
 
   if (n != 14 || strcmp (buf, "%67108863.16\"7") != 0)
     {
@@ -59,10 +60,7 @@ do_test (void)
     }
 
   /* We are testing a corner case of the sprintf format string here.  */
-  DIAG_PUSH_NEEDS_COMMENT;
-  DIAG_IGNORE_NEEDS_COMMENT (4.9, "-Wformat");
   n = sprintf (buf, "%*\"%d", 0x3ffffff, 7);
-  DIAG_POP_NEEDS_COMMENT;
 
   if (n != 11 || strcmp (buf, "%67108863\"7") != 0)
     {
