@@ -113,6 +113,20 @@ tests have no browser execution evidence here. Existing coverage maps:
 are retained in its test source and `test/vendored/sdl2/README`. License notices
 remain with each source slice.
 
+| Slice / upstream pin | Tests and required behavior | Adaptation, execution evidence, and gaps |
+|---|---|---|
+| glibc libc `b72fcafcc9d307790bd24ebba65f52994ca5598e` | `tst-sscanf.c` conversions/return counts/malformed input; `tst-sprintf.c` formatting and multibyte precision; `tst-mbrtowc.c` restartable UTF-8 state and invalid terminators. | Replaces test skeleton with `main`; assertions retained. Native passed; lifted blocked by runtime compilation. Isolated locales via `ELFCONV_GLIBC_LOCALE_PATH`; C23 scanf binary-prefix behavior and time APIs uncovered. |
+| glibc loader `ef321e23c20eebc6d6fb4044425c00e6df27b05f` | `tst-setjmp.c`: setjmp/longjmp continuation and repeated nonzero return values. | Standalone entry adaptation; native passed, lifted blocked. Signal masks, register/FPU preservation, exception metadata and unwind/backtraces uncovered. |
+| glibc filesystem `3d1aed874918c466a4477af1da35983ab036690e` (2.40 peeled commit) | `preadvwritev.c`: explicit-offset vectored I/O lengths and byte comparisons. | Temporary-file harness adaptation; native passed, lifted blocked. Identical extents cannot distinguish duplicated/swapped data; rename/unlink, descriptor sharing, mmap aliasing/protection uncovered. |
+| glibc pthread `04e750e75b73957cf1c791535a3f4319534a52fc` | `tst-tsd3.c`: two-key isolation, alternating destructors, seven reassignments, worker join, main-thread keys remain unset. `tst-tsd4.c`: destructor reassigns key until count reaches `PTHREAD_DESTRUCTOR_ITERATIONS` and key is cleared; checks minimum only, not maximum. | Upstream public assertions retained, test-skeleton replaced with `main`. Native passed; lifted conversion blocked by runtime compilation. Browser lane is opt-in and unobserved; Node is only a Playwright driver. Detach, attributes, TLS, condition clocks/timed waits, cancellation/cleanup and destructor upper bound/order uncovered. |
+| SDL2 `fa24d868ac2f8fd558e4e914c9863411245db8fd` (release 2.30.11) | `harness.c`, `testautomation_pixels.c`, `testautomation_surface.c`: pixel metadata/palette/gamma, conversions and image-compared blits/modulation. | Pinned i386 SDL2 and SDL2_test built; native passed 14 cases, 3 upstream-disabled; conversion failed during runtime compilation. Padded pitch, partial clipping, audio/events/video/renderer/syswm/GL uncovered. |
+
+The GBE pin `7103add7ca6ef3ef8353279219880068f2494fc8` was inspected; its
+tests do not provide an equivalent Steam callback oracle. Retain the existing
+`test/elfconv/i386/steam-main.cpp` and `run_steam.py`; this lane was not exercised.
+Real audio providers, compatible i386 C++ runtimes, and successful loading remain
+prerequisites. No adapter failure is suppressed or labeled a skip.
+
 
 Use your existing configured x86 build directory instead of `build` when
 appropriate. Both options default to OFF because they require external toolchains
