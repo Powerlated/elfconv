@@ -55,10 +55,20 @@ An ahead-of-time binary translator that converts Linux applications to WebAssemb
     Symbols remain guest addresses; dependency constructors and library
     reference counts are honored. Libraries must be supplied at conversion time.
     Defined symbols bind within their ELF, with unresolved references resolved
-    against the bundled set or existing host adapters. General Linux loader
-    search/interposition, unsupported relocations, and unknown imports remain
-    unsupported. i386 ELF TLS supports local/initial-exec, general/local-dynamic,
-    and GNU2 descriptors, with per-CPU-state storage and thread-local destructors.
+    against the bundled set or existing host adapters. Selected stdio imports
+    include `clearerr`, `ftello`, `getchar`, `putc_unlocked`, `swprintf`, and
+    `vprintf`.
+    C23 `vfscanf`/`vsscanf` support binary `%b`; `fa_IR` string scans support
+    Persian digits with `%I`; scanf `%d` overflow saturates and partial-width
+    `%c` returns EOF. GNU printf `%m`
+    and `fopen("/dev/zero")` are handled. `mtrace` is supported only when
+    `MALLOC_TRACE` is unset or empty. Selected POSIX/GNU helpers include
+    `fstat`, `fstat64`, `ftruncate`, `mkdtemp`, `pathconf`, and
+    `strerrorname_np`; `mprotect` tracks permissions, but Wasm cannot enforce
+    protected-page faults. General Linux loader search/interposition,
+    unsupported relocations, and unknown imports remain unsupported. i386 ELF
+    TLS supports local/initial-exec, general/local-dynamic, and GNU2 descriptors,
+    with per-CPU-state storage and thread-local destructors.
     `ELFCONV_PTHREADS=ON` enables guest create/join, mutexes, and condition
     variables on Emscripten workers; requires JSPI and cross-origin isolation.
     See [bundled-library usage](examples/README.md#bundled-dynamic-libraries).
@@ -76,7 +86,7 @@ Vendored test status uses `vendor: passing/included/total vendored tests`.
 |---|---|---|---|
 | i386 ABI and CPU | 32-bit calling conventions and instructions used by the game and bundled libraries | SDL/OpenGL samples pass. Portal bundle lifts 17,008 functions; optional AVX code fails to decode and x87 arithmetic uses binary64. | QEMU i386: 0/2/2 |
 | ELF startup and shared objects | `hl2_linux`, `launcher.so`, `libtier0.so`, `libvstdlib.so`, `libtogl.so`, Steam's `libstdc++.so.6` and `libgcc_s.so.1`; expanded bundle also includes engine, client, server, and filesystem ELFs | Explicit bundling supports guest constructors, TLS, and dynamic symbol lookup; no general loader search/interposition or IFUNC support. `hl2_linux` alone reaches only the missing-launcher error path. | glibc loader: 0/1/1 |
-| C and C++ runtimes | glibc memory/string, stdio, parsing, math, locale, plus C++ ABI, RTTI, exceptions, and unwind behavior | Partial libc adapters and a project-owned RTTI regression exist. Portal linking still reports unresolved libc string/filesystem imports; full runtime compatibility is unverified. | glibc libc: 0/1/1<br>glibc stdio-common: 6/476/476 |
+| C and C++ runtimes | glibc memory/string, stdio, parsing, math, locale, plus C++ ABI, RTTI, exceptions, and unwind behavior | Partial libc adapters and a project-owned RTTI regression exist. Portal linking still reports unresolved libc string/filesystem imports; full runtime compatibility is unverified. | glibc libc: 0/1/1<br>glibc stdio-common: 6/188/476 |
 | POSIX and Linux services | Game-data filesystem, process/environment, mapping, clocks, sockets, and required syscalls | Selected guest-ABI adapters exist; raw i386 Linux syscalls are rejected and the Portal import set is unresolved. | glibc filesystem: 0/1/1 |
 | pthreads and ELF TLS | Worker creation, synchronization, thread-specific data, destructors, and library TLS | Adapters and ELF TLS models exist; Portal thread behavior is unverified. Browser threads require JSPI and cross-origin isolation. | glibc pthread: 0/2/2 |
 | SDL2 window, input, and surfaces | Window/context lifecycle, events, input, surfaces, and pixel operations | Triangle/cube exercise limited paths. SDL surface/pixel lifted conversion currently fails; broader SDL compatibility is unproven. | SDL2: 0/17/17 |

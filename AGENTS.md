@@ -43,7 +43,7 @@
 
 - The generic word "test" refers to an i386 program lifted to Wasm and checked for correct behavior in Wasm; use the native-versus-Wasm `run_i386.py` path.
 - Use this repository's CMake/CTest and existing native-versus-Wasm fixtures; do not introduce another test framework without need.
-- Prefer finding and reusing existing repository or upstream behavior/conformance tests over writing new ones. Search first; add tests only for uncovered behavior.
+- Prefer vendored tests for regression coverage; do not add project-owned regression tests when a vendored test exercises the behavior.
 - Place vendored tests in `test/vendored/<vendor>/`.
 - Vendored test sources MUST remain unchanged from their pinned vendor copies. If a test depends on a facility unavailable in the browser (for example, `cmp` via `system()`), exclude it from browser registration rather than adapting the vendored source.
 - Permanent tests protect consumer-visible behavior, boundaries, invariants, transitions, and failure cases. No source-text/wiring assertions or mock echoes.
@@ -52,6 +52,7 @@
 - Graphics checks must distinguish orientation, depth, alpha, and ordering; uniform frames cannot prove these properties.
 - Separate build, isolated-test, browser/render, and actual gameplay evidence. Linking or reaching an error path does not establish Portal compatibility.
 - Report unobserved behavior and remaining blockers explicitly. Restart/reload after rebuilding affected components.
+- Answers explaining slow conversion MUST report bitcode and Wasm sizes.
 
 ## Documentation
 
