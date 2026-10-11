@@ -131,6 +131,7 @@ utf8_test_3 (void)
 static int
 utf8_test (void)
 {
+  int error = 0;
   if (setlocale (LC_CTYPE, "C.UTF-8") == NULL
       && setlocale (LC_CTYPE, "C.utf8") == NULL)
     {
