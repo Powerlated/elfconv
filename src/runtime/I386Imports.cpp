@@ -56,6 +56,13 @@ GLint pack_alignment = 4, pack_row_length = 0, pack_skip_rows = 0, pack_skip_pix
 GLenum guest_gl_error = GL_NO_ERROR;
 #endif
 
+ssize_t zero_device_read(void *, char *buffer, size_t size) {
+  memset(buffer, 0, size);
+  return ssize_t(size);
+}
+ssize_t zero_device_write(void *, const char *, size_t size) { return ssize_t(size); }
+int zero_device_close(void *) { return 0; }
+int zero_device_seek(void *, off_t *, int) { errno = ESPIPE; return -1; }
 void *guest(uint8_t *arena, uint32_t address, size_t length) {
   if (address < NULL_GUARD_SIZE || address >= MEMORY_ARENA_SIZE ||
       length > MEMORY_ARENA_SIZE - address)
@@ -551,9 +558,35 @@ void append_format(std::basic_string<Char> &out, const std::basic_string<Char> &
     elfconv_runtime_error("Invalid guest wide printf format.\n");
   }
 }
+template<typename T>
+void append_wide_numeric_format(std::wstring &out, const std::wstring &spec, T value) {
+  const std::string narrow_spec(spec.begin(), spec.end());
+  char small[256];
+  int size = snprintf(small, sizeof(small), narrow_spec.c_str(), value);
+  if (size < 0) elfconv_runtime_error("Invalid guest wide numeric format.\n");
+  std::vector<char> narrow;
+  const char *formatted = small;
+  if (size >= int(sizeof(small))) {
+    narrow.resize(size_t(size) + 1);
+    snprintf(narrow.data(), narrow.size(), narrow_spec.c_str(), value);
+    formatted = narrow.data();
+  }
+  std::mbstate_t state{};
+  const char *source = formatted;
+  const size_t wide_size = mbsrtowcs(nullptr, &source, 0, &state);
+  if (wide_size == size_t(-1))
+    elfconv_runtime_error("Invalid multibyte guest wide numeric output.\n");
+  std::vector<wchar_t> wide(wide_size + 1);
+  state = {};
+  source = formatted;
+  if (mbsrtowcs(wide.data(), &source, wide.size(), &state) == size_t(-1))
+    elfconv_runtime_error("Invalid multibyte guest wide numeric output.\n");
+  out.append(wide.data(), wide_size);
+}
 template<typename Char>
 std::basic_string<Char> format_impl(uint8_t *arena, const Char *input, Arguments args) {
   std::basic_string<Char> out;
+  const int error_number = errno;
   auto ascii = [](Char value, const char *set) {
     return value > 0 && value < 128 && strchr(set, int(value));
   };
@@ -670,10 +703,14 @@ std::basic_string<Char> format_impl(uint8_t *arena, const Char *input, Arguments
         memcpy(&value, &bits, 8);
       }
       spec += conversion;
-      append_format(out, spec, value);
-    } else if (conversion == 's' && (length == 0 || length == 'l')) {
+      if constexpr (std::is_same_v<Char, char>)
+        append_format(out, spec, value);
+      else
+        append_wide_numeric_format(out, spec, value);
+    } else if ((conversion == 's' && (length == 0 || length == 'l')) ||
+               (std::is_same_v<Char, char> && conversion == 'S' && !length)) {
       const uint32_t address = value_arguments->word();
-      if (length == 'l') {
+      if (length == 'l' || conversion == 'S') {
         spec += 'l'; spec += 's';
         append_format(out, spec, address ? wide_text(arena, address) : L"(null)");
       } else {
@@ -685,13 +722,38 @@ std::basic_string<Char> format_impl(uint8_t *arena, const Char *input, Arguments
       spec += 'c';
       append_format(out, spec, value_arguments->word());
     } else if (conversion == 'p' && !length) {
-      spec += 'p';
-      append_format(out, spec, reinterpret_cast<void *>(uintptr_t(value_arguments->word())));
+      const uint32_t pointer = value_arguments->word();
+      if constexpr (std::is_same_v<Char, wchar_t>) {
+        if (!pointer) {
+          spec += 'l'; spec += 's';
+          append_format(out, spec, L"(nil)");
+        } else {
+          spec += 'p';
+          append_format(out, spec, reinterpret_cast<void *>(uintptr_t(pointer)));
+        }
+      } else if (!pointer) {
+        spec += 's';
+        append_format(out, spec, "(nil)");
+      } else {
+        spec += 'p';
+        append_format(out, spec, reinterpret_cast<void *>(uintptr_t(pointer)));
+      }
     } else if (conversion == 'n') {
       const uint32_t address = value_arguments->word();
       const uint64_t count = out.size();
       const size_t size = length == 'q' || length == 'j' ? 8 : length == 'h' ? 2 : length == 'H' ? 1 : 4;
       memcpy(guest(arena, address, size), &count, size);
+    } else if (conversion == 'm' && !length) {
+      const char *message = strerror(error_number);
+      spec += 's';
+      if constexpr (std::is_same_v<Char, char>) {
+        append_format(out, spec, message);
+      } else {
+        std::vector<wchar_t> wide(strlen(message) + 1);
+        if (mbstowcs(wide.data(), message, wide.size()) == size_t(-1))
+          elfconv_runtime_error("Invalid multibyte error message in guest printf.\n");
+        append_format(out, spec, wide.data());
+      }
     } else elfconv_runtime_error("Unsupported guest printf conversion: %c.\n", conversion);
     if (out.size() > INT_MAX) elfconv_runtime_error("Guest printf output overflow.\n");
   }
@@ -1348,7 +1410,19 @@ IMPORT(strerror) { CALL; call.result(copy_string(arena, strerror(i386_errno_to_h
 IMPORT(strcspn) { CALL; call.result(strcspn(text(arena, call.word(0)), text(arena, call.word(1)))); }
 IMPORT(fopen) {
   CALL;
-  FILE *file = fopen(text(arena, call.word(0)), text(arena, call.word(1)));
+  const char *path = text(arena, call.word(0));
+  const char *mode = text(arena, call.word(1));
+  FILE *file;
+  if (strcmp(path, "/dev/zero") == 0) {
+    cookie_io_functions_t io{};
+    io.seek = zero_device_seek;
+    io.read = zero_device_read;
+    io.write = zero_device_write;
+    io.close = zero_device_close;
+    file = fopencookie(nullptr, mode, io);
+  } else {
+    file = fopen(path, mode);
+  }
   if (!file) { call.result(0); return; }
   uint32_t handle = next_file++;
   files.emplace(handle, file);
@@ -1395,6 +1469,7 @@ IMPORT(fread) {
 }
 IMPORT(fseek) { CALL; call.result(fseek(stream(call.word(0)), int32_t(call.word(1)), call.word(2))); }
 IMPORT(ftell) { CALL; call.result(ftell(stream(call.word(0)))); }
+IMPORT(ftello) { CALL; call.result(ftello(stream(call.word(0)))); }
 IMPORT(fseeko64) {
   CALL;
   call.result(fseeko(stream(call.word(0)), int64_t(call.wide(1)), int32_t(call.word(3))));
@@ -1418,6 +1493,7 @@ IMPORT(fgetc) { CALL; call.result(fgetc(stream(call.word(0)))); }
 IMPORT(getc) { CALL; call.result(getc(stream(call.word(0)))); }
 IMPORT(ungetc) { CALL; call.result(ungetc(int32_t(call.word(0)), stream(call.word(1)))); }
 IMPORT(ferror) { CALL; call.result(ferror(stream(call.word(0)))); }
+IMPORT(clearerr) { CALL; clearerr(stream(call.word(0))); }
 IMPORT(fileno) { CALL; call.result(fileno(stream(call.word(0)))); }
 IMPORT(fmemopen) {
   CALL;
@@ -1478,6 +1554,7 @@ IMPORT(setvbuf) {
 IMPORT(_exit) { CALL; _Exit(int32_t(call.word(0))); }
 IMPORT(fputc) { CALL; call.result(fputc(call.word(0), stream(call.word(1)))); }
 IMPORT(putc) { CALL; call.result(putc(int32_t(call.word(0)), stream(call.word(1)))); }
+IMPORT(putc_unlocked) { CALL; call.result(putc_unlocked(int32_t(call.word(0)), stream(call.word(1)))); }
 IMPORT(putchar) { CALL; call.result(putchar(call.word(0))); }
 IMPORT(exit) {
   CALL;
@@ -1621,6 +1698,7 @@ IMPORT(write) {
   call.result(write(int32_t(call.word(0)), size ? guest(arena, call.word(1), size) : nullptr, size));
 }
 IMPORT(access) { CALL; call.result(access(text(arena, call.word(0)), call.word(1))); }
+IMPORT(pathconf) { CALL; call.result(pathconf(text(arena, call.word(0)), int32_t(call.word(1)))); }
 IMPORT(chmod) { CALL; call.result(chmod(text(arena, call.word(0)), call.word(1))); }
 IMPORT(chown) { CALL; call.result(chown(text(arena, call.word(0)), call.word(1), call.word(2))); }
 IMPORT(lchown) { CALL; call.result(lchown(text(arena, call.word(0)), call.word(1), call.word(2))); }
@@ -1731,6 +1809,13 @@ IMPORT(__fxstat64) {
   struct stat host;
   int result = fstat(int32_t(call.word(1)), &host);
   if (!result) result = store_stat64(arena, call.word(2), host);
+  call.result(result);
+}
+IMPORT(fstat64) {
+  CALL;
+  struct stat host;
+  int result = fstat(int32_t(call.word(0)), &host);
+  if (!result) result = store_stat64(arena, call.word(1), host);
   call.result(result);
 }
 namespace {

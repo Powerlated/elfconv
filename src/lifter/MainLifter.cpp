@@ -326,6 +326,8 @@ void MainLifter::WrapImpl::SetLiftedFunPtrTable(
   std::vector<llvm::Constant *> addr_list, fn_ptr_list;
 
   for (auto &[addr, fn_name] : addr_fn_name_map) {
+    // Address zero terminates the runtime table and represents no callable ELF function.
+    if (addr == 0) continue;
     auto lifted_fun = module->getFunction(fn_name);
     if (!lifted_fun) {
       elfconv_runtime_error("[ERROR] lifted fun \"%s\" cannot be found.\n", fn_name);

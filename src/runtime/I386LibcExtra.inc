@@ -114,6 +114,16 @@ IMPORT(__strtok_r) {
   memcpy(guest(arena, slot, 4), &next, 4);
   call.result(token ? guest_offset(arena, token) : 0);
 }
+IMPORT(swprintf) {
+  CALL;
+  const uint32_t capacity = call.word(1);
+  const auto out = wide_format(arena, wide_text(arena, call.word(2)),
+                               {arena, call.stack + 16});
+  if (out.size() >= capacity) { errno = E2BIG; call.result(-1); return; }
+  memcpy(wide_buffer(arena, call.word(0), out.size() + 1), out.c_str(),
+         (out.size() + 1) * sizeof(wchar_t));
+  call.result(out.size());
+}
 IMPORT(__swprintf_chk) {
   CALL; const uint32_t capacity = call.word(1);
   if (capacity > call.word(3)) elfconv_runtime_error("Guest fortified swprintf overflow.\n");
@@ -152,11 +162,27 @@ IMPORT(__xpg_strerror_r) {
   if (size) { const size_t n = std::min(length, size_t(size - 1)); char *dst = static_cast<char *>(guest(arena, output, n + 1)); memcpy(dst, message, n); dst[n] = 0; }
   call.result(length < size ? 0 : ERANGE);
 }
+IMPORT(strerrorname_np) {
+  CALL;
+  const char *name = i386_strerrorname(call.word(0));
+  call.result(name ? copy_string(arena, name, 20) : 0);
+}
 IMPORT(abort) { abort(); }
+IMPORT(mtrace) {
+  CALL;
+  const char *path = getenv("MALLOC_TRACE");
+  if (path && *path)
+    elfconv_runtime_error("Guest mtrace requires unsupported allocator tracing.\n");
+}
 IMPORT(__isoc23_scanf) {
   CALL;
   call.result(scan_guest_file(arena, stdin, text(arena, call.word(0)),
                              {arena, call.stack + 8}));
+}
+IMPORT(__isoc23_vscanf) {
+  CALL;
+  call.result(scan_guest_file(arena, stdin, text(arena, call.word(0)),
+                             {arena, call.word(1)}));
 }
 IMPORT(__isoc23_fscanf) {
   CALL;
@@ -168,16 +194,27 @@ IMPORT(__isoc23_sscanf) {
   call.result(scan_guest_string(arena, text(arena, call.word(0)), text(arena, call.word(1)),
                                {arena, call.stack + 12}));
 }
+IMPORT(__isoc23_vsscanf) {
+  CALL;
+  call.result(scan_guest_string(arena, text(arena, call.word(0)), text(arena, call.word(1)),
+                               {arena, call.word(2)}));
+}
 IMPORT(fscanf) {
   CALL;
   call.result(scan_guest_file(arena, stream(call.word(0)), text(arena, call.word(1)),
                              {arena, call.stack + 12}));
+}
+IMPORT(__isoc23_vfscanf) {
+  CALL;
+  call.result(scan_guest_file(arena, stream(call.word(0)), text(arena, call.word(1)),
+                             {arena, call.word(2)}));
 }
 IMPORT(sscanf) {
   CALL;
   call.result(scan_guest_string(arena, text(arena, call.word(0)), text(arena, call.word(1)),
                                {arena, call.stack + 12}));
 }
+IMPORT(getchar) { CALL; call.result(uint32_t(getchar())); }
 IMPORT(getwc) { CALL; call.result(uint32_t(getwc(stream(call.word(0))))); }
 IMPORT(isalpha) { CALL; call.result(isalpha(int32_t(call.word(0))) ? 0x0400 : 0); }
 IMPORT(iscntrl) { CALL; call.result(iscntrl(int32_t(call.word(0))) ? 0x0002 : 0); }
@@ -216,4 +253,8 @@ IMPORT(vfprintf) {
   CALL; auto out = format(arena, text(arena, call.word(1)), {arena, call.word(2)});
   FILE *output = stream(call.word(0));
   call.result(fwrite(out.data(), 1, out.size(), output) == out.size() ? int(out.size()) : -1);
+}
+IMPORT(vprintf) {
+  CALL;
+  call.result(print_va(call, stdout, 0, 1));
 }

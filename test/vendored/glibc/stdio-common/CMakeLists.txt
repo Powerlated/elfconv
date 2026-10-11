@@ -81,7 +81,7 @@ set(glibc_stdio_common_args
   --cc "${ELFCONV_I386_CC}"
   --objcopy "${ELFCONV_I386_OBJCOPY}"
   --node "${ELFCONV_I386_NODE}"
-  --wasm-opt-level 0
+  --wasm-opt-level 2
   "--compile-flag=-O0"
   "--compile-flag=-I${glibc_stdio_compat}"
   "--compile-flag=-DOBJPFX=\"\""
@@ -118,21 +118,9 @@ foreach(test_name IN LISTS glibc_stdio_test_names)
   list(APPEND glibc_stdio_registered_tests "i386_glibc_stdio_${test_name}")
 endforeach()
 
-
-file(GLOB glibc_printf_format_sources "${glibc_stdio_source}/tst-printf-format-*.c")
-foreach(test_source IN LISTS glibc_printf_format_sources)
-  get_filename_component(test_name "${test_source}" NAME_WE)
-  if(test_name MATCHES "^tst-printf-format-(p|as|d|f|s|sn|v|vas|vd|vf|vs|vsn)-(c|char|int|llong|long|s|short|uchar|uint|ullong|ulong|ushort|double|ldouble)(-(E|e|F|f|G|g))?$")
-    add_test(NAME "i386_glibc_stdio_${test_name}"
-      COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/test/elfconv/run_i386.py"
-        ${glibc_stdio_common_args}
-        --source "${test_source}"
-        --output-dir "${CMAKE_CURRENT_BINARY_DIR}/${test_name}")
-    set_tests_properties("i386_glibc_stdio_${test_name}" PROPERTIES
-      LABELS "i386;regression;glibc;stdio;printf" TIMEOUT 1000)
-    list(APPEND glibc_stdio_registered_tests "i386_glibc_stdio_${test_name}")
-  endif()
-endforeach()
+# Upstream's printf-format matrix is driven by shell/AWK scripts that pass
+# conversion arguments; run_i386.py does not pass program arguments, so it is
+# intentionally not registered here.
 
 file(GLOB glibc_scanf_format_sources "${glibc_stdio_source}/tst-scanf-format-*.c")
 foreach(test_source IN LISTS glibc_scanf_format_sources)

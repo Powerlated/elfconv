@@ -71,6 +71,17 @@ IMPORT(__fxstat) {
   if (!r) r = store_stat32_extra(arena, call.word(2), st);
   call.result(r);
 }
+IMPORT(fstat) {
+  CALL;
+  struct stat st;
+  int result = fstat(int32_t(call.word(0)), &st);
+  if (!result) result = store_stat32_extra(arena, call.word(1), st);
+  call.result(result);
+}
+IMPORT(ftruncate) {
+  CALL;
+  call.result(ftruncate(int32_t(call.word(0)), int32_t(call.word(1))));
+}
 IMPORT(__lxstat) {
   CALL; struct stat st; int r = lstat(text(arena, call.word(1)), &st);
   if (!r) r = store_stat32_extra(arena, call.word(2), st);
@@ -436,6 +447,76 @@ IMPORT(munmap) {
   }
   add_free(start,length);memset(guest(arena,start,length),0,length);call.result(0);
 }
+// WebAssembly linear memory has no per-page protection; retain mapping metadata only.
+IMPORT(mprotect) {
+  std::lock_guard<std::mutex> mapping_lock(extra_mapping_mutex);
+  CALL;
+  constexpr uint32_t page = 4096;
+  const uint32_t start = call.word(0), length = call.word(1), prot = call.word(2);
+  const uint64_t raw_end = uint64_t(start) + length;
+  const uint64_t end = (raw_end + page - 1) & ~uint64_t(page - 1);
+  if (!length || start % page || (prot & ~uint32_t(PROT_READ | PROT_WRITE | PROT_EXEC)) ||
+      start < MMAP_START_VMA || end > MMAP_END_VMA) {
+    errno = EINVAL;
+    call.result(-1);
+    return;
+  }
+
+  uint64_t cursor = start;
+  auto it = extra_mappings.upper_bound(start);
+  if (it != extra_mappings.begin()) --it;
+  for (; it != extra_mappings.end() && cursor < end; ++it) {
+    const uint64_t base = it->first, limit = base + it->second.length;
+    if (limit <= cursor) continue;
+    if (base > cursor) break;
+    cursor = std::min(end, limit);
+  }
+  if (cursor != end) {
+    errno = ENOMEM;
+    call.result(-1);
+    return;
+  }
+
+  std::vector<uint32_t> replaced;
+  std::vector<std::pair<uint32_t, ExtraMapping>> pieces;
+  auto append = [&](uint32_t base, uint32_t size, const ExtraMapping &mapping,
+                    uint32_t skip, uint32_t protection) {
+    if (!size) return true;
+    const int fd = mapping.fd >= 0 ? dup(mapping.fd) : -1;
+    if (mapping.fd >= 0 && fd < 0) return false;
+    const uint32_t file_bytes = mapping.file_bytes > skip
+        ? std::min(size, uint32_t(mapping.file_bytes - skip)) : 0;
+    pieces.emplace_back(base, ExtraMapping{size, fd, mapping.offset + skip,
+                                            mapping.flags, protection, file_bytes});
+    return true;
+  };
+  auto first = extra_mappings.upper_bound(start);
+  if (first != extra_mappings.begin()) --first;
+  for (it = first; it != extra_mappings.end(); ++it) {
+    const uint32_t base = it->first;
+    const ExtraMapping mapping = it->second;
+    const uint64_t limit = uint64_t(base) + mapping.length;
+    if (limit <= start) continue;
+    if (base >= end) break;
+    const uint32_t lo = std::max(base, start), hi = uint32_t(std::min(limit, end));
+    const uint32_t prefix = lo - base, middle = hi - lo, tail = uint32_t(limit - hi);
+    replaced.push_back(base);
+    if (!append(base, prefix, mapping, 0, mapping.prot) ||
+        !append(lo, middle, mapping, prefix, prot) ||
+        !append(hi, tail, mapping, hi - base, mapping.prot)) {
+      for (const auto &piece : pieces) if (piece.second.fd >= 0) close(piece.second.fd);
+      call.result(-1);
+      return;
+    }
+  }
+  for (uint32_t base : replaced) {
+    auto found = extra_mappings.find(base);
+    if (found->second.fd >= 0) close(found->second.fd);
+    extra_mappings.erase(found);
+  }
+  for (auto &piece : pieces) extra_mappings.emplace(piece.first, piece.second);
+  call.result(0);
+}
 IMPORT(popen) {
   CALL;
 #ifdef __EMSCRIPTEN__
@@ -571,6 +652,12 @@ IMPORT(mkstemp) {
   const int fd = ::mkstemp(pattern.data());
   if (fd >= 0) memcpy(guest(arena, address, pattern.size() + 1), pattern.c_str(), pattern.size() + 1);
   call.result(fd);
+}
+IMPORT(mkdtemp) {
+  CALL;
+  const uint32_t address = call.word(0);
+  char *pattern = static_cast<char *>(guest(arena, address, strlen(text(arena, address)) + 1));
+  call.result(::mkdtemp(pattern) ? address : 0);
 }
 IMPORT(writev) {
   CALL; std::vector<struct iovec> v;

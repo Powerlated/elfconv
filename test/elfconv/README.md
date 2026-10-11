@@ -23,6 +23,8 @@ attribute destruction before mutex use, and unchanged host errno.
 The project-owned `pie.c` fixture uses `--pie` (`-fPIE -pie`) and checks relocated
 data pointers, indirect function calls, constructor/destructor order, mutation,
 and imported stdout/stderr variables against native execution.
+`init-array-sentinel.c` checks that startup invokes a constructor following a weak
+undefined function address, which must not terminate the lifted function table.
 
 The `shared.c` fixture uses `--shared` (`-fPIC -shared`). A native `dlopen`
 runner provides the reference; Wasm invokes the same exported `main`.
@@ -86,10 +88,15 @@ Build this target before running the SDL CTest; CTest does not build it.
 
 Configure the normal lane with `-DELFCONV_I386_TESTS=ON` and run the standard
 build/CTest commands above. The stdio suite covers pinned upstream `stdio-common`
-tests plus generated printf/scanf cases; it excludes `bug5`, `test-popen`,
-`tst-popen`, and `tst-popen2` from the Wasm lane because they invoke unavailable
-process creation. Run the registered tests with
+tests plus generated printf/scanf cases; it excludes the four process-dependent
+tests from the Wasm lane. The 288-entry printf-format matrix is currently
+unregistered: upstream's shell/AWK driver supplies required conversion arguments,
+which `run_i386.py` does not yet pass. The remaining registered stdio lane has
+188 tests. Run them with
 `ctest --test-dir <build> -R '^i386_glibc_stdio_' --output-on-failure`.
+The stdio lane uses Emscripten `-O2` for lifted Wasm while compiling test sources
+at `-O0`. `tst-printf` now starts after the function-table fix but still aborts
+on unsupported guest printf conversion `%v`; the test does not yet pass.
 Configure `-DELFCONV_GLIBC_LOCALE_PATH=<dir>` for libc locales and
 `-DELFCONV_GLIBC_STDIO_LOCALE_PATH=<dir>` for stdio locales. Generate isolated
 locales with `localedef --no-archive -i de_DE -f UTF-8 <dir>/de_DE.UTF-8` and
@@ -108,8 +115,10 @@ Native i386 references passed for the libc, loader, and filesystem slices; SDL's
 native reference exited 0 with 14 cases passing and 3 upstream-disabled. Six
 selected stdio Wasm tests passed previously. The four process-dependent upstream
 tests remain unchanged and are excluded from the Wasm lane. The current stdio
-lane contains 472 tests; no suite-wide result is claimed until that run
-completes. Coverage maps: `test/vendored/glibc/libc/COVERAGE.txt` and
+lane has 188 registered tests; the 288 printf-format matrix tests are unregistered
+because their required conversion arguments are supplied by glibc's shell/AWK
+driver. No suite-wide result is claimed until the registered lane completes.
+Coverage maps: `test/vendored/glibc/libc/COVERAGE.txt` and
 `test/vendored/glibc/filesystem/COVERAGE`; SDL scope and upstream-disabled cases
 are retained in its test source and `test/vendored/sdl2/README`. License notices
 remain with each source slice.
@@ -117,7 +126,7 @@ remain with each source slice.
 | Slice / upstream pin | Tests and required behavior | Adaptation, execution evidence, and gaps |
 |---|---|---|
 | glibc libc `b72fcafcc9d307790bd24ebba65f52994ca5598e` | `tst-mbrtowc.c`: restartable UTF-8 state, incomplete sequences, output preservation, NUL processing, and invalid terminators. | Native passed; lifted blocked by runtime compilation. Requires C.UTF-8 or C.utf8. |
-| glibc stdio-common `04e750e75b73957cf1c791535a3f4319534a52fc` | Vendored `stdio-common/` sources, support, and test data. 472 CTest entries cover upstream `tests` except the four process-dependent cases excluded from Wasm, plus generated printf/scanf matrices and directly runnable helper tests. | Each test uses native-versus-lifted `run_i386.py` and compares stdout/stderr. Container/internal categories are unregistered; `tst-fwrite-bz29459` needs an upstream pipe wrapper. Six selected Wasm tests passed previously; suite-wide status unverified. |
+| glibc stdio-common `04e750e75b73957cf1c791535a3f4319534a52fc` | Vendored `stdio-common/` sources and support; 188 registered CTest entries include upstream `tests` except the four process-dependent exclusions, plus generated scanf cases and directly runnable helper tests. The 288 printf-format matrix cases are excluded because they require conversion arguments supplied by glibc's shell/AWK driver. | Each registered test uses native-versus-lifted `run_i386.py` and compares stdout/stderr. Container/internal categories are unregistered; `tst-fwrite-bz29459` needs an upstream pipe wrapper. Six selected Wasm tests passed previously; suite-wide status unverified. |
 | glibc loader `ef321e23c20eebc6d6fb4044425c00e6df27b05f` | `tst-setjmp.c`: setjmp/longjmp continuation and repeated nonzero return values. | Standalone entry adaptation; native passed, lifted blocked. Signal masks, register/FPU preservation, exception metadata and unwind/backtraces uncovered. |
 | glibc filesystem `3d1aed874918c466a4477af1da35983ab036690e` (2.40 peeled commit) | `preadvwritev.c`: explicit-offset vectored I/O lengths and byte comparisons. | Temporary-file harness adaptation; native passed, lifted blocked. Identical extents cannot distinguish duplicated/swapped data; rename/unlink, descriptor sharing, mmap aliasing/protection uncovered. |
 | glibc pthread `04e750e75b73957cf1c791535a3f4319534a52fc` | `tst-tsd3.c`: two alternating key destructors, seven destructor calls, six reassignments, worker join and main-thread keys unset afterward. `tst-tsd4.c`: destructor reassigns its key; count must reach `PTHREAD_DESTRUCTOR_ITERATIONS`, and the main-thread key stays unset. | Assertions retained; test-skeleton replaced with `main`. Native passed; lifted conversion blocked by runtime compilation. Browser lane unobserved. Simultaneous key isolation, detach, attributes, ELF TLS, condition clocks/timed waits, cancellation/cleanup and destructor upper bound/order remain uncovered. |

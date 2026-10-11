@@ -163,6 +163,19 @@ inline int i386_errno_to_host(int value) {
   return value;
 #endif
 }
+inline const char *i386_strerrorname(int value) {
+#if defined(__EMSCRIPTEN__)
+  switch (value) {
+#define ECV_ERRNO_NAME(name, number) case number: return #name;
+    ECV_I386_ERRNOS(ECV_ERRNO_NAME)
+#undef ECV_ERRNO_NAME
+    default: return nullptr;
+  }
+#else
+  (void)value;
+  return nullptr;
+#endif
+}
 
 #if defined(__EMSCRIPTEN__)
 #undef ECV_I386_ERRNOS
