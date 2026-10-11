@@ -81,8 +81,8 @@ skip a missing slice. The ordinary lane uses the existing native-versus-lifted
 `run_i386.py` runner. SDL2 uses pinned release 2.30.11 commit
 `fa24d868ac2f8fd558e4e914c9863411245db8fd`, built as i386 with SDL2_test.
 Build it explicitly with `cmake --build <build> --target
-sdl2_surface_pixel_prerequisite` (requires Git/network access and GCC multilib);
-it is also a prerequisite of the SDL CTest.
+sdl2_surface_pixel_prerequisite` (requires Git/network access and GCC multilib).
+Build this target before running the SDL CTest; CTest does not build it.
 
 Configure the normal lane with `-DELFCONV_I386_TESTS=ON` and run the standard
 build/CTest commands above. CTest names are `i386_glibc_sscanf`,
@@ -118,7 +118,7 @@ remain with each source slice.
 | glibc libc `b72fcafcc9d307790bd24ebba65f52994ca5598e` | `tst-sscanf.c` conversions/return counts/malformed input; `tst-sprintf.c` formatting and multibyte precision; `tst-mbrtowc.c` restartable UTF-8 state and invalid terminators. | Replaces test skeleton with `main`; assertions retained. Native passed; lifted blocked by runtime compilation. Isolated locales via `ELFCONV_GLIBC_LOCALE_PATH`; C23 scanf binary-prefix behavior and time APIs uncovered. |
 | glibc loader `ef321e23c20eebc6d6fb4044425c00e6df27b05f` | `tst-setjmp.c`: setjmp/longjmp continuation and repeated nonzero return values. | Standalone entry adaptation; native passed, lifted blocked. Signal masks, register/FPU preservation, exception metadata and unwind/backtraces uncovered. |
 | glibc filesystem `3d1aed874918c466a4477af1da35983ab036690e` (2.40 peeled commit) | `preadvwritev.c`: explicit-offset vectored I/O lengths and byte comparisons. | Temporary-file harness adaptation; native passed, lifted blocked. Identical extents cannot distinguish duplicated/swapped data; rename/unlink, descriptor sharing, mmap aliasing/protection uncovered. |
-| glibc pthread `04e750e75b73957cf1c791535a3f4319534a52fc` | `tst-tsd3.c`: two-key isolation, alternating destructors, seven reassignments, worker join, main-thread keys remain unset. `tst-tsd4.c`: destructor reassigns key until count reaches `PTHREAD_DESTRUCTOR_ITERATIONS` and key is cleared; checks minimum only, not maximum. | Upstream public assertions retained, test-skeleton replaced with `main`. Native passed; lifted conversion blocked by runtime compilation. Browser lane is opt-in and unobserved; Node is only a Playwright driver. Detach, attributes, TLS, condition clocks/timed waits, cancellation/cleanup and destructor upper bound/order uncovered. |
+| glibc pthread `04e750e75b73957cf1c791535a3f4319534a52fc` | `tst-tsd3.c`: two alternating key destructors, seven destructor calls, six reassignments, worker join and main-thread keys unset afterward. `tst-tsd4.c`: destructor reassigns its key; count must reach `PTHREAD_DESTRUCTOR_ITERATIONS`, and the main-thread key stays unset. | Assertions retained; test-skeleton replaced with `main`. Native passed; lifted conversion blocked by runtime compilation. Browser lane unobserved. Simultaneous key isolation, detach, attributes, ELF TLS, condition clocks/timed waits, cancellation/cleanup and destructor upper bound/order remain uncovered. |
 | SDL2 `fa24d868ac2f8fd558e4e914c9863411245db8fd` (release 2.30.11) | `harness.c`, `testautomation_pixels.c`, `testautomation_surface.c`: pixel metadata/palette/gamma, conversions and image-compared blits/modulation. | Pinned i386 SDL2 and SDL2_test built; native passed 14 cases, 3 upstream-disabled; conversion failed during runtime compilation. Padded pitch, partial clipping, audio/events/video/renderer/syswm/GL uncovered. |
 
 The GBE pin `7103add7ca6ef3ef8353279219880068f2494fc8` was inspected; its
