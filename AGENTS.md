@@ -5,6 +5,16 @@
 - Commit early and commit often. Prefer small, coherent commits; verify significant behavioral changes before committing them.
 - Commit messages: one line; no body. Keep unrelated user changes out of commits.
 
+## Delegation
+
+- Delegate behavior slices, not symbol lists or single files: implementation, callers, build integration, and regression fixtures.
+- Establish shared ABI/helper contracts before dispatch: exact signatures, layouts, ownership, lifecycle, and existing helper locations.
+- Permit shared-file changes through explicit section ownership or isolated worktrees; main owns cross-slice integration.
+- Finish shared prerequisites first; batch independent slices. Verify completed waves and feed concrete failures into the next wave.
+- Require every assigned symbol accounted for, evidence-backed layouts, and explicit unsupported semantics. Undefined helpers, stubs, and error-only placeholders are not completion.
+- Dependency owners deliver pinned acquisition, reproducible builds, loader integration, and real behavior fixtures—not research or commands alone.
+- Main reviews code directly. Source volume and agent completion reports are not correctness evidence.
+
 ## Orientation
 
 - Read relevant README sections before feature work. Reuse existing code, build paths, test helpers, and conventions.
