@@ -269,5 +269,4 @@ do_test (void)
   return result;
 }
 
-#include <assert.h>
-int main (void) { assert (do_test () == 0); return 0; }
+int main (void) { return do_test (); }
