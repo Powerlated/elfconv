@@ -25,12 +25,13 @@ runner. After parent integration, run:
 cmake --build <build> --target elflift
 ctest --test-dir <build> -R '^i386_glibc_' --output-on-failure
 
-If glibc locales are missing, provision them with:
-`sudo localedef -i de_DE -f UTF-8 de_DE.UTF-8`
-`sudo localedef -i en_US -f ISO-8859-1 en_US.ISO-8859-1`
-The mbrtowc test fails if C.UTF-8 and C.utf8 are both unavailable.
-Prerequisites: i386-capable Linux, GCC multilib and 32-bit libc development files,
-GNU objcopy, built x86 elflift, Emscripten em++, Node, Python 3.
+For isolated non-root glibc locales, use:
+`mkdir -p <build>/vendored-locales`
+`localedef --no-archive -i de_DE -f UTF-8 <build>/vendored-locales/de_DE.UTF-8`
+`localedef --no-archive -i en_US -f ISO-8859-1 <build>/vendored-locales/en_US.ISO-8859-1`
+Configure with `-DELFCONV_GLIBC_LOCALE_PATH=<build>/vendored-locales`; CTest sets
+LOCPATH for these tests when this option is nonempty. The mbrtowc test fails if
+neither C.UTF-8 nor C.utf8 is available. Do not use host locale installs.
 
 C23 binary-prefix scanf: stdio-common/tst-scanf-binary-c23.c and its shared main
 were inspected; broad variants depend on glibc test support and C23 symbols. No
@@ -38,4 +39,8 @@ binary-prefix scanf test is included, and this slice makes no claim whether
 native scanf has C23 behavior. Existing parse-adapters.c distinguishes
 __isoc23_strtol from legacy strtol only; scanf remains unclassified/uncovered.
 
-No test/build/lint/formatter was run.
+Observed in parent integration: native sscanf and mbrtowc passed; sscanf's locale
+branch was absent on the initial native run. Emscripten conversion failed during
+runtime compilation; no lifted oracle execution passed. The Wasm locale adapter
+failure is not suppressed or presented as locale coverage. sprintf and later
+locale-provisioned native/lifted statuses remain untested.
