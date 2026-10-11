@@ -147,6 +147,7 @@ class Driver:
         if args.debug:
             self.definitions += ["-DELFC_RUNTIME_SYSCALL_DEBUG=1", "-DELFC_RUNTIME_MULSECTIONS_WARNING=1"]
         self.thread_compile = ["-pthread"] if args.pthreads else []
+        self.exception_flags = ["-fwasm-exceptions"] if args.target == "i386-wasm" else []
         self.thread_link = self.thread_compile + (["-sPROXY_TO_PTHREAD=1", "-sPTHREAD_POOL_SIZE=2",
             "-sDEFAULT_PTHREAD_STACK_SIZE=2097152", "-sOFFSCREENCANVAS_SUPPORT=1",
             "-sOFFSCREENCANVASES_TO_PTHREAD=#canvas"] if args.pthreads else [])
@@ -255,7 +256,7 @@ class Driver:
         atomic_text(self.output / f"{self.a.elf_name}.html", source)
 
     def browser_link_flags(self, incremental: bool) -> list[str]:
-        flags = [f"-O{self.a.wasm_opt_level}", *self.thread_link,
+        flags = [f"-O{self.a.wasm_opt_level}", *self.thread_link, *self.exception_flags,
                  *(["-g2"] if self.a.wasm_opt_level == "0" else []), *self.includes,
                  "-std=c++17", *self.definitions, "-DELF_IS_I386", "-DADDRESS_SIZE_BITS=32",
                  "-sUSE_SDL=2", f"-sLEGACY_GL_EMULATION={self.a.legacy_gl}",
@@ -296,7 +297,7 @@ class Driver:
             semantics = [(str(path), digest(path)) for path in paths]
         lift_identity = key(digest(Path(a.lifter)), semantics)
         compiler_identity = self.compiler_identity[emcc]
-        compile_flags = [f"-O{a.wasm_opt_level}", *self.thread_compile]
+        compile_flags = [f"-O{a.wasm_opt_level}", *self.thread_compile, *self.exception_flags]
         metadata_bc, metadata_object = self.cache / "metadata.bc", self.cache / "metadata.wasm.o"
         metadata_key, metadata_changed = await self.stage("Shared metadata", "lifting",
             [a.lifter, *flags, "--metadata_only", "--bc_out", metadata_bc], [metadata_bc],
@@ -442,7 +443,7 @@ class Driver:
                 obj = self.output / f"{name}{'.pthread' if a.pthreads else ''}.wasm.o"
                 if not a.no_compiled:
                     await self.run(name, "compiling", [emcc, f"-O{a.wasm_opt_level}", *self.thread_compile,
-                                                       "-c", ir, "-o", obj])
+                                                       *self.exception_flags, "-c", ir, "-o", obj])
                 await self.run("Final link", "linking", [emcc, *self.browser_link_flags(False), obj,
                     *COMMON, ROOT / "src/runtime/I386Imports.cpp", "-o", self.output / f"{name}.js"])
                 self.html()

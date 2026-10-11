@@ -3,11 +3,14 @@
 #include "I386DynamicLibraries.h"
 #include "I386Tls.h"
 #include "I386Errno.h"
+#include "I386NonlocalJump.h"
 
 #include <SDL2/SDL.h>
 #define GL_GLEXT_PROTOTYPES 1
 #include <SDL2/SDL_opengl.h>
 #include <algorithm>
+#include <exception>
+#include <type_traits>
 #include <cerrno>
 #include <climits>
 #include <cstdio>
@@ -38,6 +41,7 @@
 
 extern "C" const uint32_t _ecv_i386_initializers[];
 extern "C" const uint32_t _ecv_i386_finalizers[];
+extern "C" void __ecv_i386_drain_guest_atexit(uint8_t *, State *, RuntimeManager *);
 
 namespace {
 // Low guest memory is reserved for returned host strings. Host pointers never
@@ -82,9 +86,12 @@ constexpr uint32_t guest_errno_offset = 32;  // Adapter-private word in the rese
 struct Call {
   uint8_t *arena;
   State *state;
+  RuntimeManager *runtime;
   uint32_t stack;
+  uint32_t return_argument_bytes = 0;  // i386 struct-return callees pop the hidden pointer.
   int initial_guest_errno = 0, initial_host_errno = 0;
-  Call(uint8_t *a, State *s) : arena(a), state(s), stack(s->gpr.rsp.dword) {
+  Call(uint8_t *a, State *s, RuntimeManager *r = nullptr)
+      : arena(a), state(s), runtime(r), stack(s->gpr.rsp.dword) {
     if (state->addr.gs_base.dword) {
       memcpy(&initial_guest_errno, guest(arena, state->addr.gs_base.dword + guest_errno_offset, 4), 4);
       errno = i386_errno_to_host(initial_guest_errno);
@@ -118,15 +125,17 @@ struct Call {
     state->gpr.rdx.dword = uint32_t(value >> 32);
   }
   void result(uint32_t value) { state->gpr.rax.dword = value; }
-  ~Call() {
+  ~Call() noexcept(false) {
     if (state->addr.gs_base.dword) {
       const int value = errno == initial_host_errno ? initial_guest_errno : host_errno_to_i386(errno);
       memcpy(guest(arena, state->addr.gs_base.dword + guest_errno_offset, 4), &value, 4);
     }
+    if (std::uncaught_exceptions()) return;
     uint32_t return_pc;
     memcpy(&return_pc, guest(arena, stack, 4), 4);
     state->gpr.rip.dword = return_pc;
-    state->gpr.rsp.dword = stack + 4;
+    state->gpr.rsp.dword = stack + 4 + return_argument_bytes;
+    if (runtime) __ecv_i386_dispatch_pending_signals(arena, state, runtime);
   }
 };
 SDL_Window *window(uint32_t handle) {
@@ -141,11 +150,15 @@ SDL_GLContext context(uint32_t handle) {
 }
 void invoke(uint8_t *arena, State *state, RuntimeManager *runtime, uint32_t target,
             const uint32_t *args, unsigned count) {
-  auto it = std::lower_bound(runtime->addr_funptr_srt_list.begin(),
-      runtime->addr_funptr_srt_list.end(), target,
-      [](const auto &item, uint32_t value) { return item.first < value; });
-  if (it == runtime->addr_funptr_srt_list.end() || it->first != target)
-    elfconv_runtime_error("Unknown guest callback 0x%x.\n", target);
+  LiftedFunc function = runtime->FindGuestAdapter(target);
+  if (!function) {
+    auto it = std::lower_bound(runtime->addr_funptr_srt_list.begin(),
+        runtime->addr_funptr_srt_list.end(), target,
+        [](const auto &item, uint32_t value) { return item.first < value; });
+    if (it == runtime->addr_funptr_srt_list.end() || it->first != target)
+      elfconv_runtime_error("Unknown guest callback 0x%x.\n", target);
+    function = it->second;
+  }
   uint32_t saved_stack = state->gpr.rsp.dword;
   uint32_t saved_pc = state->gpr.rip.dword;
   // At function entry ESP+4 must be 16-byte aligned for the i386 SysV ABI.
@@ -155,7 +168,29 @@ void invoke(uint8_t *arena, State *state, RuntimeManager *runtime, uint32_t targ
   if (count) memcpy(guest(arena, stack + 4, count * 4), args, count * 4);
   state->gpr.rsp.dword = stack;
   state->gpr.rip.dword = target;
-  it->second(arena, state, target, runtime);
+  try {
+    function(arena, state, target, runtime);
+  } catch (const I386NonlocalJump &) {
+    // A callback may jump to an older invocation. Leave its restored state intact.
+    if (state->gpr.rsp.dword > stack + 4) throw;
+    while (state->gpr.rip.dword) {
+      const uint32_t pc = state->gpr.rip.dword;
+      auto owner = std::upper_bound(runtime->addr_funptr_srt_list.begin(),
+          runtime->addr_funptr_srt_list.end(), pc,
+          [](uint32_t value, const auto &item) { return value < item.first; });
+      if (owner == runtime->addr_funptr_srt_list.begin())
+        elfconv_runtime_error("Unknown guest longjmp target 0x%x.\n", pc);
+      --owner;
+      auto blocks = runtime->fun_bb_addr_map.find(owner->first);
+      if (blocks == runtime->fun_bb_addr_map.end() || !blocks->second.count(pc))
+        elfconv_runtime_error("Guest longjmp target is not a lifted continuation: 0x%x.\n", pc);
+      try {
+        owner->second(arena, state, pc, runtime);
+      } catch (const I386NonlocalJump &) {
+        if (state->gpr.rsp.dword > stack + 4) throw;
+      }
+    }
+  }
   state->gpr.rsp.dword = saved_stack;
   state->gpr.rip.dword = saved_pc;
 }
@@ -354,9 +389,11 @@ const I386DynamicSymbol *lookup_library(uint32_t index, const char *name) {
 struct Allocation { uint32_t size; bool free; };
 std::map<uint32_t, Allocation> allocations;
 std::recursive_mutex allocation_mutex;
-uint32_t allocate(uint32_t size) {
+uint32_t allocate_aligned(uint32_t size, uint32_t alignment) {
   std::lock_guard<std::recursive_mutex> lock(allocation_mutex);
-  if (size > UINT32_MAX - 15) return 0;
+  if (!alignment || (alignment & (alignment - 1))) { errno = EINVAL; return 0; }
+  alignment = std::max(alignment, 16u);
+  if (size > UINT32_MAX - 15) { errno = ENOMEM; return 0; }
   size = (std::max(size, 1u) + 15) & ~15u;
   if (allocations.empty()) {
     uint32_t end = BRK_END_VMA;
@@ -369,15 +406,25 @@ uint32_t allocate(uint32_t size) {
     allocations.emplace(BRK_START_VMA, Allocation{end - uint32_t(BRK_START_VMA), true});
   }
   for (auto it = allocations.begin(); it != allocations.end(); ++it) {
-    if (!it->second.free || it->second.size < size) continue;
-    uint32_t address = it->first, remaining = it->second.size - size;
-    it->second = {size, false};
+    if (!it->second.free) continue;
+    const uint64_t aligned = (uint64_t(it->first) + alignment - 1) & ~uint64_t(alignment - 1);
+    const uint64_t padding = aligned - it->first;
+    if (padding + size > it->second.size) continue;
+    const uint32_t address = uint32_t(aligned);
+    const uint32_t remaining = it->second.size - uint32_t(padding) - size;
+    if (padding) {
+      it->second.size = uint32_t(padding);
+      allocations.emplace_hint(std::next(it), address, Allocation{size, false});
+    } else {
+      it->second = {size, false};
+    }
     if (remaining) allocations.emplace(address + size, Allocation{remaining, true});
     return address;
   }
   errno = ENOMEM;
   return 0;
 }
+uint32_t allocate(uint32_t size) { return allocate_aligned(size, 16); }
 void release(uint32_t address) {
   std::lock_guard<std::recursive_mutex> lock(allocation_mutex);
   if (!address) return;
@@ -406,6 +453,18 @@ uint32_t owned_string(uint8_t *arena, const char *value) {
   if (address) memcpy(guest(arena, address, length), value, length);
   return address;
 }
+
+uint32_t register_guest_adapter(uint8_t *arena, RuntimeManager *runtime, LiftedFunc adapter) {
+  if (!runtime || !adapter) { errno = EINVAL; return 0; }
+  std::lock_guard<std::mutex> lock(runtime->adapter_mutex);
+  for (const auto &[address, function] : runtime->guest_adapters)
+    if (function == adapter) return address;
+  const uint32_t address = allocate(1);
+  if (!address) return 0;
+  *static_cast<uint8_t *>(guest(arena, address, 1)) = 0xc3;
+  runtime->guest_adapters.emplace(address, adapter);
+  return address;
+}
 std::map<std::string, uint32_t, std::less<>> environment_values;
 std::map<uint32_t, FILE *> files;
 uint32_t next_file = 0x1000;
@@ -429,92 +488,135 @@ struct Arguments {
   }
   uint64_t wide() { uint64_t lo = word(); return lo | (uint64_t(word()) << 32); }
 };
-template<typename T>
-void append_format(std::string &out, const std::string &spec, T value) {
-  char buffer[256];
-  int size = snprintf(buffer, sizeof(buffer), spec.c_str(), value);
-  if (size < 0) elfconv_runtime_error("Invalid guest printf format.\n");
-  if (size < int(sizeof(buffer))) out.append(buffer, size);
-  else {
-    std::vector<char> large(size_t(size) + 1);
+const wchar_t *wide_text(uint8_t *arena, uint32_t address);
+int scan_guest_string(uint8_t *arena, const char *input, const char *fmt, Arguments args);
+bool write_event(uint8_t *arena, uint32_t address, SDL_Event &event);
+
+template<typename Char, typename T>
+void append_format(std::basic_string<Char> &out, const std::basic_string<Char> &spec, T value) {
+  Char buffer[256];
+  int size;
+  if constexpr (std::is_same_v<Char, char>)
+    size = snprintf(buffer, 256, spec.c_str(), value);
+  else
+    size = swprintf(buffer, 256, spec.c_str(), value);
+  if (size >= 0 && size < 256) { out.append(buffer, size); return; }
+  if constexpr (std::is_same_v<Char, char>) {
+    if (size < 0) elfconv_runtime_error("Invalid guest printf format.\n");
+    std::vector<Char> large(size_t(size) + 1);
     snprintf(large.data(), large.size(), spec.c_str(), value);
     out.append(large.data(), size);
+  } else {
+    for (size_t capacity = 512; capacity <= INT_MAX; capacity *= 2) {
+      std::vector<Char> large(capacity);
+      size = swprintf(large.data(), large.size(), spec.c_str(), value);
+      if (size >= 0) { out.append(large.data(), size); return; }
+      if (errno == EILSEQ) break;
+    }
+    elfconv_runtime_error("Invalid guest wide printf format.\n");
   }
 }
-std::string format(uint8_t *arena, const char *input, Arguments args) {
-  std::string out;
-  for (const char *p = input; *p;) {
+template<typename Char>
+std::basic_string<Char> format_impl(uint8_t *arena, const Char *input, Arguments args) {
+  std::basic_string<Char> out;
+  auto ascii = [](Char value, const char *set) {
+    return value > 0 && value < 128 && strchr(set, int(value));
+  };
+  for (const Char *p = input; *p;) {
     if (*p != '%') { out += *p++; continue; }
     ++p;
     if (*p == '%') { out += *p++; continue; }
-    std::string spec = "%";
-    while (*p && strchr("-+ #0", *p)) spec += *p++;
+    std::basic_string<Char> spec(1, '%');
+    while (ascii(*p, "-+ #0")) spec += *p++;
     if (*p == '*') {
       int32_t width = args.word();
       if (width == INT32_MIN) elfconv_runtime_error("Guest printf width overflow.\n");
       if (width < 0) { spec += '-'; width = -width; }
-      spec += std::to_string(width);
+      const auto digits = std::to_string(width);
+      spec.append(digits.begin(), digits.end());
       ++p;
-    } else while (isdigit(static_cast<unsigned char>(*p))) spec += *p++;
+    } else while (*p >= '0' && *p <= '9') spec += *p++;
     if (*p == '.') {
       ++p;
       if (*p == '*') {
         int32_t precision = args.word();
-        if (precision >= 0) spec += "." + std::to_string(precision);
+        if (precision >= 0) {
+          spec += '.';
+          const auto digits = std::to_string(precision);
+          spec.append(digits.begin(), digits.end());
+        }
         ++p;
       } else {
         spec += '.';
-        while (isdigit(static_cast<unsigned char>(*p))) spec += *p++;
+        while (*p >= '0' && *p <= '9') spec += *p++;
       }
     }
     char length = 0;
-    if (*p && strchr("hljztL", *p)) {
-      length = *p++;
+    if (ascii(*p, "hljztL")) {
+      length = char(*p++);
       if (*p == length && (length == 'h' || length == 'l')) {
         ++p;
         length = length == 'l' ? 'q' : 'H';
       }
     }
-    char conversion = *p++;
+    const char conversion = char(*p++);
     if (!conversion) elfconv_runtime_error("Incomplete guest printf format.\n");
     if (strchr("diuoxX", conversion)) {
       bool wide = length == 'q' || length == 'j';
       uint64_t value = wide ? args.wide() : args.word();
       if (length == 'h') value = uint16_t(value);
       if (length == 'H') value = uint8_t(value);
-      spec += "ll";
-      spec += conversion;
+      spec += 'l'; spec += 'l'; spec += conversion;
       if (conversion == 'd' || conversion == 'i') {
         int64_t signed_value = wide ? int64_t(value) : int32_t(value);
         if (length == 'h') signed_value = int16_t(value);
         if (length == 'H') signed_value = int8_t(value);
         append_format(out, spec, static_cast<long long>(signed_value));
       } else append_format(out, spec, static_cast<unsigned long long>(value));
-    } else if (strchr("aAeEfFgG", conversion) && length != 'L') {
-      uint64_t bits = args.wide();
+    } else if (strchr("aAeEfFgG", conversion)) {
       double value;
-      memcpy(&value, &bits, 8);
+      if (length == 'L') {
+        float80_t extended;
+        memcpy(extended.data, guest(arena, args.address, 12), 10);
+        args.address += 12;
+        value = double(extended);
+      } else {
+        const uint64_t bits = args.wide();
+        memcpy(&value, &bits, 8);
+      }
       spec += conversion;
       append_format(out, spec, value);
-    } else if (conversion == 's' && !length) {
-      uint32_t address = args.word();
-      spec += 's';
-      append_format(out, spec, address ? text(arena, address) : "(null)");
-    } else if (conversion == 'c' && !length) {
+    } else if (conversion == 's' && (length == 0 || length == 'l')) {
+      const uint32_t address = args.word();
+      if (length == 'l') {
+        spec += 'l'; spec += 's';
+        append_format(out, spec, address ? wide_text(arena, address) : L"(null)");
+      } else {
+        spec += 's';
+        append_format(out, spec, address ? text(arena, address) : "(null)");
+      }
+    } else if (conversion == 'c' && (length == 0 || length == 'l')) {
+      if (length == 'l') spec += 'l';
       spec += 'c';
-      append_format(out, spec, int(args.word()));
+      append_format(out, spec, args.word());
     } else if (conversion == 'p' && !length) {
-      spec += "llx";
-      append_format(out, spec, static_cast<unsigned long long>(args.word()));
+      spec += 'p';
+      append_format(out, spec, reinterpret_cast<void *>(uintptr_t(args.word())));
     } else if (conversion == 'n') {
-      uint32_t address = args.word();
-      uint64_t count = out.size();
-      size_t size = length == 'q' || length == 'j' ? 8 : length == 'h' ? 2 : length == 'H' ? 1 : 4;
+      const uint32_t address = args.word();
+      const uint64_t count = out.size();
+      const size_t size = length == 'q' || length == 'j' ? 8 : length == 'h' ? 2 : length == 'H' ? 1 : 4;
       memcpy(guest(arena, address, size), &count, size);
     } else elfconv_runtime_error("Unsupported guest printf conversion: %c.\n", conversion);
     if (out.size() > INT_MAX) elfconv_runtime_error("Guest printf output overflow.\n");
   }
   return out;
+}
+std::string format(uint8_t *arena, const char *input, Arguments args) {
+  return format_impl(arena, input, args);
+}
+std::wstring wide_format(uint8_t *arena, const wchar_t *input, Arguments args) {
+  return format_impl(arena, input, args);
 }
 int print(Call &call, FILE *stream, unsigned format_arg) {
   auto out = format(call.arena, text(call.arena, call.word(format_arg)),
@@ -603,7 +705,7 @@ extern "C" void __ecv_i386_finalize_thread_tls(uint8_t *arena, State *state,
 
 #define IMPORT(name) extern "C" void __ecv_i386_##name(uint8_t *arena, State *state, uint32_t, RuntimeManager *runtime)
 #include "I386Pthreads.inc"
-#define CALL Call call(arena, state)
+#define CALL Call call(arena, state, runtime)
 namespace {
 static_assert(CLOCK_REALTIME == 0 && CLOCK_MONOTONIC == 1 &&
               CLOCK_PROCESS_CPUTIME_ID == 2 && CLOCK_THREAD_CPUTIME_ID == 3,
@@ -811,6 +913,7 @@ extern "C" int __ecv_i386_run_function_entry(uint8_t *arena, State *state,
   invoke(arena, state, runtime, entry, args, 3);
   const int status = state->gpr.rax.dword;
   drain_tls_destructors(arena, state, runtime);
+  __ecv_i386_drain_guest_atexit(arena, state, runtime);
   for (auto *p = _ecv_i386_finalizers; *p; ++p)
     invoke(arena, state, runtime, *p, nullptr, 0);
   finish_libraries(arena, state, runtime);
@@ -826,6 +929,7 @@ IMPORT(__libc_start_main) {
   invoke(arena, state, runtime, main, args, 3);
   int status = state->gpr.rax.dword;
   drain_tls_destructors(arena, state, runtime);
+  __ecv_i386_drain_guest_atexit(arena, state, runtime);
   for (auto *p = _ecv_i386_finalizers; *p; ++p) invoke(arena, state, runtime, *p, nullptr, 0);
   if (call.word(4)) invoke(arena, state, runtime, call.word(4), nullptr, 0);
   finish_libraries(arena, state, runtime);
@@ -1211,6 +1315,9 @@ IMPORT(exit) {
   CALL;
   const uint32_t status = call.word(0);
   drain_tls_destructors(arena, state, runtime);
+  __ecv_i386_drain_guest_atexit(arena, state, runtime);
+  for (auto *p = _ecv_i386_finalizers; *p; ++p)
+    invoke(arena, state, runtime, *p, nullptr, 0);
   finish_libraries(arena, state, runtime);
   exit(status);
 }
@@ -1531,80 +1638,8 @@ IMPORT(qsort) {
 
 IMPORT(__isoc99_sscanf) {
   CALL;
-  const char *input = text(arena, call.word(0)), *start = input;
-  const char *fmt = text(arena, call.word(1));
-  unsigned argument = 2;
-  int assigned = 0;
-  for (const char *p = fmt; *p;) {
-    if (isspace(static_cast<unsigned char>(*p))) {
-      while (isspace(static_cast<unsigned char>(*p))) ++p;
-      while (isspace(static_cast<unsigned char>(*input))) ++input;
-      continue;
-    }
-    if (*p != '%') { if (*p++ != *input) break; ++input; continue; }
-    ++p;
-    if (*p == '%') { ++p; if (*input != '%') break; ++input; continue; }
-    bool suppress = *p == '*';
-    if (suppress) ++p;
-    uint32_t width = 0;
-    while (isdigit(static_cast<unsigned char>(*p))) {
-      if (width > (UINT32_MAX - 9) / 10) elfconv_runtime_error("Guest scanf width overflow.\n");
-      width = width * 10 + (*p++ - '0');
-    }
-    char length = 0;
-    if (*p && strchr("hljztL", *p)) {
-      length = *p++;
-      if (*p == length && (length == 'h' || length == 'l')) { ++p; length = length == 'l' ? 'q' : 'H'; }
-    }
-    char conversion = *p++;
-    if (!conversion) elfconv_runtime_error("Incomplete guest scanf format.\n");
-    uint32_t address = suppress ? 0 : call.word(argument++);
-    size_t size = length == 'q' || length == 'j' ? 8 : length == 'h' ? 2 : length == 'H' ? 1 : 4;
-    if (conversion == 'n') {
-      uint64_t count = input - start;
-      if (!suppress) memcpy(guest(arena, address, size), &count, size);
-      continue;
-    }
-    if (conversion != 'c' && conversion != '[')
-      while (isspace(static_cast<unsigned char>(*input))) ++input;
-    if (!*input) { if (!assigned) assigned = EOF; break; }
-    if (conversion == 's' || conversion == 'c') {
-      size_t count = 0, limit = width ? width : conversion == 'c' ? 1 : UINT32_MAX;
-      while (count < limit && input[count] &&
-             (conversion == 'c' || !isspace(static_cast<unsigned char>(input[count])))) ++count;
-      if (!count || (conversion == 'c' && count < limit)) break;
-      if (!suppress) {
-        auto *dst = static_cast<char *>(guest(arena, address, count + (conversion == 's')));
-        memcpy(dst, input, count);
-        if (conversion == 's') dst[count] = 0;
-        ++assigned;
-      }
-      input += count;
-      continue;
-    }
-    std::string bounded;
-    const char *number = input;
-    if (width && strlen(input) > width) { bounded.assign(input, width); number = bounded.c_str(); }
-    char *end = nullptr;
-    if (strchr("diuoxXp", conversion)) {
-      int base = conversion == 'i' ? 0 : conversion == 'o' ? 8 :
-                 conversion == 'x' || conversion == 'X' || conversion == 'p' ? 16 : 10;
-      uint64_t value = conversion == 'd' || conversion == 'i' ?
-          uint64_t(strtoll(number, &end, base)) : strtoull(number, &end, base);
-      if (end == number) break;
-      if (!suppress) { memcpy(guest(arena, address, size), &value, size); ++assigned; }
-    } else if (strchr("aAeEfFgG", conversion) && length != 'L') {
-      double value = strtod(number, &end);
-      if (end == number) break;
-      if (!suppress) {
-        if (length == 'l') memcpy(guest(arena, address, 8), &value, 8);
-        else { float single = value; memcpy(guest(arena, address, 4), &single, 4); }
-        ++assigned;
-      }
-    } else elfconv_runtime_error("Unsupported guest scanf conversion: %c.\n", conversion);
-    input += end - number;
-  }
-  call.result(assigned);
+  call.result(scan_guest_string(arena, text(arena, call.word(0)),
+      text(arena, call.word(1)), {arena, call.stack + 12}));
 }
 namespace {
 uint32_t ctype_table(uint8_t *arena, unsigned kind) {
@@ -1840,13 +1875,7 @@ IMPORT(SDL_PollEvent) {
     if (count == guest_keyboard_count && count)
       memcpy(guest(arena, guest_keyboard_state, count), keys, count);
   }
-  if (found && call.word(0)) {
-    if (event.type == SDL_SYSWMEVENT || event.type == SDL_DROPFILE || event.type == SDL_DROPTEXT ||
-        event.type == SDL_TEXTEDITING_EXT || event.type >= SDL_USEREVENT)
-      elfconv_runtime_error("Unsupported pointer-bearing guest SDL event %u.\n", event.type);
-    static_assert(sizeof(SDL_Event) == 56, "SDL2 guest event layout requires 56 bytes");
-    memcpy(guest(arena, call.word(0), 56), &event, 56);
-  }
+  if (found && call.word(0) && !write_event(arena, call.word(0), event)) found = 0;
   call.result(found);
 }
 IMPORT(SDL_GetRelativeMouseState) {
@@ -2245,3 +2274,10 @@ IMPORT(glGetAttribLocation) {
 IMPORT(glDisableVertexAttribArray) { CALL; glDisableVertexAttribArray(call.word(0)); }
 IMPORT(glDisable) { CALL; glDisable(call.word(0)); }
 IMPORT(glActiveTexture) { CALL; glActiveTexture(call.word(0)); }
+
+#include "I386LocaleExtra.inc"
+#include "I386TimeExtra.inc"
+#include "I386LibcExtra.inc"
+#include "I386PosixExtra.inc"
+#include "I386NetworkExtra.inc"
+#include "I386SdlExtra.inc"

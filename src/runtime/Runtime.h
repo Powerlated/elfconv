@@ -80,6 +80,16 @@ class RuntimeManager {
   };
   std::mutex tls_mutex;
   std::recursive_mutex guest_atomic_mutex;
+  // Runtime-created guest function pointers (GL procedures and host interfaces).
+  // Keep these separate from the immutable lifted table while workers execute it.
+  std::mutex adapter_mutex;
+  std::map<uint32_t, LiftedFunc> guest_adapters;
+  LiftedFunc FindGuestAdapter(addr_t address) {
+    if (address < BRK_START_VMA || address >= BRK_END_VMA) return nullptr;
+    std::lock_guard<std::mutex> lock(adapter_mutex);
+    auto it = guest_adapters.find(address);
+    return it == guest_adapters.end() ? nullptr : it->second;
+  }
   std::vector<std::unique_ptr<TlsThread>> tls_threads;
   uint32_t tls_next_address = THREAD_PTR;
   uint32_t tls_guards[2] = {};

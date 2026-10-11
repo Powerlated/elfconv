@@ -338,6 +338,17 @@ int main(int argc, char *argv[]) {
     }
   } while (!manager.rest_disasm_funcs.empty());
 
+  if (arch_name == remill::kArchX86) {
+    // Guest longjmp unwinds lifted frames to the runtime invocation boundary.
+    for (auto &function : *module) {
+      function.removeFnAttr(llvm::Attribute::NoUnwind);
+      for (auto &block : function)
+        for (auto &instruction : block)
+          if (auto *call = llvm::dyn_cast<llvm::CallBase>(&instruction))
+            call->removeFnAttr(llvm::Attribute::NoUnwind);
+    }
+  }
+
   // If we lift with `test_mode`, we should disable `able_vrp_opt`.
   manager.elf_obj.able_vrp_opt = !lift_config.norm_mode;
 

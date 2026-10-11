@@ -1,5 +1,8 @@
 #include "Memory.h"
 #include "Runtime.h"
+#if defined(ELF_IS_I386)
+#include "I386NonlocalJump.h"
+#endif
 #include "remill/Arch/Runtime/Math.h"
 
 #include <cstring>
@@ -282,6 +285,14 @@ void __ecv_warning(uint8_t *, State &, addr_t addr, RuntimeManager *) {
 */
 void __remill_function_call(uint8_t *arena_ptr, State &state, addr_t t_fun_vma,
                             RuntimeManager *rt_m) {
+#if defined(ELF_IS_I386)
+  PCREG = t_fun_vma;
+  __ecv_i386_dispatch_pending_signals(arena_ptr, &state, rt_m);
+  if (auto adapter = rt_m->FindGuestAdapter(t_fun_vma)) {
+    adapter(arena_ptr, &state, t_fun_vma, rt_m);
+    return;
+  }
+#endif
   auto &addr_funptr_srt_list = rt_m->addr_funptr_srt_list;
   // jump to other function via the function pointer table.
   auto jmp_fun_it =
@@ -301,6 +312,14 @@ void __remill_function_call(uint8_t *arena_ptr, State &state, addr_t t_fun_vma,
 
 /* BR instruction */
 void __remill_jump(uint8_t *arena_ptr, State &state, addr_t t_vma, RuntimeManager *rt_m) {
+#if defined(ELF_IS_I386)
+  PCREG = t_vma;
+  __ecv_i386_dispatch_pending_signals(arena_ptr, &state, rt_m);
+  if (auto adapter = rt_m->FindGuestAdapter(t_vma)) {
+    adapter(arena_ptr, &state, t_vma, rt_m);
+    return;
+  }
+#endif
   auto &addr_funptr_srt_list = rt_m->addr_funptr_srt_list;
   // jump to other function via the function pointer table.
   auto jmp_fun_it =

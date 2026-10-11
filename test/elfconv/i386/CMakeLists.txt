@@ -53,3 +53,23 @@ foreach(profile IN ITEMS dead-eflags shift-defined double-shift-defined rotate-d
   set_tests_properties(i386_${test_suffix} PROPERTIES
     LABELS "i386;regression" TIMEOUT 1000 RUN_SERIAL TRUE)
 endforeach()
+option(ELFCONV_STEAM_TESTS "Run native-versus-Wasm Steam API regression" OFF)
+if(ELFCONV_STEAM_TESTS)
+  find_program(ELFCONV_I386_CXX NAMES g++ REQUIRED)
+  find_program(ELFCONV_I386_READELF NAMES readelf REQUIRED)
+  set(ELFCONV_STEAM_API
+    "${CMAKE_SOURCE_DIR}/build/gbe_fork/build/linux/gmake/release/regular/x86/libsteam_api.so"
+    CACHE FILEPATH "Pinned gbe_fork i386 guest Steam API library")
+  add_test(NAME i386_steam
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/../run_steam.py"
+      --lifter "$<TARGET_FILE:elflift>"
+      --emcc "${ELFCONV_EMCC}"
+      --node "${ELFCONV_I386_NODE}"
+      --cxx "${ELFCONV_I386_CXX}"
+      --readelf "${ELFCONV_I386_READELF}"
+      --steam-api "${ELFCONV_STEAM_API}"
+      --gbe-source "${CMAKE_SOURCE_DIR}/build/gbe_fork"
+      --output-dir "${CMAKE_CURRENT_BINARY_DIR}/steam")
+  set_tests_properties(i386_steam PROPERTIES
+    LABELS "i386;regression;steam" TIMEOUT 1200 RUN_SERIAL TRUE)
+endif()
