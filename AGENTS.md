@@ -13,6 +13,7 @@
 - Prefer one branch/worktree per cross-file slice; isolate generated files and build outputs too.
 - Commit shared contracts before parallel work. Worktrees prevent edit collisions, not ABI or interface dependencies.
 - Agents deliver coherent implementation/caller/build/fixture patches; main reviews and merges in dependency order, then verifies end-to-end.
+- Subagents must run rigorous slice-local checks before submitting work to main: build, relevant behavior tests, and actual-path smoke checks. Report commands, results, and blockers; main still verifies the integrated result.
 - Finish shared prerequisites first; batch independent slices. Verify completed waves and feed concrete failures into the next wave.
 - Require every assigned symbol accounted for, evidence-backed layouts, and explicit unsupported semantics. Undefined helpers, stubs, and error-only placeholders are not completion.
 - Dependency owners deliver pinned acquisition, reproducible builds, loader integration, and real behavior fixtures—not research or commands alone.
