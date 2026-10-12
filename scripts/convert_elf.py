@@ -104,10 +104,8 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--no-asyncify", action="store_true",
                         help="Do not instrument browser Wasm with Asyncify.")
     result.add_argument("--legacy-gl", choices=("0", "1"), default="1")
-    result.add_argument("--lift-jobs", type=int, default=2,
-                        help="Maximum concurrent ELF lifting processes")
-    result.add_argument("--compile-jobs", type=int, default=8,
-                        help="Maximum concurrent compiler jobs")
+    result.add_argument("--jobs", type=int, default=2,
+                        help="Maximum concurrent lifting and compiling jobs combined")
     result.add_argument("--max-ir-chunks-per-elf", type=int, default=0, metavar="N",
                         help="Maximum linkable chunks per ELF; 1 skips partitioning, 0 disables chunk output.")
     result.add_argument("--debug-func-addr", default="0")
@@ -335,16 +333,15 @@ class Driver:
             self.display.update(name, "queued")
         compiler_identity = self.compiler_identity[emcc]
         compile_flags = [f"-O{a.wasm_opt_level}", *self.thread_compile, *self.exception_flags]
-        compile_slots = asyncio.Semaphore(a.compile_jobs)
-        lift_slots = asyncio.Semaphore(a.lift_jobs)
+        job_slots = asyncio.Semaphore(a.jobs)
         metadata_bc, metadata_object = self.cache / "metadata.bc", self.cache / "metadata.wasm.o"
 
         async def compile_metadata() -> str:
-            async with lift_slots:
+            async with job_slots:
                 metadata_key, metadata_changed = await self.stage("Shared metadata", "lifting",
                     [a.lifter, *flags, "--metadata_only", "--bc_out", metadata_bc], [metadata_bc],
                     [digest(fingerprint), lift_identity], self.cache / "metadata.lift.key")
-            async with compile_slots:
+            async with job_slots:
                 metadata_compile_key, metadata_compiled = await self.stage("Shared metadata", "compiling",
                     [emcc, *compile_flags, "-c", metadata_bc, "-o", metadata_object],
                     [metadata_object], [metadata_key, compiler_identity],
@@ -411,7 +408,7 @@ class Driver:
             chunk_name = f"{owner} chunk {index + 1}/{total}"
             progress_name = f"{owner}::compile"
             try:
-                async with compile_slots:
+                async with job_slots:
                     self.display.update(
                         progress_name, "compiling",
                         "",
@@ -448,7 +445,7 @@ class Driver:
                 ordered_entries = sorted(lift_entries, key=lambda value: value[4], reverse=True)
                 try:
                     async for owner, chunks in bounded_as_completed(
-                            ordered_entries, lift_slots, lift_entry):
+                            ordered_entries, job_slots, lift_entry):
                         lifted_chunks[owner] = chunks
                         lift_status = "done" if any(
                             bool(chunk["lift_changed"]) for chunk in chunks) else "cached"
@@ -489,7 +486,7 @@ class Driver:
 
             async with asyncio.TaskGroup() as group:
                 group.create_task(lift_all())
-                for _ in range(a.compile_jobs):
+                for _ in range(a.jobs):
                     group.create_task(compile_ready())
 
         headers = sorted(path for directory in (ROOT / "src/runtime", ROOT / "src/utils",
@@ -503,7 +500,7 @@ class Driver:
         atomic_text(registry, registry_text)
         registry_object = self.cache / "UnitRegistry.wasm.o"
         async def compile_registry() -> tuple[Path, str]:
-            async with compile_slots:
+            async with job_slots:
                 registry_key, compiled = await self.stage("Unit registry", "compiling",
                     [emcc, *runtime_flags, "-c", registry, "-o", registry_object], [registry_object],
                     [key(registry_text), header_key, compiler_identity],
@@ -515,7 +512,7 @@ class Driver:
 
         async def compile_runtime(source: Path) -> tuple[Path, str]:
             obj = self.cache / f"runtime-{source.stem}.wasm.o"
-            async with compile_slots:
+            async with job_slots:
                 stage_key, compiled = await self.stage(f"Runtime/{source.name}", "compiling",
                     [emcc, *runtime_flags, f"-DECV_LEGACY_GL={a.legacy_gl}", "-c", source, "-o", obj],
                     [obj], [digest(source), header_key, compiler_identity],
@@ -629,7 +626,7 @@ class Driver:
         compile_flags = [f"-O{a.wasm_opt_level}", *self.thread_compile, *self.exception_flags]
         chunk_objects = [self.cache / f"{name}-ir-chunk-{index}.wasm.o"
                          for index in range(len(chunks))]
-        semaphore = asyncio.Semaphore(a.compile_jobs)
+        semaphore = asyncio.Semaphore(a.jobs)
         chunk_tasks = []
 
         async def compile_chunk(index: int, bitcode: Path, obj: Path) -> tuple[Path, str]:
@@ -798,7 +795,7 @@ class Driver:
                         *(["-g2"] if a.wasm_opt_level == "0" else []), *self.includes, "-std=c++17",
                         *self.definitions, "-DELF_IS_I386", "-DADDRESS_SIZE_BITS=32", "-sUSE_SDL=2",
                         f"-DECV_LEGACY_GL={a.legacy_gl}"]
-                    semaphore = asyncio.Semaphore(a.compile_jobs)
+                    semaphore = asyncio.Semaphore(a.jobs)
 
                     async def compile_runtime(source: Path) -> Path:
                         runtime_obj = self.cache / f"single-runtime-{source.stem}.wasm.o"
@@ -860,10 +857,8 @@ def validate(a: argparse.Namespace) -> None:
     a.elf_name = a.elf_name or a.input.name
     if Path(a.elf_name).name != a.elf_name or a.elf_name in (".", ".."):
         raise ValueError("--elf-name must be a filename, not a path")
-    if a.compile_jobs < 1:
-        raise ValueError("--compile-jobs must be positive")
-    if a.lift_jobs < 1:
-        raise ValueError("--lift-jobs must be positive")
+    if a.jobs < 1:
+        raise ValueError("--jobs must be positive")
     if a.max_ir_chunks_per_elf < 0:
         raise ValueError("--max-ir-chunks-per-elf must be non-negative")
     if a.max_ir_chunks_per_elf and a.target != "i386-wasm":

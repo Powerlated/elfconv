@@ -40,7 +40,6 @@ python3 scripts/convert_elf.py \
   --legacy-gl 0 \
   --max-ir-chunks-per-elf 1 \
   --runtime-archive "$PWD/build/llvm23/src/lifter/libelfconv-runtime-i386-wasm-incremental.a" \
-  --lift-jobs "${ELFCONV_LIFT_JOBS:-12}" \
-  --compile-jobs "${ELFCONV_COMPILE_JOBS:-12}" \
+  --jobs "${ELFCONV_JOBS:-12}" \
   "$@"
 

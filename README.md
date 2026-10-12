@@ -194,20 +194,18 @@ For `i386-wasm`, runtime sources compile as independent cached objects.
 `N=1` writes the original module without partitioning or cloning; `N=0`
 disables chunk output (default). Larger limits are capped by function count.
 LLVM keeps dependent definitions together; chunk sizes can differ.
-Chunked conversion cannot use linker-map incremental units. `--lift-jobs N` bounds
-concurrent ELF lifts (default 2); `--compile-jobs N` bounds compiler jobs
-(default 8). Completed ELF chunks enter the compiler pool while other lifts
-continue; ready owners rotate through the pool. CMake uses `ELFCONV_LIFT_JOBS`
-(default 2) and `ELFCONV_COMPILE_JOBS` (default 2); target arguments:
-`LIFT_JOBS` and `COMPILE_JOBS`.
+Chunked conversion cannot use linker-map incremental units. `--jobs N` bounds
+lifting and compiling jobs combined (default 2). Completed ELF chunks enter
+the shared pool while other lifts continue; ready owners rotate through the pool.
+CMake uses `ELFCONV_JOBS` (default 2); target argument: `JOBS`.
 Progress rows show ELF, stage detail, counter, then stage time.
 Compiling counters count completed chunks, not chunk identities.
 Chunk output separates module verification, bitcode serialization, and bitcode writing.
 Writing shows `[N bytes]` flushed to temporary output.
 
-Portal: `./lift_portal.sh` reuses the repository-root cache, with one chunk per ELF,
-12 lifting/compiler jobs, and `-O1`. Overrides: `ELFCONV_LIFT_JOBS`,
-`ELFCONV_COMPILE_JOBS`, `ELFCONV_WASM_OPT_LEVEL`; extra driver flags pass through.
+Portal: `./lift_portal.sh` reuses the repository-root cache and uses a shared
+lifting/compiling pool with `-O1`. Overrides: `ELFCONV_JOBS`,
+`ELFCONV_WASM_OPT_LEVEL`; extra driver flags pass through.
 After lifter/runtime edits, run `ELFCONV_BUILD=1 ./lift_portal.sh` to rebuild first.
 Lifting shows `[completed/known total]`; the total grows as callees are discovered.
 After function translation, the display names IR finalization, partitioning,

@@ -14,7 +14,7 @@ from unittest.mock import patch
 from rich.console import Console
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
-from convert_elf import Display, Driver, bounded_as_completed, digest, parser, tool
+from convert_elf import Display, Driver, bounded_as_completed, digest, parser, tool, validate
 from pack_preload import pack_preload
 
 
@@ -133,10 +133,15 @@ async def chunk_pool() -> None:
                  if "partitioning IR" in line or "writing bitcode" in line or "chunk 1/4" in line]
         assert lines and all("server.so" in line for line in lines)
         assert all(re.search(r"\[\d+(?:/\d+| bytes)\]  \d+\.\ds$", line) for line in lines)
-    options = parser().parse_args(["--input", __file__, "--target", "i386-wasm",
-                                   "--lift-jobs", "3", "--compile-jobs", "4"])
-    assert options.lift_jobs == 3
-    assert options.compile_jobs == 4
+    for jobs in (0, -1):
+        options = parser().parse_args(["--input", __file__, "--target", "i386-wasm",
+                                      "--jobs", str(jobs)])
+        try:
+            validate(options)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("Non-positive job limit was accepted")
 
 def preload(directory: Path) -> None:
     source, output = directory / "input", directory / "out"

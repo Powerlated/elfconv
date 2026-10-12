@@ -316,11 +316,9 @@ import adapters. Portal uses this per-ELF path. Cache: output directory's
 `.elfconv-incremental/`.
 `--max-ir-chunks-per-elf N` caps chunks per ELF; `N=1` skips partitioning and
 cloning. `N=0` disables chunk output (default). No bundle-wide allocation or relift.
-`--lift-jobs` bounds concurrent ELF lifts (default
-2); completed ELF chunks enter the compiler pool while other lifts continue.
-`--compile-jobs` caps all compiler jobs (default 8); ready ELF owners rotate
-through the pool. CMake: `ELFCONV_LIFT_JOBS` and `ELFCONV_COMPILE_JOBS` (both
-default 2); target arguments: `LIFT_JOBS`, `COMPILE_JOBS`.
+`--jobs N` caps lifting and compiling jobs combined (default 2); completed ELF
+chunks enter the shared pool while other lifts continue. Ready ELF owners rotate
+through the pool. CMake: `ELFCONV_JOBS` (default 2); target argument: `JOBS`.
 Shared metadata, registry, and runtime compilation share the pool; final link
 waits for them and all chunks. Successful stages retain cache keys if another
 job fails. TTY: live per-library progress tree. Redirected output: plain stage
