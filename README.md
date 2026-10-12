@@ -202,6 +202,15 @@ continue; ready owners rotate through the pool. CMake uses `ELFCONV_LIFT_JOBS`
 Unchanged bundles reuse the scan and refined chunk allocation; warm conversion
 does not repeat the initial chunk allocation and relift.
 
+Portal: `./lift_portal.sh` reuses the repository-root cache, with 96 chunks,
+12 lifting/compiler jobs, and `-O1`. Overrides: `ELFCONV_LIFT_JOBS`,
+`ELFCONV_COMPILE_JOBS`, `ELFCONV_WASM_OPT_LEVEL`; extra driver flags pass through.
+After lifter/runtime edits, run `ELFCONV_BUILD=1 ./lift_portal.sh` to rebuild first.
+Lifting shows `[completed/known total]`; the total grows as callees are discovered.
+After function translation, the display names IR finalization, partitioning,
+bitcode writing, and cleanup instead of retaining a completed function counter.
+Cache hits retain stage labels: `cached - lifting`, `cached - compiling`.
+
 `elflift --analyze_only` reports ELF headers, executable section sizes, and
 function-extent estimates without lifting; add `--per_elf` to group a bundled
 i386 ELF and its shared libraries. Initializer callbacks without symbol sizes

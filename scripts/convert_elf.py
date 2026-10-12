@@ -158,8 +158,10 @@ class Display:
         if parent:
             self.parents[name] = parent
         if not self.console.is_terminal and (
-                previous is None or state != previous[0] or state in ("failed", "done", "cached")):
+                previous is None or state != previous[0] or state in ("failed", "done", "cached")
+                or (state == "lifting" and detail != previous[1])):
             text = detail if detail.startswith("[") else f"{name}: {state}" + (
+                f" - {detail}" if state == "cached" and detail else
                 f" — {detail}" if detail else "")
             self.console.print(Text(text), soft_wrap=True)
 
@@ -171,6 +173,7 @@ class Display:
         for name, (state, detail, started) in self.rows.items():
             display_name = Path(name).name if Path(name).is_absolute() else name
             text = detail if detail.startswith("[") else f"{display_name}: {state}" + (
+                f" - {detail}" if state == "cached" and detail else
                 f" — {detail}" if detail else "")
             label = Text(text, style={"failed": "red", "done": "green",
                                      "cached": "dim"}.get(state, ""))
@@ -235,7 +238,8 @@ class Driver:
                 stream.write((shlex.join(command) + "\n").encode())
                 stream.flush()
                 spawn = asyncio.create_task(asyncio.create_subprocess_exec(
-                    *command, stdout=stream, stderr=asyncio.subprocess.STDOUT,
+                    *command, stdout=asyncio.subprocess.PIPE if phase == "lifting" else stream,
+                    stderr=asyncio.subprocess.STDOUT,
                     env=self.env, start_new_session=True))
                 try:
                     process = await asyncio.shield(spawn)
@@ -243,6 +247,22 @@ class Driver:
                     # Retain ownership even if interrupted while the process is spawning.
                     process = await spawn
                     raise
+                if phase == "lifting":
+                    pending = b""
+                    while data := await process.stdout.read(65536):
+                        stream.write(data)
+                        stream.flush()
+                        lines = (pending + data).split(b"\n")
+                        pending = lines.pop()
+                        for line in lines:
+                            if match := re.fullmatch(rb"\[(\d+)/(\d+)\] lifting funcs", line):
+                                completed, total = (value.decode() for value in match.groups())
+                                self.display.update(name, phase,
+                                    f"[{completed}/{total}] - {Path(name).name}: lifting funcs")
+                            elif match := re.fullmatch(rb"lifting - (.+)", line):
+                                self.display.update(name, phase, match[1].decode())
+                        if len(pending) > 256:
+                            pending = b""
                 status = await process.wait()
             if status:
                 self.display.update(name, "failed", f"exit {status}; {log}")
@@ -299,6 +319,7 @@ class Driver:
         flags: list[object] = ["--arch", arch, "--target_arch", destination, "--target_elf", a.input,
             "--norm_mode", "1", "--fork_emulation", str(int(kind == "wasm" and arch != "i386")),
             "--float_exception", str(int(a.float_status)), "--dbg_fun_vma", a.debug_func_addr]
+        flags += ["--lift_progress"]
         if a.entry_symbol:
             flags += ["--entry_symbol", a.entry_symbol]
         if a.shared_library:
@@ -407,11 +428,11 @@ class Driver:
                     [a.lifter, *flags, "--metadata_only", "--bc_out", metadata_bc], [metadata_bc],
                     [digest(fingerprint), lift_identity], self.cache / "metadata.lift.key")
             async with compile_slots:
-                metadata_compile_key, _ = await self.stage("Shared metadata", "compiling",
+                metadata_compile_key, metadata_compiled = await self.stage("Shared metadata", "compiling",
                     [emcc, *compile_flags, "-c", metadata_bc, "-o", metadata_object],
                     [metadata_object], [metadata_key, compiler_identity],
                     self.cache / "metadata.compile.key", force=metadata_changed)
-            self.display.update("Shared metadata", "done")
+            self.display.update("Shared metadata", "done" if metadata_compiled else "cached", "compiling")
             return metadata_compile_key
 
         lifted_chunks: dict[str, list[dict[str, object]]] = {}
@@ -550,7 +571,7 @@ class Driver:
                     self.display.update(
                         f"{owner}::compile", status,
                         f"[{completed[owner]}/{total}] ── {Path(owner).name} "
-                        f"chunk {index + 1}/{total}: {chunk_status}",
+                        f"chunk {index + 1}/{total}: {chunk_status} - compiling",
                         parent=owner)
 
             async with asyncio.TaskGroup() as group:
@@ -570,11 +591,11 @@ class Driver:
         registry_object = self.cache / "UnitRegistry.wasm.o"
         async def compile_registry() -> tuple[Path, str]:
             async with compile_slots:
-                registry_key, _ = await self.stage("Unit registry", "compiling",
+                registry_key, compiled = await self.stage("Unit registry", "compiling",
                     [emcc, *runtime_flags, "-c", registry, "-o", registry_object], [registry_object],
                     [key(registry_text), header_key, compiler_identity],
                     self.cache / "UnitRegistry.compile.key")
-            self.display.update("Unit registry", "done")
+            self.display.update("Unit registry", "done" if compiled else "cached", "compiling")
             return registry_object, registry_key
 
         runtime_sources = [] if a.runtime_archive else [*COMMON, ROOT / "src/runtime/I386Imports.cpp"]
@@ -582,11 +603,11 @@ class Driver:
         async def compile_runtime(source: Path) -> tuple[Path, str]:
             obj = self.cache / f"runtime-{source.stem}.wasm.o"
             async with compile_slots:
-                stage_key, _ = await self.stage(f"Runtime/{source.name}", "compiling",
+                stage_key, compiled = await self.stage(f"Runtime/{source.name}", "compiling",
                     [emcc, *runtime_flags, f"-DECV_LEGACY_GL={a.legacy_gl}", "-c", source, "-o", obj],
                     [obj], [digest(source), header_key, compiler_identity],
                     self.cache / f"runtime-{source.stem}.compile.key")
-            self.display.update(f"Runtime/{source.name}", "done")
+            self.display.update(f"Runtime/{source.name}", "done" if compiled else "cached", "compiling")
             return obj, stage_key
 
         async def run_pipeline() -> tuple[str, tuple[Path, str], list[tuple[Path, str]]]:
@@ -637,7 +658,7 @@ class Driver:
              registry_object, *runtime_objects, "-o", js], [js, wasm],
             [metadata_compile_key, registry_key, [stamp for _, stamp in units], runtime_keys, compiler_identity],
             self.cache / "link.key")
-        self.display.update("Final link", "done" if linked else "cached")
+        self.display.update("Final link", "done" if linked else "cached", "linking")
         self.html()
 
     @staticmethod

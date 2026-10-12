@@ -1,4 +1,13 @@
 #!/bin/bash
+set -euo pipefail
+ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+cd "$ROOT"
+
+if [[ "${ELFCONV_BUILD:-0}" == 1 ]]; then
+  cmake --build "$ROOT/build/llvm23" --target elflift \
+    --parallel "${ELFCONV_BUILD_JOBS:-4}"
+fi
+
 STEAM="$HOME/snap/steam/common/.local/share/Steam"
 PORTAL="$STEAM/steamapps/common/Portal"
 RUNTIME="$STEAM/ubuntu12_32/steam-runtime"
@@ -23,12 +32,15 @@ done
 python3 scripts/convert_elf.py \
   --input "$PORTAL/hl2_linux" \
   --target i386-wasm \
+  --output-dir "$ROOT" \
+  --wasm-opt-level "${ELFCONV_WASM_OPT_LEVEL:-1}" \
   "${ARGS[@]}" \
   --lifter "$PWD/build/llvm23/src/lifter/elflift" \
   --emcc "$HOME/emsdk-6/upstream/emscripten/em++" \
   --legacy-gl 0 \
   --ir-chunks 96 \
   --runtime-archive "$PWD/build/llvm23/src/lifter/libelfconv-runtime-i386-wasm-incremental.a" \
-  --lift-jobs 12 \
-  --compile-jobs 12
+  --lift-jobs "${ELFCONV_LIFT_JOBS:-12}" \
+  --compile-jobs "${ELFCONV_COMPILE_JOBS:-12}" \
+  "$@"
 

@@ -76,6 +76,7 @@ DEFINE_string(unit_owner, "", "Lift only functions owned by this linker-map obje
 DEFINE_string(unit_id, "", "Stable suffix used for this incremental unit's metadata symbols.");
 DEFINE_uint64(ir_chunks, 0, "Split lifted IR into approximately equal-size linkable chunks.");
 DEFINE_string(lift_profile_out, "", "Write per-function lift timing and LLVM IR metrics as TSV.");
+DEFINE_bool(lift_progress, false, "Print live [lifted/known total] function counts.");
 DEFINE_string(ir_chunk_manifest_out, "", "Write chunk count and IR sizes for --ir_chunks.");
 DEFINE_bool(analyze_only, false, "Print ELF section and function metrics without lifting.");
 DEFINE_bool(metadata_only, false, "Emit only process-wide ELF metadata.");
@@ -179,6 +180,14 @@ static void EmitI386Libraries(llvm::Module &module, const BinaryLoader::ELFObjec
 }
 
 namespace {
+
+void PrintLiftingPhase(std::string_view phase, std::size_t completed = 0,
+                       std::size_t total = 0) {
+  if (!FLAGS_lift_progress) return;
+  std::cout << "lifting - " << phase;
+  if (total) std::cout << " [" << completed << "/" << total << "]";
+  std::cout << std::endl;
+}
 
 std::uint64_t ModuleIRDefinitionSize(const llvm::Module &module) {
   std::uint64_t size = 0;
@@ -310,6 +319,7 @@ void StoreIRChunks(llvm::Module &module) {
   };
   std::vector<Piece> pieces;
   pieces.reserve(intermediate_count);
+  PrintLiftingPhase("partitioning IR", 0, intermediate_count);
   llvm::SplitModule(module, intermediate_count,
       [&](std::unique_ptr<llvm::Module> piece) {
         bool has_function = false;
@@ -321,7 +331,9 @@ void StoreIRChunks(llvm::Module &module) {
         }
         const auto size = ModuleIRDefinitionSize(*piece);
         pieces.push_back({std::move(piece), size, has_function});
+        PrintLiftingPhase("partitioning IR", pieces.size(), intermediate_count);
       }, false, true);
+  PrintLiftingPhase("balancing chunks");
 
   const auto nonempty_count = std::count_if(
       pieces.begin(), pieces.end(),
@@ -355,6 +367,7 @@ void StoreIRChunks(llvm::Module &module) {
                           FLAGS_ir_chunk_manifest_out.c_str());
   }
   manifest << FLAGS_ir_chunks << '\t' << actual_count << '\n';
+  PrintLiftingPhase("writing bitcode chunks", 0, bins.size());
 
   for (std::size_t i = 0; i < bins.size(); ++i) {
     if (bins[i].empty()) {
@@ -372,7 +385,9 @@ void StoreIRChunks(llvm::Module &module) {
     const auto size = ModuleIRDefinitionSize(*combined);
     manifest << i << '\t' << size << '\n';
     std::cout << "IR chunk " << i << ": " << size << " definition bytes\n";
+    PrintLiftingPhase("writing bitcode chunks", i + 1, bins.size());
   }
+  PrintLiftingPhase("releasing IR partitions");
 }
 
 }  // namespace
@@ -585,8 +600,38 @@ int main(int argc, char *argv[]) {
     lift_profile << "address\tfunction\tinput_bytes\tlift_us\tir_instructions\t"
                     "ir_blocks\tir_text_bytes\n";
   }
+  std::size_t lifted_functions = 0;
+  std::size_t known_functions = 0;
+  if (FLAGS_lift_progress) {
+    for (const auto &[address, function] : manager.disasm_funcs) {
+      if (unit_mode && !manager.IsSelectedUnitAddress(address)) continue;
+      ++known_functions;
+      if (manager.GetLiftedTraceDefinition(address)) ++lifted_functions;
+    }
+  }
+  auto last_progress = std::chrono::steady_clock::now();
+  const auto print_progress = [&](bool force = true) {
+    if (!FLAGS_lift_progress ||
+        (!force && std::chrono::steady_clock::now() - last_progress <
+                       std::chrono::milliseconds(250))) return;
+    std::cout << "[" << lifted_functions << "/"
+              << known_functions + manager.rest_disasm_funcs.size()
+              << "] lifting funcs" << std::endl;
+    last_progress = std::chrono::steady_clock::now();
+  };
+  const auto trace_completed = [&](uint64_t, llvm::Function *) {
+    if (!FLAGS_lift_progress) return;
+    ++lifted_functions;
+    print_progress(false);
+  };
+  print_progress();
   do {
     manager.rest_disasm_funcs.clear();
+    known_functions = 0;
+    if (FLAGS_lift_progress) {
+      for (const auto &[address, function] : manager.disasm_funcs)
+        if (!unit_mode || manager.IsSelectedUnitAddress(address)) ++known_functions;
+    }
     for (const auto &[addr, dasm_func] : manager.disasm_funcs) {
       if (fin_addrs.contains(addr)) {
         continue;
@@ -595,7 +640,7 @@ int main(int argc, char *argv[]) {
       addr_fun_name_map[addr] = dasm_func.func_name.c_str();
       auto &lifted_fun_name = addr_fun_name_map[addr];
       const auto lift_start = std::chrono::steady_clock::now();
-      if (!main_lifter.Lift(dasm_func.vma, lifted_fun_name)) {
+      if (!main_lifter.Lift(dasm_func.vma, lifted_fun_name, trace_completed)) {
         elfconv_runtime_error("[ERROR] Failed to Lift \"%s\"\n", lifted_fun_name);
       }
       const auto lift_us = std::chrono::duration_cast<std::chrono::microseconds>(
@@ -615,6 +660,8 @@ int main(int argc, char *argv[]) {
       }
     }
   } while (!manager.rest_disasm_funcs.empty());
+  print_progress();
+  PrintLiftingPhase("finalizing IR");
 
   if (arch_name == remill::kArchX86) {
     // Guest longjmp unwinds lifted frames to the runtime invocation boundary.
@@ -651,6 +698,7 @@ int main(int argc, char *argv[]) {
   }
 
   // Prepare and validate the LLVM Module.
+  PrintLiftingPhase("preparing module");
   if (manager.target_arch == "emscripten32" || manager.target_arch == "wasi32") {
     arch->PrepareModule(module.get());
   } else {
@@ -659,6 +707,7 @@ int main(int argc, char *argv[]) {
   }
   std::set<std::string> unit_exports;
   if (arch_name == remill::kArchX86) {
+    PrintLiftingPhase("removing unused IR");
     // Instruction selectors are a lifting-time registry, not runtime roots.
     llvm::removeFromUsedLists(*module, [](llvm::Constant *value) {
       auto *global = llvm::dyn_cast<llvm::GlobalValue>(value->stripPointerCasts());
@@ -701,9 +750,11 @@ int main(int argc, char *argv[]) {
   if (FLAGS_ir_chunks) {
     StoreIRChunks(*module);
   } else {
+    PrintLiftingPhase("writing bitcode");
     remill::StoreModuleToFile(module.get(), FLAGS_bc_out);
   }
 
+  PrintLiftingPhase("releasing module");
   return 0;
 }
 
