@@ -225,14 +225,24 @@ IMPORT(utimes) {
 }
 IMPORT(futimes) {
   CALL;
-  struct timeval values[2];
-  struct timeval *pointer = nullptr;
   if (call.word(1)) {
     int32_t fields[4];
     memcpy(fields, guest(arena, call.word(1), sizeof(fields)), sizeof(fields));
-    values[0] = {fields[0], fields[1]}; values[1] = {fields[2], fields[3]}; pointer = values;
+#ifdef __EMSCRIPTEN__
+    struct timespec times[2] = {
+        {fields[0], long(fields[1]) * 1000}, {fields[2], long(fields[3]) * 1000}};
+    call.result(futimens(int32_t(call.word(0)), times));
+#else
+    struct timeval times[2] = {{fields[0], fields[1]}, {fields[2], fields[3]}};
+    call.result(futimes(int32_t(call.word(0)), times));
+#endif
+    return;
   }
-  call.result(futimes(int32_t(call.word(0)), pointer));
+#ifdef __EMSCRIPTEN__
+  call.result(futimens(int32_t(call.word(0)), nullptr));
+#else
+  call.result(futimes(int32_t(call.word(0)), nullptr));
+#endif
 }
 IMPORT(alarm) { CALL; call.result(alarm(call.word(0))); }
 IMPORT(get_nprocs) {

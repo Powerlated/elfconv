@@ -52,6 +52,7 @@
 - The generic word "test" refers to an i386 program lifted to Wasm and checked for correct behavior in Wasm; use the native-versus-Wasm `run_i386.py` path.
 - Use this repository's CMake/CTest and existing native-versus-Wasm fixtures; do not introduce another test framework without need.
 - Prefer vendored tests for regression coverage; do not add project-owned regression tests when a vendored test exercises the behavior.
+- Custom tests MUST NOT be written for libc functions; vendor the unchanged glibc test instead.
 - Place vendored tests in `test/vendored/<vendor>/`.
 - Vendored test sources MUST remain unchanged from their pinned vendor copies. If a test depends on a facility unavailable in the browser (for example, `cmp` via `system()`), exclude it from browser registration rather than adapting the vendored source.
 - For each libc import, vendor the glibc test(s) that exercise that function under `test/vendored/glibc/<upstream-subdir>/`, unchanged; record the upstream revision and source path.

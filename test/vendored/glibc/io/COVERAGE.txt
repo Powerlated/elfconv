@@ -1,0 +1,15 @@
+glibc I/O oracles
+
+Source pin: glibc b72fcafcc9d307790bd24ebba65f52994ca5598e
+https://sourceware.org/git/glibc.git
+
+Vendored unchanged sources:
+- io/tst-statvfs.c: statvfs and statfs. The test uses the glibc support/check.h
+  framework and only checks argv paths; run_i386.py cannot provide these paths.
+- io/tst-faccessat.c: faccessat. The test depends on glibc support helpers and
+  exercises directory enumeration and multiple *at APIs not registered here.
+- io/tst-futimes.c: futimes. The test includes tst-utimensat-skeleton.c and
+  requires statx/AT_EMPTY_PATH support unavailable in the browser runtime.
+
+These tests remain unregistered and unchanged. Custom libc-function tests are
+not permitted by AGENTS.md.

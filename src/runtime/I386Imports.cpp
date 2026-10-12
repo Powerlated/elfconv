@@ -1304,17 +1304,15 @@ static void register_tls_destructor(uint8_t *arena, State *state, RuntimeManager
 IMPORT(__cxa_thread_atexit_impl) { register_tls_destructor(arena, state, runtime); }
 IMPORT(__cxa_thread_atexit) { register_tls_destructor(arena, state, runtime); }
 
-
-IMPORT(dlopen) {
-  CALL;
+static uint32_t open_guest_library(uint8_t *arena, State *state,
+                                   RuntimeManager *runtime, uint32_t name_address,
+                                   uint32_t flags) {
   prepare_libraries(runtime);
-  const uint32_t flags = call.word(1);
   if ((flags & ~0x107u) || !(flags & 3) || (flags & 3) == 3) {
     dynamic_error(runtime, "Unsupported dlopen flags", "");
-    call.result(0);
-    return;
+    return 0;
   }
-  const char *name = call.word(0) ? text(arena, call.word(0)) : nullptr;
+  const char *name = name_address ? text(arena, name_address) : nullptr;
   uint32_t index = 0;
   if (name) {
     const char *basename = strrchr(name, '/');
@@ -1326,20 +1324,29 @@ IMPORT(dlopen) {
     }
   }
   if ((flags & 4) && index < _ecv_i386_library_count &&
-      !runtime->dynamic_libraries[index].live) {
-    call.result(0);
-    return;
-  }
+      !runtime->dynamic_libraries[index].live) return 0;
   if (index >= _ecv_i386_library_count) {
     dynamic_error(runtime, "Library not bundled", name ? name : "<main>");
-    call.result(0);
-    return;
+    return 0;
   }
   open_library(arena, state, runtime, index);
   if (flags & 0x100)
     for (uint32_t member : runtime->dynamic_libraries[index].scope)
       runtime->dynamic_libraries[member].global = true;
-  call.result(library_handle_base + index);
+  return library_handle_base + index;
+}
+IMPORT(dlopen) {
+  CALL;
+  call.result(open_guest_library(arena, state, runtime, call.word(0), call.word(1)));
+}
+IMPORT(dlmopen) {
+  CALL;
+  if (int32_t(call.word(0)) != 0) {
+    dynamic_error(runtime, "Unsupported dlmopen namespace", "");
+    call.result(0);
+    return;
+  }
+  call.result(open_guest_library(arena, state, runtime, call.word(1), call.word(2)));
 }
 
 IMPORT(dlsym) {

@@ -12,7 +12,14 @@
 #endif
 #include <link.h>
 #include <elf.h>
-
+#include <sys/statvfs.h>
+#include <signal.h>
+struct GuestStatfs32 {
+  int32_t type, block_size;
+  uint32_t blocks, blocks_free, blocks_available, files, files_free;
+  uint32_t fsid[2], name_length, fragment_size, flags, spare[4];
+};
+constexpr size_t guest_statfs64_size = 84;
 namespace {
 int store_stat32_extra(uint8_t *arena, uint32_t address, const struct stat &host) {
   if (host.st_size < INT32_MIN || host.st_size > INT32_MAX ||
@@ -77,6 +84,114 @@ IMPORT(fstat) {
   int result = fstat(int32_t(call.word(0)), &st);
   if (!result) result = store_stat32_extra(arena, call.word(1), st);
   call.result(result);
+}
+IMPORT(faccessat) {
+  CALL;
+  call.result(faccessat(int32_t(call.word(0)), text(arena, call.word(1)),
+                        int32_t(call.word(2)), int32_t(call.word(3))));
+}
+IMPORT(kill) {
+  CALL;
+  const int pid = int32_t(call.word(0)), signal = int32_t(call.word(1));
+  if (signal < 0 || signal >= NSIG) { errno = EINVAL; call.result(-1); return; }
+  if (signal == 0) {
+    if (pid == 0 || pid == getpid()) { call.result(0); return; }
+    errno = ESRCH;
+    call.result(-1);
+    return;
+  }
+  errno = ENOSYS;
+  call.result(-1);
+}
+namespace {
+int store_statvfs(uint8_t *arena, uint32_t address, const struct statvfs &s,
+                  bool wide) {
+  uint8_t data[96] = {};
+  auto put = [&](unsigned offset, uint64_t value, unsigned bytes) {
+    memcpy(data + offset, &value, bytes);
+  };
+  if (wide) {
+    put(0, s.f_bsize, 4); put(4, s.f_frsize, 4);
+    put(8, s.f_blocks, 8); put(16, s.f_bfree, 8); put(24, s.f_bavail, 8);
+    put(32, s.f_files, 8); put(40, s.f_ffree, 8); put(48, s.f_favail, 8);
+    put(56, s.f_fsid, 4); put(64, s.f_flag, 4); put(68, s.f_namemax, 4);
+    put(72, s.f_type, 4);
+    memcpy(guest(arena, address, sizeof(data)), data, sizeof(data));
+    return 0;
+  }
+  const uint64_t fields[] = {s.f_bsize, s.f_frsize, s.f_blocks, s.f_bfree,
+      s.f_bavail, s.f_files, s.f_ffree, s.f_favail, s.f_fsid, s.f_flag,
+      s.f_namemax, s.f_type};
+  for (uint64_t field : fields)
+    if (field > UINT32_MAX) { errno = EOVERFLOW; return -1; }
+  put(0, fields[0], 4); put(4, fields[1], 4); put(8, fields[2], 4);
+  put(12, fields[3], 4); put(16, fields[4], 4); put(20, fields[5], 4);
+  put(24, fields[6], 4); put(28, fields[7], 4); put(32, fields[8], 4);
+  put(40, fields[9], 4); put(44, fields[10], 4); put(48, fields[11], 4);
+  memcpy(guest(arena, address, 72), data, 72);
+  return 0;
+}
+}
+IMPORT(statvfs) {
+  CALL; struct statvfs result;
+  int r = ::statvfs(text(arena, call.word(0)), &result);
+  if (!r) r = store_statvfs(arena, call.word(1), result, false);
+  call.result(r);
+}
+IMPORT(statvfs64) {
+  CALL; struct statvfs result;
+  int r = ::statvfs(text(arena, call.word(0)), &result);
+  if (!r) r = store_statvfs(arena, call.word(1), result, true);
+  call.result(r);
+}
+int fill_statfs(uint8_t *arena, uint32_t address, const struct statvfs &s) {
+  const uint64_t fields[] = {s.f_bsize, s.f_blocks, s.f_bfree, s.f_bavail,
+      s.f_files, s.f_ffree, s.f_namemax, s.f_frsize, s.f_flag};
+  for (uint64_t value : fields)
+    if (value > UINT32_MAX) { errno = EOVERFLOW; return -1; }
+  GuestStatfs32 guest_stat{};
+  const uint64_t fsid = s.f_fsid;
+  guest_stat.fsid[0] = uint32_t(fsid);
+  guest_stat.fsid[1] = uint32_t(fsid >> 32);
+  guest_stat.type = int32_t(s.f_type);
+  guest_stat.blocks = uint32_t(s.f_blocks);
+  guest_stat.blocks_free = uint32_t(s.f_bfree);
+  guest_stat.blocks_available = uint32_t(s.f_bavail);
+  guest_stat.files = uint32_t(s.f_files);
+  guest_stat.files_free = uint32_t(s.f_ffree);
+  guest_stat.name_length = uint32_t(s.f_namemax);
+  guest_stat.fragment_size = uint32_t(s.f_frsize);
+  guest_stat.flags = uint32_t(s.f_flag);
+  memcpy(guest(arena, address, sizeof(guest_stat)), &guest_stat, sizeof(guest_stat));
+  return 0;
+}
+IMPORT(statfs) {
+  CALL; struct statvfs result;
+  int r = ::statvfs(text(arena, call.word(0)), &result);
+  if (!r) r = fill_statfs(arena, call.word(1), result);
+  call.result(r);
+}
+IMPORT(statfs64) {
+  CALL;
+  struct statvfs result;
+  int r = ::statvfs(text(arena, call.word(0)), &result);
+  if (!r) {
+    uint8_t data[guest_statfs64_size] = {};
+    const int32_t type = int32_t(result.f_type);
+    const int32_t block_size = int32_t(result.f_bsize);
+    memcpy(data, &type, 4);
+    memcpy(data + 4, &block_size, 4);
+    const uint64_t counts[] = {result.f_blocks, result.f_bfree, result.f_bavail,
+                               result.f_files, result.f_ffree};
+    memcpy(data + 8, counts, sizeof(counts));
+    const uint64_t fsid = result.f_fsid;
+    const uint32_t fields[] = {uint32_t(fsid), uint32_t(fsid >> 32),
+                               uint32_t(result.f_namemax), uint32_t(result.f_frsize),
+                               uint32_t(result.f_flag)};
+    memcpy(data + 48, fields, sizeof(fields));
+    memcpy(guest(arena, call.word(1), sizeof(data)), data, sizeof(data));
+  }
+  call.result(r);
 }
 IMPORT(ftruncate) {
   CALL;

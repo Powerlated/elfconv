@@ -1,0 +1,12 @@
+glibc dynamic-loader oracles
+
+Source pin: glibc b72fcafcc9d307790bd24ebba65f52994ca5598e
+https://sourceware.org/git/glibc.git
+
+Vendored unchanged sources:
+- elf/tst-dlmopen1.c and elf/tst-dlmopen1mod.c: dlmopen, namespace identity,
+  dlinfo, constructors, and dlsym.
+
+Not registered: the test requires RTLD_DI_LMID, LM_ID_NEWLM, a separate libc
+namespace, and a dynamically loaded module. The browser runtime supports only
+LM_ID_BASE in its dlmopen adapter and has no dlinfo adapter.

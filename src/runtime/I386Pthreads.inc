@@ -512,8 +512,7 @@ IMPORT(pthread_setname_np) {
   int error = find_host_pthread(call.word(0), host, keep_alive);
   if (!error) {
     const char *name = text(arena, call.word(1));
-#if (defined(__linux__) && !defined(__EMSCRIPTEN__)) || \
-    (defined(__EMSCRIPTEN__) && defined(_GNU_SOURCE))
+#if defined(__linux__) && !defined(__EMSCRIPTEN__)
     error = pthread_setname_np(host, name);
 #else
     error = ENOTSUP;
