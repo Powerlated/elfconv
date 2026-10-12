@@ -6,6 +6,20 @@ struct GuestScanInput {
   FILE *file = nullptr;
   size_t position = 0;
 
+  bool exhausted(bool skip_whitespace) const {
+    if (file) return feof(file);
+    if (!text) return false;
+    const Char *next = text + position;
+    if (skip_whitespace) {
+      while (*next && (std::is_same_v<Char, char>
+                           ? !!isspace(static_cast<unsigned char>(*next))
+                           : !!iswspace(*next)))
+        ++next;
+    }
+    return !*next;
+  }
+
+
   template<typename T>
   int scan(std::basic_string<Char> spec, T *output, bool suppressed, int &consumed) {
     spec += '%'; spec += 'n';
@@ -323,6 +337,8 @@ int scan_guest_input(uint8_t *arena, GuestScanInput<Char> &input,
       if (width > (UINT32_MAX - 9) / 10) elfconv_runtime_error("Guest scanf width overflow.\n");
       width = width * 10 + uint32_t(*p++ - '0');
     }
+    const bool allocate_output = *p == 'm';
+    if (allocate_output) ++p;
     const bool international_digits = *p == 'I';
     if (international_digits) ++p;
     char length = 0;
@@ -334,6 +350,8 @@ int scan_guest_input(uint8_t *arena, GuestScanInput<Char> &input,
     }
     const char conversion = char(*p++);
     if (!conversion) elfconv_runtime_error("Incomplete guest scanf format.\n");
+    if (allocate_output && !strchr("sScC[", conversion))
+      elfconv_runtime_error("Guest scanf allocation modifier requires a string conversion.\n");
     const uint32_t address = suppressed ? 0 : arguments.word();
     const size_t integer_size = length == 'q' || length == 'j' ? 8 : length == 'h' ? 2 : length == 'H' ? 1 : 4;
     if (conversion == 'n') {
@@ -392,6 +410,9 @@ int scan_guest_input(uint8_t *arena, GuestScanInput<Char> &input,
           const float number = float(value); memcpy(guest(arena, address, 4), &number, 4);
         }
       }
+    } else if (allocate_output) {
+      result = 0;
+      used = -1;
     } else if (conversion == 's' || conversion == 'c' || conversion == '[') {
       const bool wide_output = length == 'l';
       const uint32_t terminator = conversion != 'c';
@@ -430,7 +451,12 @@ int scan_guest_input(uint8_t *arena, GuestScanInput<Char> &input,
         }
       }
     } else { result = 0; used = -1; }
-    if (used < 0) return result == EOF && !conversions ? EOF : assigned;
+    if (used < 0) {
+      const bool skips_whitespace = strchr("diuoxXbAaEeFfGgpsS", conversion) != nullptr;
+      // The host scanf may report 0 rather than EOF when a conversion reaches input exhaustion.
+      if (!conversions && (result == EOF || input.exhausted(skips_whitespace))) return EOF;
+      return assigned;
+    }
     ++conversions;
     if (!suppressed) ++assigned;
   }
