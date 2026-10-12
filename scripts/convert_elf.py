@@ -73,6 +73,8 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--entry-symbol")
     result.add_argument("--shared-library", type=Path, action="append", default=[])
     result.add_argument("--mount", action="append", default=[], metavar="HOST_DIR@/GUEST_PATH")
+    result.add_argument("--runtime-archive", type=Path,
+                        help="Prebuilt runtime archive matching the conversion configuration")
     result.add_argument("--bitcode-path", type=Path)
     result.add_argument("--link-map", type=Path)
     result.add_argument("--object-base", type=Path)
@@ -293,9 +295,9 @@ class Driver:
             raise ValueError("The ELF bundle produced no code units")
         for owner, _, _ in entries:
             self.display.update(owner, "queued", "lift → compile")
-        for name in ["Shared metadata", "Unit registry",
-                     *[f"Runtime/{source.name}" for source in [*COMMON, ROOT / "src/runtime/I386Imports.cpp"]],
-                     "Final link"]:
+        queued_runtime = [] if a.runtime_archive else [
+            f"Runtime/{source.name}" for source in [*COMMON, ROOT / "src/runtime/I386Imports.cpp"]]
+        for name in ["Shared metadata", "Unit registry", *queued_runtime, "Final link"]:
             self.display.update(name, "queued")
         semantics = []
         if a.bitcode_path:
@@ -350,14 +352,19 @@ class Driver:
             [key(registry_text), header_key, compiler_identity], self.cache / "UnitRegistry.compile.key")
         self.display.update("Unit registry", "done")
         runtime_objects, runtime_keys = [], []
-        for source in [*COMMON, ROOT / "src/runtime/I386Imports.cpp"]:
-            obj = self.cache / f"runtime-{source.stem}.wasm.o"
-            stage_key, _ = await self.stage(f"Runtime/{source.name}", "compiling",
-                [emcc, *runtime_flags, f"-DECV_LEGACY_GL={a.legacy_gl}", "-c", source, "-o", obj],
-                [obj], [digest(source), header_key, compiler_identity], self.cache / f"runtime-{source.stem}.compile.key")
-            self.display.update(f"Runtime/{source.name}", "done")
-            runtime_objects.append(obj)
-            runtime_keys.append(stage_key)
+        if a.runtime_archive:
+            runtime_objects = [a.runtime_archive]
+            runtime_keys = [digest(a.runtime_archive)]
+        else:
+            for source in [*COMMON, ROOT / "src/runtime/I386Imports.cpp"]:
+                obj = self.cache / f"runtime-{source.stem}.wasm.o"
+                stage_key, _ = await self.stage(f"Runtime/{source.name}", "compiling",
+                    [emcc, *runtime_flags, f"-DECV_LEGACY_GL={a.legacy_gl}", "-c", source, "-o", obj],
+                    [obj], [digest(source), header_key, compiler_identity],
+                    self.cache / f"runtime-{source.stem}.compile.key")
+                self.display.update(f"Runtime/{source.name}", "done")
+                runtime_objects.append(obj)
+                runtime_keys.append(stage_key)
         js, wasm = self.output / f"{a.elf_name}.js", self.output / f"{a.elf_name}.wasm"
         _, linked = await self.stage("Final link", "linking",
             [emcc, *self.browser_link_flags(True), *[obj for obj, _ in units], metadata_object,
@@ -462,28 +469,30 @@ class Driver:
         elif any(not obj.is_file() for obj in chunk_objects):
             raise ValueError(f"Missing compiled IR chunks for {name}; remove --no-compiled")
 
-        sources = [*COMMON, ROOT / "src/runtime/I386Imports.cpp"]
-        headers = sorted(path for directory in (ROOT / "src/runtime", ROOT / "src/utils",
-                                                ROOT / "backend/remill/include")
-                         for path in directory.rglob("*") if path.suffix in (".h", ".hpp", ".inc"))
-        header_key = key([(str(path), digest(path)) for path in headers])
-        runtime_flags: list[object] = [
-            f"-O{a.wasm_opt_level}", *self.thread_compile, *self.exception_flags,
-            *(["-g2"] if a.wasm_opt_level == "0" else []), *self.includes, "-std=c++17",
-            *self.definitions, "-DELF_IS_I386", "-DADDRESS_SIZE_BITS=32", "-sUSE_SDL=2",
-            f"-DECV_LEGACY_GL={a.legacy_gl}"]
+        runtime_tasks = []
+        if not a.runtime_archive:
+            sources = [*COMMON, ROOT / "src/runtime/I386Imports.cpp"]
+            headers = sorted(path for directory in (ROOT / "src/runtime", ROOT / "src/utils",
+                                                    ROOT / "backend/remill/include")
+                             for path in directory.rglob("*") if path.suffix in (".h", ".hpp", ".inc"))
+            header_key = key([(str(path), digest(path)) for path in headers])
+            runtime_flags: list[object] = [
+                f"-O{a.wasm_opt_level}", *self.thread_compile, *self.exception_flags,
+                *(["-g2"] if a.wasm_opt_level == "0" else []), *self.includes, "-std=c++17",
+                *self.definitions, "-DELF_IS_I386", "-DADDRESS_SIZE_BITS=32", "-sUSE_SDL=2",
+                f"-DECV_LEGACY_GL={a.legacy_gl}"]
 
-        async def compile_runtime(source: Path) -> tuple[Path, str]:
-            obj = self.cache / f"ir-chunk-runtime-{source.stem}.wasm.o"
-            async with semaphore:
-                compile_key, compiled = await self.stage(f"Runtime/{source.name}", "compiling",
-                    [emcc, *runtime_flags, "-c", source, "-o", obj], [obj],
-                    [digest(source), header_key, compiler_identity],
-                    self.cache / f"ir-chunk-runtime-{source.stem}.compile.key")
-            self.display.update(f"Runtime/{source.name}", "done" if compiled else "cached")
-            return obj, compile_key
+            async def compile_runtime(source: Path) -> tuple[Path, str]:
+                obj = self.cache / f"ir-chunk-runtime-{source.stem}.wasm.o"
+                async with semaphore:
+                    compile_key, compiled = await self.stage(f"Runtime/{source.name}", "compiling",
+                        [emcc, *runtime_flags, "-c", source, "-o", obj], [obj],
+                        [digest(source), header_key, compiler_identity],
+                        self.cache / f"ir-chunk-runtime-{source.stem}.compile.key")
+                self.display.update(f"Runtime/{source.name}", "done" if compiled else "cached")
+                return obj, compile_key
 
-        runtime_tasks = [asyncio.create_task(compile_runtime(source)) for source in sources]
+            runtime_tasks = [asyncio.create_task(compile_runtime(source)) for source in sources]
         tasks = [*chunk_tasks, *runtime_tasks]
         try:
             results = await asyncio.gather(*tasks)
@@ -498,8 +507,12 @@ class Driver:
             chunk_keys = [key("reused", digest(obj)) for obj in chunk_objects]
         else:
             chunk_keys = [compile_key for _, compile_key in chunk_results]
-        runtime_objects = [obj for obj, _ in runtime_results]
-        runtime_keys = [compile_key for _, compile_key in runtime_results]
+        if a.runtime_archive:
+            runtime_objects = [a.runtime_archive]
+            runtime_keys = [digest(a.runtime_archive)]
+        else:
+            runtime_objects = [obj for obj, _ in runtime_results]
+            runtime_keys = [compile_key for _, compile_key in runtime_results]
         js, wasm = self.output / f"{name}.js", self.output / f"{name}.wasm"
         _, linked = await self.stage("Final link", "linking",
             [emcc, *self.browser_link_flags(False), *chunk_objects, *runtime_objects, "-o", js],
@@ -595,37 +608,39 @@ class Driver:
                     await self.run(name, "compiling", [emcc, f"-O{a.wasm_opt_level}", *self.thread_compile,
                                                        *self.exception_flags, "-c", ir, "-o", obj])
 
-                sources = [*COMMON, ROOT / "src/runtime/I386Imports.cpp"]
-                headers = sorted(path for directory in (ROOT / "src/runtime", ROOT / "src/utils",
-                                                        ROOT / "backend/remill/include")
-                                 for path in directory.rglob("*") if path.suffix in (".h", ".hpp", ".inc"))
-                header_key = key([(str(path), digest(path)) for path in headers])
-                runtime_flags: list[object] = [
-                    f"-O{a.wasm_opt_level}", *self.thread_compile, *self.exception_flags,
-                    *(["-g2"] if a.wasm_opt_level == "0" else []), *self.includes, "-std=c++17",
-                    *self.definitions, "-DELF_IS_I386", "-DADDRESS_SIZE_BITS=32", "-sUSE_SDL=2",
-                    f"-DECV_LEGACY_GL={a.legacy_gl}"]
-                semaphore = asyncio.Semaphore(a.conversion_jobs)
+                if a.runtime_archive:
+                    runtime_objects = [a.runtime_archive]
+                else:
+                    sources = [*COMMON, ROOT / "src/runtime/I386Imports.cpp"]
+                    headers = sorted(path for directory in (ROOT / "src/runtime", ROOT / "src/utils",
+                                                            ROOT / "backend/remill/include")
+                                     for path in directory.rglob("*") if path.suffix in (".h", ".hpp", ".inc"))
+                    header_key = key([(str(path), digest(path)) for path in headers])
+                    runtime_flags: list[object] = [
+                        f"-O{a.wasm_opt_level}", *self.thread_compile, *self.exception_flags,
+                        *(["-g2"] if a.wasm_opt_level == "0" else []), *self.includes, "-std=c++17",
+                        *self.definitions, "-DELF_IS_I386", "-DADDRESS_SIZE_BITS=32", "-sUSE_SDL=2",
+                        f"-DECV_LEGACY_GL={a.legacy_gl}"]
+                    semaphore = asyncio.Semaphore(a.conversion_jobs)
 
-                async def compile_runtime(source: Path) -> Path:
-                    runtime_obj = self.cache / f"single-runtime-{source.stem}.wasm.o"
-                    async with semaphore:
-                        await self.stage(f"Runtime/{source.name}", "compiling",
-                            [emcc, *runtime_flags, "-c", source, "-o", runtime_obj], [runtime_obj],
-                            [digest(source), header_key, self.compiler_identity[emcc]],
-                            self.cache / f"single-runtime-{source.stem}.compile.key")
-                    self.display.update(f"Runtime/{source.name}", "done")
-                    return runtime_obj
+                    async def compile_runtime(source: Path) -> Path:
+                        runtime_obj = self.cache / f"single-runtime-{source.stem}.wasm.o"
+                        async with semaphore:
+                            await self.stage(f"Runtime/{source.name}", "compiling",
+                                [emcc, *runtime_flags, "-c", source, "-o", runtime_obj], [runtime_obj],
+                                [digest(source), header_key, self.compiler_identity[emcc]],
+                                self.cache / f"single-runtime-{source.stem}.compile.key")
+                        self.display.update(f"Runtime/{source.name}", "done")
+                        return runtime_obj
 
-                tasks = [asyncio.create_task(compile_runtime(source)) for source in sources]
-                try:
-                    runtime_objects = await asyncio.gather(*tasks)
-                finally:
-                    for task in tasks:
-                        if not task.done():
-                            task.cancel()
-                    await asyncio.gather(*tasks, return_exceptions=True)
-
+                    tasks = [asyncio.create_task(compile_runtime(source)) for source in sources]
+                    try:
+                        runtime_objects = await asyncio.gather(*tasks)
+                    finally:
+                        for task in tasks:
+                            if not task.done():
+                                task.cancel()
+                        await asyncio.gather(*tasks, return_exceptions=True)
                 await self.run("Final link", "linking",
                     [emcc, *self.browser_link_flags(False), obj, *runtime_objects,
                      "-o", self.output / f"{name}.js"])
@@ -679,6 +694,17 @@ def validate(a: argparse.Namespace) -> None:
         raise ValueError("--ir-chunks cannot be combined with shared libraries, incremental units, linker maps, text IR, or --ready-js")
     if a.pthreads and a.target != "i386-wasm":
         raise ValueError("--pthreads requires i386-wasm")
+    if a.runtime_archive:
+        if a.target != "i386-wasm":
+            raise ValueError("--runtime-archive requires i386-wasm")
+        a.runtime_archive = a.runtime_archive.resolve(strict=True)
+        if a.legacy_gl != "0" or a.debug or a.float_status:
+            raise ValueError("--runtime-archive requires --legacy-gl 0 without --debug or --float-status")
+        incremental = bool(a.shared_library or a.incremental_units)
+        suffix = ("-incremental" if incremental else "") + ("-pthreads" if a.pthreads else "")
+        expected = f"libelfconv-runtime-i386-wasm{suffix}.a"
+        if a.runtime_archive.name != expected:
+            raise ValueError(f"--runtime-archive must name {expected}")
     if a.entry_symbol and not a.target.startswith("i386-"):
         raise ValueError("--entry-symbol requires i386")
     if a.shared_library and (not a.target.startswith("i386-") or a.incremental_units):
@@ -698,6 +724,13 @@ def validate(a: argparse.Namespace) -> None:
     if not a.ready_js and not a.no_lifted:
         default = ROOT / "bin/elflift" if (ROOT / "bin/elflift").is_file() else ROOT / "build/src/lifter/elflift"
         a.lifter = tool(a.lifter or str(default))
+    if a.target == "i386-wasm" and not a.runtime_archive and a.lifter:
+        incremental = bool(a.shared_library or a.incremental_units)
+        suffix = ("-incremental" if incremental else "") + ("-pthreads" if a.pthreads else "")
+        sibling_archive = Path(a.lifter).resolve().with_name(
+            f"libelfconv-runtime-i386-wasm{suffix}.a")
+        if sibling_archive.is_file() and a.legacy_gl == "0" and not a.debug and not a.float_status:
+            a.runtime_archive = sibling_archive
 
 
 async def convert(a: argparse.Namespace, console: Console) -> None:

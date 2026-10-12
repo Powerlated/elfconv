@@ -68,3 +68,74 @@ target_include_directories(elflift PRIVATE
 )
 install(TARGETS elflift RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
 
+if(CMAKE_ELFCONV_X86_BUILD)
+  if(NOT ELFCONV_EMCC)
+    find_program(ELFCONV_EMCC NAMES em++)
+  endif()
+  if(ELFCONV_EMCC)
+    get_filename_component(elfconv_emcc_dir "${ELFCONV_EMCC}" DIRECTORY)
+    if(EXISTS "${elfconv_emcc_dir}/emar")
+      set(ELFCONV_EMAR "${elfconv_emcc_dir}/emar")
+    else()
+      find_program(ELFCONV_EMAR NAMES emar REQUIRED)
+    endif()
+    set(elfconv_runtime_sources
+      "${ELFCONV_ROOT}/src/runtime/Entry.cpp"
+      "${ELFCONV_ROOT}/src/runtime/Memory.cpp"
+      "${ELFCONV_ROOT}/src/runtime/Runtime.cpp"
+      "${ELFCONV_ROOT}/src/runtime/VmIntrinsics.cpp"
+      "${ELFCONV_ROOT}/src/utils/Util.cpp"
+      "${ELFCONV_ROOT}/src/utils/elfconv.cpp"
+      "${ELFCONV_ROOT}/src/runtime/I386Imports.cpp")
+    file(GLOB_RECURSE elfconv_runtime_headers CONFIGURE_DEPENDS
+      "${ELFCONV_ROOT}/src/runtime/*.h"
+      "${ELFCONV_ROOT}/src/runtime/*.hpp"
+      "${ELFCONV_ROOT}/src/runtime/*.inc"
+      "${ELFCONV_ROOT}/src/utils/*.h"
+      "${ELFCONV_ROOT}/src/utils/*.hpp"
+      "${ELFCONV_ROOT}/src/utils/*.inc"
+      "${ELFCONV_ROOT}/backend/remill/include/*.h"
+      "${ELFCONV_ROOT}/backend/remill/include/*.hpp"
+      "${ELFCONV_ROOT}/backend/remill/include/*.inc")
+
+    function(elfconv_add_runtime_archive suffix thread_flag incremental)
+      set(runtime_objects)
+      set(runtime_object_dir "${CMAKE_CURRENT_BINARY_DIR}/runtime-i386-wasm${suffix}")
+      set(runtime_mode_flags)
+      if(incremental)
+        list(APPEND runtime_mode_flags -DELFCONV_INCREMENTAL_UNITS=1)
+      endif()
+      foreach(source IN LISTS elfconv_runtime_sources)
+        get_filename_component(stem "${source}" NAME_WE)
+        set(object "${runtime_object_dir}/${stem}.o")
+        add_custom_command(OUTPUT "${object}"
+          COMMAND "${CMAKE_COMMAND}" -E make_directory "${runtime_object_dir}"
+          COMMAND "${ELFCONV_EMCC}" -O2 -fwasm-exceptions ${thread_flag}
+            "-I${ELFCONV_ROOT}/backend/remill/include"
+            "-I${ELFCONV_ROOT}" "-I${ELFCONV_ROOT}/src"
+            -std=c++17 -DELF_IS_I386 -DADDRESS_SIZE_BITS=32 -DECV_LEGACY_GL=0
+            ${runtime_mode_flags} -sUSE_SDL=2 -c "${source}" -o "${object}"
+          DEPENDS "${source}" ${elfconv_runtime_headers}
+          VERBATIM)
+        list(APPEND runtime_objects "${object}")
+      endforeach()
+      set(archive "${CMAKE_CURRENT_BINARY_DIR}/libelfconv-runtime-i386-wasm${suffix}.a")
+      add_custom_command(OUTPUT "${archive}"
+        COMMAND "${ELFCONV_EMAR}" rcs "${archive}" ${runtime_objects}
+        DEPENDS ${runtime_objects}
+        VERBATIM)
+      set(elfconv_runtime_archives ${elfconv_runtime_archives} "${archive}" PARENT_SCOPE)
+    endfunction()
+
+    elfconv_add_runtime_archive("" "" OFF)
+    elfconv_add_runtime_archive("-pthreads" "-pthread" OFF)
+    elfconv_add_runtime_archive("-incremental" "" ON)
+    elfconv_add_runtime_archive("-incremental-pthreads" "-pthread" ON)
+    add_custom_target(elfconv_i386_wasm_runtime ALL DEPENDS ${elfconv_runtime_archives})
+    add_dependencies(elflift elfconv_i386_wasm_runtime)
+    install(FILES ${elfconv_runtime_archives} DESTINATION "${CMAKE_INSTALL_BINDIR}")
+  elseif(ELFCONV_I386_TESTS)
+    message(FATAL_ERROR "ELFCONV_I386_TESTS requires Emscripten to build the i386 Wasm runtime archives")
+  endif()
+endif()
+

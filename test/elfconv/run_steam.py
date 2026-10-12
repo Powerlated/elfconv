@@ -100,12 +100,18 @@ def main():
     if native.returncode:
         sys.stderr.write(native.stderr)
         return 1
-
     wasm_dir = output / "wasm"
+    runtime_archive = Path(args.lifter).resolve().with_name(
+        "libelfconv-runtime-i386-wasm-incremental.a")
+    if not runtime_archive.is_file():
+        print(f"Missing prebuilt Wasm runtime archive: {runtime_archive}; build elflift first",
+              file=sys.stderr)
+        return 1
     converted = command([sys.executable, str(root / "scripts/convert_elf.py"),
                          "--input", str(executable), "--target", "i386-wasm",
                          "--output-dir", str(wasm_dir), "--lifter", args.lifter,
                          "--emcc", args.emcc, "--legacy-gl", "0",
+                         "--runtime-archive", str(runtime_archive),
                          "--shared-library", str(steam_api),
                          "--shared-library", str(stdcxx),
                          "--shared-library", str(gcc_s)],

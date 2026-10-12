@@ -183,10 +183,18 @@ def main():
     if native is None or native.returncode:
         print(f'Native reference failed; logs: {output}')
         return 1
+    runtime_suffix = ('-incremental' if not args.pthreads else '-incremental-pthreads') if args.dynamic else (
+        '-pthreads' if args.pthreads else '')
+    runtime_archive = Path(args.lifter).resolve().with_name(
+        'libelfconv-runtime-i386-wasm' + runtime_suffix + '.a')
+    if not runtime_archive.is_file():
+        print(f'Missing prebuilt Wasm runtime archive: {runtime_archive}; build elflift first')
+        return 1
     converted = run('convert', [sys.executable, str(root / 'scripts/convert_elf.py'),
         '--input', str(binary), '--target', 'i386-wasm',
         '--output-dir', str(output / 'wasm'),
         '--lifter', args.lifter, '--emcc', args.emcc,
+        '--runtime-archive', str(runtime_archive),
         *(['--entry-symbol', 'main'] if args.shared else []),
         *(['--wasm-opt-level', args.wasm_opt_level] if args.wasm_opt_level else []),
         *[argument for library in libraries for argument in ('--shared-library', str(library))],
