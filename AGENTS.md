@@ -83,6 +83,7 @@
 ## Environment safety
 
 - Steam: non-root user; writable runtime directories. Never store credentials in tracked files or chat.
-- Emscripten SDK is installed at `~/emsdk`; source `~/emsdk/emsdk_env.sh` to add its tools to `PATH`.
+- Use `~/emsdk-6` (Emscripten 6.0.12, LLVM 24) for compiling and linking Wasm from LLVM 23 bitcode. Source `~/emsdk-6/emsdk_env.sh`; its `emcc` and `em++` are under `~/emsdk-6/upstream/emscripten`.
+- Do not use `~/emsdk` (Emscripten 4.0.9, LLVM 21) with LLVM 23 bitcode; its reader rejects LLVM 23 attributes.
 - Diagnose sandbox/display/GPU failures before changing permissions. No blanket `xhost +`, privileged containers, or Docker-socket shortcuts.
 - Host-wide security-policy changes require explicit approval; document risk and restoration. Prefer narrow, scoped permissions.

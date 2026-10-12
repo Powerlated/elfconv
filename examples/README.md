@@ -28,7 +28,7 @@ combination:
 ```bash
 cmake -S examples/sdl_triangle -B build/sdl_triangle \
   -DELFCONV_LIFTER="$PWD/build/src/lifter/elflift" \
-  -DELFCONV_EMCC="$HOME/emsdk/upstream/emscripten/em++"
+  -DELFCONV_EMCC="$HOME/emsdk-6/upstream/emscripten/em++"
 cmake --build build/sdl_triangle --target triangle-i386 triangle-wasm triangle-i386-to-wasm
 ```
 
@@ -62,7 +62,7 @@ cmake -S examples/sdl_triangle -B build/sdl_triangle \
   -DCMAKE_C_FLAGS="--sysroot=$SYSROOT -I$SYSROOT/usr/include/i386-linux-gnu -B$SYSROOT/usr/lib/i386-linux-gnu" \
   -DCMAKE_EXE_LINKER_FLAGS="-L$SYSROOT/usr/lib/gcc/i686-linux-gnu/15" \
   -DELFCONV_LIFTER="$PWD/build/src/lifter/elflift" \
-  -DELFCONV_EMCC="$HOME/emsdk/upstream/emscripten/em++"
+  -DELFCONV_EMCC="$HOME/emsdk-6/upstream/emscripten/em++"
 cmake --build build/sdl_triangle --target triangle-i386 triangle-i386-to-wasm
 ```
 
@@ -93,7 +93,7 @@ combination by selecting targets:
 ```bash
 cmake -S examples/sdl_cube -B build/sdl_cube \
   -DELFCONV_LIFTER="$PWD/build/src/lifter/elflift" \
-  -DELFCONV_EMCC="$HOME/emsdk/upstream/emscripten/em++"
+  -DELFCONV_EMCC="$HOME/emsdk-6/upstream/emscripten/em++"
 cmake --build build/sdl_cube --target cube-i386 cube-wasm cube-i386-to-wasm
 ```
 
@@ -184,7 +184,7 @@ combination of SM64EX variants from the repository root:
 ```bash
 cmake -S . -B build \
   -DELFCONV_SM64EX_SYSROOT="$HOME/.local/opt/elfconv-i386-sysroot" \
-  -DELFCONV_EMCC="$HOME/emsdk/upstream/emscripten/em++"
+  -DELFCONV_EMCC="$HOME/emsdk-6/upstream/emscripten/em++"
 cmake --build build --target sm64ex-i386 sm64ex-wasm sm64ex-i386-to-wasm
 ```
 
