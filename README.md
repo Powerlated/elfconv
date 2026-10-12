@@ -198,6 +198,12 @@ concurrent ELF lifts (default 2); `--compile-jobs N` bounds compiler jobs
 continue; ready owners rotate through the pool. CMake uses `ELFCONV_LIFT_JOBS`
 (default 2) and `ELFCONV_COMPILE_JOBS` (default 2); target arguments:
 `LIFT_JOBS` and `COMPILE_JOBS`.
+
+`elflift --analyze_only` reports ELF headers, executable section sizes, and
+function-extent estimates without lifting; add `--per_elf` to group a bundled
+i386 ELF and its shared libraries. Initializer callbacks without symbol sizes
+can have broad estimated extents. For per-function lift time and LLVM IR metrics
+during a normal lift, use `--lift_profile_out=/path/profile.tsv`.
 Direct CLI: `python scripts/convert_elf.py --help`. CMake conversion targets
 invoke the same driver. Select the virtual environment with
 `-DPython3_EXECUTABLE="$PWD/.venv/bin/python"` if needed.

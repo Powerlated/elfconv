@@ -404,7 +404,7 @@ void ELFObject::ResolveI386Imports() {
       if (!gelf_getphdr(elf, i, &phdr)) elfconv_runtime_error("Invalid i386 program header.\n");
       executable |= phdr.p_type == PT_INTERP;
     }
-    if (!executable && entry_symbol.empty() && !dependency_object)
+    if (!executable && entry_symbol.empty() && !dependency_object && !analyze_only)
       elfconv_runtime_error("i386 shared libraries require --entry_symbol (int(int,char**) ABI).\n");
     if (executable && !entry_symbol.empty())
       elfconv_runtime_error("--entry_symbol is only supported for i386 shared libraries.\n");
@@ -532,6 +532,7 @@ void ELFObject::ResolveI386Imports() {
       if (!name) elfconv_runtime_error("Invalid i386 import name.\n");
       unsigned type = GELF_R_TYPE(rel.r_info);
       if (type == R_386_NONE) continue;
+      if (analyze_only && type != R_386_RELATIVE && type != R_386_JMP_SLOT) continue;
       rel.r_offset += load_bias;
       if (type == R_386_TLS_DTPMOD32 || type == R_386_TLS_DTPOFF32 ||
           type == R_386_TLS_TPOFF || type == R_386_TLS_TPOFF32 || type == R_386_TLS_DESC) {

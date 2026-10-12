@@ -325,6 +325,10 @@ Shared metadata, registry, and runtime compilation share the pool; final link
 waits for them and all chunks. Successful stages retain cache keys if another
 job fails. TTY: live per-library progress tree. Redirected output: plain stage
 transitions. Tool logs: `.elfconv-logs/`; failures print log tail and path.
+`--analyze_only` reports ELF architecture, executable sections, function-extent
+distribution, and largest extents without translating instructions.
+`--lift_profile_out FILE.tsv` records per-function lift time, input extent, LLVM
+instruction/block counts, and printed IR bytes.
 
 
 This is an explicit AOT bundle, not a runtime native-ELF compiler or a general

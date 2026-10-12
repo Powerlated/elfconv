@@ -541,7 +541,7 @@ void AArch64TraceManager::SetELFData() {
     elfconv_runtime_error("Now not supported for ELF with no eh_frame section.\n");
   }
 
-  if (entry_func_lifted_name.empty()) {
+  if (!elf_obj.analyze_only && entry_func_lifted_name.empty()) {
     elfconv_runtime_error("[ERROR] entry_function is not found.\n");
   }
 

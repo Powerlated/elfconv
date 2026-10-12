@@ -27,6 +27,7 @@
 #include <fstream>
 #include <limits>
 #include <vector>
+#include <chrono>
 #if defined(__linux__)
 #  include <signal.h>
 #  include <utils/Util.h>
@@ -74,7 +75,9 @@ DEFINE_string(metadata_fingerprint_out, "", "Write the process-wide ELF metadata
 DEFINE_string(unit_owner, "", "Lift only functions owned by this linker-map object.");
 DEFINE_string(unit_id, "", "Stable suffix used for this incremental unit's metadata symbols.");
 DEFINE_uint64(ir_chunks, 0, "Split lifted IR into approximately equal-size linkable chunks.");
+DEFINE_string(lift_profile_out, "", "Write per-function lift timing and LLVM IR metrics as TSV.");
 DEFINE_string(ir_chunk_manifest_out, "", "Write chunk count and IR sizes for --ir_chunks.");
+DEFINE_bool(analyze_only, false, "Print ELF section and function metrics without lifting.");
 DEFINE_bool(metadata_only, false, "Emit only process-wide ELF metadata.");
 DEFINE_string(
     norm_mode, "0",
@@ -195,6 +198,95 @@ std::filesystem::path IRChunkPath(const std::filesystem::path &base,
   return base.parent_path() /
          (base.stem().string() + ".chunk-" + std::to_string(index) +
           base.extension().string());
+}
+
+std::string EscapeTSV(std::string_view value) {
+  std::string escaped;
+  escaped.reserve(value.size());
+  for (const char character : value) {
+    switch (character) {
+      case '\\': escaped += "\\\\"; break;
+      case '\t': escaped += "\\t"; break;
+      case '\r': escaped += "\\r"; break;
+      case '\n': escaped += "\\n"; break;
+      default: escaped += character; break;
+    }
+  }
+  return escaped;
+}
+
+std::uint64_t FunctionIRDefinitionSize(const llvm::Function &function) {
+  std::string text;
+  llvm::raw_string_ostream stream(text);
+  function.print(stream);
+  stream.flush();
+  return text.size();
+}
+
+void WriteLiftProfileRecord(std::ofstream &profile, std::uint64_t address,
+                            std::string_view name, const llvm::Function &function,
+                            std::uint64_t input_bytes, std::uint64_t lift_us) {
+  std::uint64_t instruction_count = 0;
+  for (const auto &block : function) {
+    instruction_count += block.size();
+  }
+  profile << "0x" << std::hex << address << std::dec << '\t'
+          << EscapeTSV(name) << '\t' << input_bytes << '\t' << lift_us << '\t'
+          << instruction_count << '\t' << function.size() << '\t'
+          << FunctionIRDefinitionSize(function) << '\n';
+}
+
+void PrintELFAnalysis(const AArch64TraceManager &manager, bool per_elf) {
+  const auto &elf = manager.elf_obj;
+  std::map<std::string, std::vector<const DisasmFunc *>> owners;
+  for (const auto &[address, function] : manager.disasm_funcs) {
+    const auto owner = per_elf ? manager.GetObjectOwner(address) : elf.file_name;
+    owners[owner].push_back(&function);
+  }
+
+  std::cout << "ELF analysis (no lifting)\n"
+            << "File: " << elf.file_name << '\n'
+            << "Architecture: " << elf.bin_arch_str << " (" << elf.bits << "-bit)\n"
+            << "Entry: 0x" << std::hex << elf.entry << std::dec << '\n'
+            << "Stripped: " << (elf.is_stripped ? "yes" : "no") << '\n';
+  for (const auto &[owner, functions] : owners) {
+    std::vector<const DisasmFunc *> by_size = functions;
+    std::sort(by_size.begin(), by_size.end(), [](const auto *left, const auto *right) {
+      return left->func_size < right->func_size;
+    });
+    std::uint64_t function_extent_bytes = 0;
+    std::cout << "\nOwner: " << owner << '\n'
+              << "Function entries: " << functions.size() << '\n';
+    for (const auto *function : functions) {
+      function_extent_bytes += function->func_size;
+    }
+    std::cout << "Function extent bytes (sum; may overlap): "
+              << function_extent_bytes << '\n';
+
+    std::uint64_t executable_bytes = 0;
+    std::cout << "Executable sections:\n";
+    for (const auto &[name, section] : elf.code_sections) {
+      if (per_elf && manager.GetObjectOwner(section.vma) != owner) continue;
+      executable_bytes += section.size;
+      std::cout << "  " << name << "\t0x" << std::hex << section.vma << std::dec
+                << "\t" << section.size << " bytes\n";
+    }
+    std::cout << "Executable section bytes: " << executable_bytes << '\n';
+    if (by_size.empty()) continue;
+    const auto percentile = [&](std::size_t percent) {
+      return by_size[(by_size.size() - 1) * percent / 100]->func_size;
+    };
+    std::cout << "Function extent bytes: min=" << by_size.front()->func_size
+              << " median=" << percentile(50) << " p90=" << percentile(90)
+              << " p99=" << percentile(99) << " max=" << by_size.back()->func_size
+              << " mean=" << function_extent_bytes / by_size.size() << '\n'
+              << "Largest function extents:\n";
+    for (std::size_t index = 0; index < std::min<std::size_t>(10, by_size.size()); ++index) {
+      const auto *function = by_size[by_size.size() - 1 - index];
+      std::cout << "  0x" << std::hex << function->vma << std::dec << "\t"
+                << function->func_size << " bytes\t" << function->func_name << '\n';
+    }
+  }
 }
 
 void StoreIRChunks(llvm::Module &module) {
@@ -341,6 +433,7 @@ int main(int argc, char *argv[]) {
         (!FLAGS_per_elf && (FLAGS_metadata_only || !FLAGS_unit_owner.empty())))
       elfconv_runtime_error("Bundled library units require --per_elf.\n");
   }
+  manager.elf_obj.analyze_only = FLAGS_analyze_only;
   manager.SetELFData();
   if (FLAGS_arch == "i386") {
     auto register_callback = [&](uint32_t address) {
@@ -363,12 +456,23 @@ int main(int argc, char *argv[]) {
     for (const auto address : manager.elf_obj.i386_initializers) register_callback(address);
     for (const auto address : manager.elf_obj.i386_finalizers) register_callback(address);
   }
+  if (!FLAGS_linker_map.empty()) manager.LoadLinkerMap(FLAGS_linker_map, FLAGS_object_base);
   if (FLAGS_per_elf) {
     if (FLAGS_arch != "i386" || !FLAGS_linker_map.empty())
       elfconv_runtime_error("--per_elf requires i386 without a linker map.\n");
     manager.LoadELFOwners();
   }
-  if (!FLAGS_linker_map.empty()) manager.LoadLinkerMap(FLAGS_linker_map, FLAGS_object_base);
+  if (FLAGS_analyze_only) {
+    if (!FLAGS_unit_manifest_out.empty() || !FLAGS_unit_owner.empty() ||
+        !FLAGS_unit_id.empty() || FLAGS_metadata_only || !FLAGS_bc_out.empty() ||
+        FLAGS_ir_chunks || !FLAGS_lift_profile_out.empty()) {
+      elfconv_runtime_error(
+          "--analyze_only cannot be combined with lift, unit, or bitcode-output options.\n");
+    }
+    PrintELFAnalysis(manager, FLAGS_per_elf);
+    return 0;
+  }
+
   if (!FLAGS_unit_manifest_out.empty()) {
     if (FLAGS_metadata_fingerprint_out.empty()) {
       elfconv_runtime_error("--unit_manifest_out requires --metadata_fingerprint_out.\n");
@@ -471,6 +575,16 @@ int main(int argc, char *argv[]) {
   if (!FLAGS_metadata_only) {
     // Lift every function.
 
+  std::ofstream lift_profile;
+  if (!FLAGS_lift_profile_out.empty()) {
+    lift_profile.open(FLAGS_lift_profile_out);
+    if (!lift_profile) {
+      elfconv_runtime_error("Cannot write lift profile: %s\n",
+                            FLAGS_lift_profile_out.c_str());
+    }
+    lift_profile << "address\tfunction\tinput_bytes\tlift_us\tir_instructions\t"
+                    "ir_blocks\tir_text_bytes\n";
+  }
   do {
     manager.rest_disasm_funcs.clear();
     for (const auto &[addr, dasm_func] : manager.disasm_funcs) {
@@ -480,12 +594,19 @@ int main(int argc, char *argv[]) {
       if (unit_mode && !manager.IsSelectedUnitAddress(addr)) continue;
       addr_fun_name_map[addr] = dasm_func.func_name.c_str();
       auto &lifted_fun_name = addr_fun_name_map[addr];
+      const auto lift_start = std::chrono::steady_clock::now();
       if (!main_lifter.Lift(dasm_func.vma, lifted_fun_name)) {
         elfconv_runtime_error("[ERROR] Failed to Lift \"%s\"\n", lifted_fun_name);
       }
-      // Set function name
+      const auto lift_us = std::chrono::duration_cast<std::chrono::microseconds>(
+          std::chrono::steady_clock::now() - lift_start).count();
       auto lifted_fn = manager.GetLiftedTraceDefinition(dasm_func.vma);
       lifted_fn->setName(lifted_fun_name);
+      if (lift_profile) {
+        WriteLiftProfileRecord(lift_profile, addr, lifted_fun_name, *lifted_fn,
+                               dasm_func.func_size,
+                               static_cast<std::uint64_t>(lift_us));
+      }
       fin_addrs.insert(addr);
     }
     for (auto &[rest_addr, disasm_func] : manager.rest_disasm_funcs) {

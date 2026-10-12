@@ -61,6 +61,7 @@ class AArch64TraceManager : public remill::TraceManager {
   void EnableUnitMode(const std::string &owner, const remill::Arch *arch,
                       llvm::Module *external_declarations);
   bool IsSelectedUnitAddress(uint64_t address) const;
+  std::string GetObjectOwner(uint64_t address) const;
   void WriteIncrementalManifest(const std::string &manifest_path,
                                 const std::string &metadata_fingerprint_path) const;
 
@@ -93,5 +94,4 @@ class AArch64TraceManager : public remill::TraceManager {
   const remill::Arch *unit_arch = nullptr;
   llvm::Module *external_declarations = nullptr;
   std::unordered_map<uint64_t, std::string> external_func_names;
-  std::string GetObjectOwner(uint64_t address) const;
 };

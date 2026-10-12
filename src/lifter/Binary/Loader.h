@@ -128,6 +128,7 @@ class ELFObject {
   uintptr_t entry;
   uint32_t load_bias = 0;
   std::string entry_symbol;
+  bool analyze_only = false;
   struct I386Library {
     std::string path, name;
     uint64_t image_end = 0;

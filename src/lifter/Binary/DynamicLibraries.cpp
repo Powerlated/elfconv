@@ -101,6 +101,7 @@ void ELFObject::LoadI386Libraries() {
   for (const auto &path : shared_library_paths) {
     auto object = std::make_unique<ELFObject>(path);
     object->dependency_object = true;
+    object->analyze_only = analyze_only;
     object->load_bias = next;
     I386Library library;
     library.path = path;
