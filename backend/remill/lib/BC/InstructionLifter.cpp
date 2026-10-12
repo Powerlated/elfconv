@@ -674,10 +674,32 @@ llvm::Value *InstructionLifter::LiftRegisterOperand(Instruction &inst, llvm::Bas
 
     } else if (val_size > arg_size) {
       if (arg_type->isIntegerTy()) {
-        CHECK(val_type->isIntegerTy()) << "Expected " << arch_reg.name << " to be an integral type "
-                                       << "for instruction at " << std::hex << inst.pc;
+        if ((val_type->isVectorTy() || val_type->isFloatingPointTy() ||
+             val_type->isArrayTy()) &&
+            arch_reg.name.rfind("XMM", 0) == 0) {
+          if (auto array_type = llvm::dyn_cast<llvm::ArrayType>(val_type)) {
+            auto vector_type = llvm::FixedVectorType::get(
+                array_type->getElementType(), array_type->getNumElements());
+            llvm::IRBuilder<> ir(block);
+            llvm::Value *vector = llvm::UndefValue::get(vector_type);
+            for (unsigned i = 0; i < array_type->getNumElements(); ++i) {
+              auto element = ir.CreateExtractValue(val, {i});
+              vector = ir.CreateInsertElement(vector, element, ir.getInt32(i));
+            }
+            val = vector;
+            val_type = vector_type;
+          }
 
-        val = new llvm::TruncInst(val, arg_type, llvm::Twine::createNull(), block);
+          auto vector_int_type = llvm::IntegerType::get(
+              context, data_layout.getTypeAllocSizeInBits(val_type).getFixedValue());
+          val = new llvm::BitCastInst(val, vector_int_type, llvm::Twine::createNull(), block);
+          val = new llvm::TruncInst(val, arg_type, llvm::Twine::createNull(), block);
+        } else {
+          CHECK(val_type->isIntegerTy()) << "Expected " << arch_reg.name << " to be an integral type "
+                                         << "for instruction at " << std::hex << inst.pc;
+
+          val = new llvm::TruncInst(val, arg_type, llvm::Twine::createNull(), block);
+        }
 
       } else if (arg_type->isFloatingPointTy()) {
         CHECK(val_type->isFloatingPointTy())

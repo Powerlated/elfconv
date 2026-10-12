@@ -14,6 +14,7 @@ RUNTIME="$STEAM/ubuntu12_32/steam-runtime"
 
 LIBS=(
   "$PORTAL/bin/launcher.so"
+  "$PORTAL/bin/libsteam_api.so"
   "$RUNTIME/usr/lib/i386-linux-gnu/libstdc++.so.6"
   "$RUNTIME/lib/i386-linux-gnu/libgcc_s.so.1"
   "$PORTAL/bin/libtier0.so"
@@ -38,8 +39,8 @@ python3 scripts/convert_elf.py \
   --lifter "$PWD/build/llvm23/src/lifter/elflift" \
   --emcc "$HOME/emsdk-6/upstream/emscripten/em++" \
   --legacy-gl 0 \
-  --max-ir-chunks-per-elf 1 \
+  --max-ir-chunks-per-elf 100 \
   --runtime-archive "$PWD/build/llvm23/src/lifter/libelfconv-runtime-i386-wasm-incremental.a" \
-  --jobs "${ELFCONV_JOBS:-12}" \
+  --jobs "${ELFCONV_JOBS:-16}" \
   "$@"
 

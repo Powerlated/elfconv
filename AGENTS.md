@@ -37,6 +37,7 @@
 - Use Ghidra for retail ABI/offset analysis. If unavailable, download official release into `.tools/`. Reuse saved analyzed projects; keep projects outside dot-prefixed directories.
 - Preserve analysis and verified symbol names. Label only evidence-backed discoveries; distinguish candidates from proven facts.
 - Batch independent queries per module. Read narrow excerpts; assembly only for specific operands, indirect calls, patch targets, or unreliable decompilation.
+- GPT-6-Luna MUST consult authoritative online documentation for instruction behavior; prefer vendor ISA manuals, and cite the specific source used in analysis.
 - Empty search: change evidence source/query. Bad recovery: repair reusable analysis tooling, not recurring throwaway scripts.
 - Extend reusable helpers for repeated queries. Keep compact verified facts near affected code: binary/hash, module-relative address, signature/layout, ownership/order, evidence.
 - Stop tracing when required behavior is proven. Implement and exercise affected path; no unrelated binary inventory.
