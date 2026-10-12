@@ -54,6 +54,9 @@
 - Prefer vendored tests for regression coverage; do not add project-owned regression tests when a vendored test exercises the behavior.
 - Place vendored tests in `test/vendored/<vendor>/`.
 - Vendored test sources MUST remain unchanged from their pinned vendor copies. If a test depends on a facility unavailable in the browser (for example, `cmp` via `system()`), exclude it from browser registration rather than adapting the vendored source.
+- For each libc import, vendor the glibc test(s) that exercise that function under `test/vendored/glibc/<upstream-subdir>/`, unchanged; record the upstream revision and source path.
+- Register the test with CMake/CTest and `run_i386.py` when it directly checks the imported function, is deterministic, and its required facilities are supported by the runner. Otherwise keep the source unchanged and document why it cannot be registered; do not weaken or rewrite it.
+- Run the native baseline, then iterate on the import implementation until the native-versus-Wasm vendored test passes. Cover relevant results, errors, and boundary behavior; a successful lift or link is not a passing test.
 - Permanent tests protect consumer-visible behavior, boundaries, invariants, transitions, and failure cases. No source-text/wiring assertions or mock echoes.
 - Keep helper source in separate language-appropriate files; reuse shared build/test utilities. No embedded source strings for multi-language fixtures.
 - Exercise actual changed path after build. For instruction/ABI changes, compare native and lifted execution where practical.
