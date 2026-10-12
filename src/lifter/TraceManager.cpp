@@ -48,7 +48,8 @@ bool ParseMapHex(const std::string &text, uint64_t &value) {
 
 bool IsCodeMapSection(const std::string &section) {
   return section == ".text" || section.rfind(".text.", 0) == 0 ||
-         section == ".init" || section == ".fini";
+         section == ".init" || section == ".fini" || section == ".plt" ||
+         section.rfind(".plt.", 0) == 0 || section == ".iplt";
 }
 
 std::string NormalizeMapOwner(std::string owner, const std::string &object_base) {
