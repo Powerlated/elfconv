@@ -12,7 +12,7 @@ development libraries.
 
 ```bash
 cmake -S examples/sdl_triangle -B build/sdl_triangle
-cmake --build build/sdl_triangle --target triangle
+cmake --build build/sdl_triangle --target triangle-i386
 cmake --build build/sdl_triangle --target triangle-smoke
 ```
 
@@ -20,26 +20,51 @@ Escape or closing the window exits interactive mode. `triangle-smoke` renders
 three frames and checks that the triangle's center is colored and the background
 is black. The target keeps `-m32 -fno-pie -no-pie` for conversion.
 
-### Convert the ELF to Wasm
+### Build choices
 
-Build the x86-enabled elfconv lifter and install/configure Emscripten first.
-Then configure and build the conversion target:
+Build each requested variant by listing its target; one invocation can select any
+combination:
 
 ```bash
 cmake -S examples/sdl_triangle -B build/sdl_triangle \
   -DELFCONV_LIFTER="$PWD/build/src/lifter/elflift" \
   -DELFCONV_EMCC="$HOME/emsdk/upstream/emscripten/em++"
-cmake --build build/sdl_triangle --target triangle-wasm
-python3 -m http.server 8000 --bind 127.0.0.1 \
-  --directory build/sdl_triangle
+cmake --build build/sdl_triangle --target triangle-i386 triangle-wasm triangle-i386-to-wasm
 ```
 
-Open `http://127.0.0.1:8000/` for interactive rendering, or
-`http://127.0.0.1:8000/?frames=3` for framebuffer checks and an exit status.
-`triangle-wasm` lifts `triangle` into `triangle.bc` and links it with the
-host-import runtime to produce `triangle.js` and `triangle.wasm`. It does **not**
-compile `triangle.c` with Emscripten. The build directory includes the copied
-`index.html` used by the local server.
+`triangle-i386` builds the native i386 ELF. `triangle-wasm` compiles
+`triangle.c` directly to Wasm; `triangle-i386-to-wasm` converts the i386 ELF.
+The direct target emits `triangle-wasm.html`, `.js`, and `.wasm`; the converted
+target emits `triangle.html`, `.js`, and `.wasm`. Only native and converted
+builds need the x86 lifter; both Wasm builds need Emscripten.
+
+Serve the converted HTML for interactive rendering. It supports `?frames=3` for
+framebuffer checks and an exit status.
+The converted path adapts i386 stack arguments, SDL handles, returned strings,
+varargs, and WebGL RGBA readback to desktop RGB/pack layout. It uses Emscripten's
+SDL2 bridge and legacy OpenGL emulation; Asyncify yields at buffer swaps.
+
+Unsupported relocations, unknown host imports, unsupported pointer-bearing SDL
+events, and raw Linux i386 syscalls fail explicitly. The printf adapters accept
+scalar `%s`, `%d`, `%u`, `%c`, `%x`, `%X`, and `%%`; floating-point and
+length-modified varargs are unsupported.
+
+For a separate i386 sysroot, configure the native compiler and pkg-config
+environment as shown below, then select `triangle-i386` and/or `triangle-i386-to-wasm`.
+
+```bash
+SYSROOT=/path/to/i386-sysroot
+LLVM_ROOT=/path/to/llvm
+export PKG_CONFIG_SYSROOT_DIR="$SYSROOT"
+export PKG_CONFIG_LIBDIR="$SYSROOT/usr/lib/i386-linux-gnu/pkgconfig:$SYSROOT/usr/share/pkgconfig"
+cmake -S examples/sdl_triangle -B build/sdl_triangle \
+  -DCMAKE_C_COMPILER="$LLVM_ROOT/bin/clang" \
+  -DCMAKE_C_FLAGS="--sysroot=$SYSROOT -I$SYSROOT/usr/include/i386-linux-gnu -B$SYSROOT/usr/lib/i386-linux-gnu" \
+  -DCMAKE_EXE_LINKER_FLAGS="-L$SYSROOT/usr/lib/gcc/i686-linux-gnu/15" \
+  -DELFCONV_LIFTER="$PWD/build/src/lifter/elflift" \
+  -DELFCONV_EMCC="$HOME/emsdk/upstream/emscripten/em++"
+cmake --build build/sdl_triangle --target triangle-i386 triangle-i386-to-wasm
+```
 
 The converted browser smoke has passed with center RGB `63,64,128`, a black
 background, exit status 0, and interactive Escape handling. SDL2 is supplied
@@ -57,57 +82,35 @@ varargs are not implemented. Guest readback supports RGB/RGBA unsigned bytes.
 The SDL cube also resolves fortified printf, C23 `strtoul`, and stack-protector
 imports.
 
-If using a separate i386 sysroot, configure it through the normal CMake compiler
-flags and pkg-config environment:
-
-```bash
-SYSROOT=/path/to/i386-sysroot
-LLVM_ROOT=/path/to/llvm
-export PKG_CONFIG_SYSROOT_DIR="$SYSROOT"
-export PKG_CONFIG_LIBDIR="$SYSROOT/usr/lib/i386-linux-gnu/pkgconfig:$SYSROOT/usr/share/pkgconfig"
-cmake -S examples/sdl_triangle -B build/sdl_triangle \
-  -DCMAKE_C_COMPILER="$LLVM_ROOT/bin/clang" \
-  -DCMAKE_C_FLAGS="--sysroot=$SYSROOT -I$SYSROOT/usr/include/i386-linux-gnu -B$SYSROOT/usr/lib/i386-linux-gnu" \
-  -DCMAKE_EXE_LINKER_FLAGS="-L$SYSROOT/usr/lib/gcc/i686-linux-gnu/15" \
-  -DELFCONV_LIFTER="$PWD/build/src/lifter/elflift" \
-  -DELFCONV_EMCC="$HOME/emsdk/upstream/emscripten/em++"
-cmake --build build/sdl_triangle --target triangle-wasm
-```
-
 ## SDL / OpenGL cube
 
 `sdl_cube` uses the same i386 SDL2/OpenGL requirements. Its executable is split
-across `cube.c`, `cube_geometry.c`, `cube_shader.c`, and `cube_render.c` so
-`cube-wasm` exercises per-object incremental lifting and compilation.
+across `cube.c`, `cube_geometry.c`, `cube_shader.c`, and `cube_render.c`.
 
-```bash
-cmake -S examples/sdl_cube -B build/sdl_cube
-cmake --build build/sdl_cube --target cube
-cmake --build build/sdl_cube --target cube-smoke
-```
-
-To convert and serve it, configure with the lifter and Emscripten paths, then
-build `cube-wasm`:
+Choose native i386, direct source-to-Wasm, converted i386-to-Wasm, or any
+combination by selecting targets:
 
 ```bash
 cmake -S examples/sdl_cube -B build/sdl_cube \
   -DELFCONV_LIFTER="$PWD/build/src/lifter/elflift" \
   -DELFCONV_EMCC="$HOME/emsdk/upstream/emscripten/em++"
-cmake --build build/sdl_cube --target cube-wasm
-python3 -m http.server 8000 --bind 127.0.0.1 --directory build/sdl_cube
+cmake --build build/sdl_cube --target cube-i386 cube-wasm cube-i386-to-wasm
 ```
 
-Open `http://127.0.0.1:8000/` to run the cube in a browser.
-The converted cube smoke passed in Chromium with `?frames=90`: both framebuffer
-readbacks passed, the center pixel changed between frames 1 and 90, the corner
-remained black, and the guest exited with status 0. It uses shader/VBO OpenGL
-calls without legacy GL emulation.
+`cube-i386` is the native i386 executable. `cube-wasm` compiles the C sources
+directly; `cube-i386-to-wasm` lifts and converts the linked i386 executable,
+using per-object incremental lifting and compilation. Open `cube-wasm.html` for
+the direct build or `index.html` for the converted build. The converted cube
+passed a Chromium 90-frame smoke: readbacks passed, the center pixel changed
+between frames 1 and 90, the corner stayed black, and the guest exited cleanly.
+Both Wasm builds use shader/VBO OpenGL without legacy GL emulation.
+
 
 ### pthread cube
 
 `sdl_cube_pthread` runs rotation on a second lifted i386 thread. Configure as
 above using `examples/sdl_cube_pthread` and `build/sdl_cube_pthread`.
-Its `cube-wasm` target enables pthreads, JSPI, and worker-owned OffscreenCanvas.
+Its `cube-i386-to-wasm` target enables pthreads, JSPI, and worker-owned OffscreenCanvas.
 Serve with COOP/COEP headers:
 
 ```sh
@@ -175,31 +178,32 @@ git submodule update --init examples/sm64ex
 The native build requires a user-supplied `baserom.us.z64` in that directory
 to extract game assets. Do not commit the ROM or extracted copyrighted assets.
 
-After configuring the repository build for `ELFCONV_ARCH=x86` and building its
-dependencies, set the local i386 sysroot and Emscripten compiler, then build the
-CMake targets from the repository root:
+After configuring the repository build for `ELFCONV_ARCH=x86`, build any
+combination of SM64EX variants from the repository root:
 
 ```bash
 cmake -S . -B build \
   -DELFCONV_SM64EX_SYSROOT="$HOME/.local/opt/elfconv-i386-sysroot" \
   -DELFCONV_EMCC="$HOME/emsdk/upstream/emscripten/em++"
-cmake --build build --target sm64ex-native
-cmake --build build --target sm64ex-bitcode
-cmake --build build --target sm64ex-wasm
+cmake --build build --target sm64ex-i386 sm64ex-wasm sm64ex-i386-to-wasm
 ```
 
-On Debian/Ubuntu with the i386 development libraries installed on the host,
-use `-DELFCONV_SM64EX_SYSROOT=/` instead of a separate sysroot. The native
-build requires the i386 SDL2 and OpenGL development packages. CMake passes the
-compiler path through `CC` and the sysroot flags through `PLATFORM_CFLAGS`;
-upstream's recursive tool build requires `CC` to contain only the executable.
+`sm64ex-i386` builds the i386 PIE ELF; `sm64ex-wasm` compiles the source
+directly to browser Wasm; `sm64ex-i386-to-wasm` converts the i386 ELF.
+`sm64ex-bitcode` remains available as the intermediate lifting-only target.
+Direct Emscripten output is isolated under
+`examples/sm64ex/build/us_web_emscripten/`; native and converted outputs are
+under `examples/sm64ex/build/us_pc_pie/`. The direct build needs Emscripten but
+not the i386 sysroot or lifter; native needs the i386 toolchain, and conversion
+additionally needs the lifter and Emscripten.
+
+The native build requires i386 SDL2/OpenGL development libraries. CMake passes
+the compiler through `CC` and sysroot flags through `PLATFORM_CFLAGS`.
 
 The CMake targets invoke the pinned upstream Makefiles to build SM64EX's asset
-tools and game. The game is compiled as an i386 PIE ELF with `-fPIE -pie`;
-outputs are under `examples/sm64ex/build/us_pc_pie/`, separate from old non-PIE objects.
-The lifter applies a fixed `0x08000000` guest load bias to sections, function
-addresses, initializer pointers, relative relocations, and linker-map ranges.
-This is AOT PIE support, not ASLR or a general shared-library loader.
+tools and game. Conversion lifts the linked PIE ELF with a fixed `0x08000000`
+guest load bias; this is AOT PIE support, not ASLR or a general shared-library
+loader.
 
 ### Shared-library configuration
 
@@ -208,10 +212,10 @@ Enable `ELFCONV_SM64EX_SHARED` to build the main game as a PIC i386 `.so`
 
 ```sh
 cmake -S . -B build -DELFCONV_SM64EX_SHARED=ON
-cmake --build build --target sm64ex-native
+cmake --build build --target sm64ex-i386
 examples/sm64ex/build/us_pc_shared/sm64-runner \
   "$PWD/examples/sm64ex/build/us_pc_shared/sm64.us.f3dex2e.so" --help
-cmake --build build --target sm64ex-wasm
+cmake --build build --target sm64ex-i386-to-wasm
 python3 -m http.server 8080 --directory examples/sm64ex/build/us_pc_shared
 ```
 
@@ -363,7 +367,7 @@ classification. The ten-byte guest encoding and register layout remain intact,
 but arithmetic loses extended precision and range. Native sanitizer checks and
 a Wasm/Node arithmetic smoke run pass.
 
-`sm64ex-wasm` now partitions the final linked i386 ELF by linker-map object
+`sm64ex-i386-to-wasm` partitions the final linked i386 ELF by linker-map object
 ownership, lifts each code unit to its own bitcode file, optimizes each Wasm
 object at `ELFCONV_SM64EX_WASM_OPT_LEVEL`, and links those units with cached shared metadata and runtime
 objects. Its cache is under

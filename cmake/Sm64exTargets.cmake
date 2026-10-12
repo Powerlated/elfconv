@@ -24,8 +24,17 @@ if(TARGET elflift)
   set(sm64ex_lifter "$<TARGET_FILE:elflift>")
 endif()
 
-foreach(mode IN ITEMS native bitcode wasm)
-  add_custom_target(sm64ex-${mode}
+foreach(mode IN ITEMS native bitcode wasm emscripten)
+  if(mode STREQUAL "native")
+    set(target_suffix i386)
+  elseif(mode STREQUAL "wasm")
+    set(target_suffix i386-to-wasm)
+  elseif(mode STREQUAL "emscripten")
+    set(target_suffix wasm)
+  else()
+    set(target_suffix bitcode)
+  endif()
+  add_custom_target(sm64ex-${target_suffix}
     COMMAND "${CMAKE_COMMAND}"
       "-DELFCONV_SM64EX_MODE=${mode}"
       "-DELFCONV_SM64EX_SHARED=${ELFCONV_SM64EX_SHARED}"
@@ -35,6 +44,7 @@ foreach(mode IN ITEMS native bitcode wasm)
       "-DELFCONV_SM64EX_DWARF_LIBRARY_DIR=${ELFCONV_SM64EX_DWARF_LIBRARY_DIR}"
       "-DELFCONV_SM64EX_JOBS=${ELFCONV_SM64EX_JOBS}"
       "-DELFCONV_SM64EX_WASM_OPT_LEVEL=${ELFCONV_SM64EX_WASM_OPT_LEVEL}"
+      "-DELFCONV_EMCC_C=${ELFCONV_EMCC_C}"
       "-DELFCONV_SM64EX_JSPI=${ELFCONV_SM64EX_JSPI}"
       "-DELFCONV_LIFTER=${sm64ex_lifter}"
       "-DELFCONV_EMCC=${ELFCONV_EMCC}"
@@ -44,6 +54,6 @@ foreach(mode IN ITEMS native bitcode wasm)
     VERBATIM
   )
   if(TARGET elflift AND mode MATCHES "^(bitcode|wasm)$")
-    add_dependencies(sm64ex-${mode} elflift)
+    add_dependencies(sm64ex-${target_suffix} elflift)
   endif()
 endforeach()

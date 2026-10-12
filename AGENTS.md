@@ -28,6 +28,13 @@
 - Cross-layer ABI/layout changes: update producers, consumers, offsets, and size assertions together. Rebuild affected artifacts; never mix incompatible versions.
 - Preserve guest calling conventions, pointer ownership, TLS, register state, and host graphics state. Native host pointers are not guest addresses.
 
+## Build variant target names
+
+- Native i386 targets MUST use `<name>-i386`.
+- Direct source-to-Wasm targets MUST use `<name>-wasm`.
+- ELF conversion targets from i386 to Wasm MUST use `<name>-i386-to-wasm`.
+- Keep these suffixes distinct; update all callers and documentation when renaming.
+
 ## Binary analysis
 
 - User observations are ground truth. Name exact unknown and required evidence before tracing.
