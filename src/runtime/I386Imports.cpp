@@ -1,3 +1,6 @@
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE 1
+#endif
 #include "Runtime.h"
 #include "utils/elfconv.h"
 #include "I386DynamicLibraries.h"
@@ -22,6 +25,7 @@
 #include <strings.h>
 #include <dirent.h>
 #include <sys/stat.h>
+#include <sys/socket.h>
 #include <sys/time.h>
 #include <time.h>
 #include <wchar.h>
@@ -31,6 +35,8 @@
 #include <string>
 #include <vector>
 #include <map>
+#include <deque>
+#include <memory>
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
 #include <emscripten/html5.h>
@@ -480,6 +486,52 @@ uint32_t register_guest_adapter(uint8_t *arena, RuntimeManager *runtime, LiftedF
 std::map<std::string, uint32_t, std::less<>> environment_values;
 std::map<uint32_t, FILE *> files;
 uint32_t next_file = 0x1000;
+struct VirtualDatagramPair {
+  std::deque<std::vector<char>> incoming[2];
+  bool closed[2] = {false, false};
+};
+struct VirtualDatagramEnd {
+  std::shared_ptr<VirtualDatagramPair> pair;
+  unsigned side;
+};
+std::map<int, VirtualDatagramEnd> virtual_datagram_sockets;
+int next_virtual_socket = 0x40000000;
+bool virtual_socket_write(int fd, const void *buffer, size_t size, ssize_t &result) {
+  auto it = virtual_datagram_sockets.find(fd);
+  if (it == virtual_datagram_sockets.end()) return false;
+  const unsigned peer = 1 - it->second.side;
+  if (it->second.pair->closed[peer]) { errno = EPIPE; result = -1; return true; }
+  std::vector<char> packet;
+  if (size) packet.assign(static_cast<const char *>(buffer),
+                           static_cast<const char *>(buffer) + size);
+  it->second.pair->incoming[peer].push_back(std::move(packet));
+  result = ssize_t(size);
+  return true;
+}
+bool virtual_socket_read(int fd, void *buffer, size_t size, ssize_t &result) {
+  auto it = virtual_datagram_sockets.find(fd);
+  if (it == virtual_datagram_sockets.end()) return false;
+  if (!size) { result = 0; return true; }
+  auto &queue = it->second.pair->incoming[it->second.side];
+  if (queue.empty()) {
+    if (it->second.pair->closed[1 - it->second.side]) result = 0;
+    else { errno = EAGAIN; result = -1; }
+    return true;
+  }
+  auto packet = std::move(queue.front());
+  queue.pop_front();
+  const size_t count = std::min(size, packet.size());
+  if (count) memcpy(buffer, packet.data(), count);
+  result = ssize_t(count);
+  return true;
+}
+bool virtual_socket_close(int fd) {
+  auto it = virtual_datagram_sockets.find(fd);
+  if (it == virtual_datagram_sockets.end()) return false;
+  it->second.pair->closed[it->second.side] = true;
+  virtual_datagram_sockets.erase(it);
+  return true;
+}
 FILE *stream(uint32_t handle) {
   if (handle == 1) return stdout;
   if (handle == 2) return stderr;
@@ -487,6 +539,81 @@ FILE *stream(uint32_t handle) {
   auto it = files.find(handle);
   if (it != files.end()) return it->second;
   elfconv_runtime_error("Unsupported guest FILE handle.\n");
+}
+struct GuestCookie {
+  uint8_t *arena;
+  State *state;
+  RuntimeManager *runtime;
+  uint32_t cookie, read, write, seek, close;
+  std::vector<char> pending_write;
+};
+int flush_guest_cookie_write(GuestCookie *cookie) {
+  if (cookie->pending_write.empty()) return 0;
+  if (!cookie->write) { errno = EBADF; return -1; }
+  if (cookie->pending_write.size() > UINT32_MAX) { errno = EOVERFLOW; return -1; }
+  const uint32_t size = uint32_t(cookie->pending_write.size());
+  const uint32_t address = allocate(size);
+  if (!address) return -1;
+  memcpy(guest(cookie->arena, address, size), cookie->pending_write.data(), size);
+  uint32_t args[] = {cookie->cookie, address, size};
+  invoke(cookie->arena, cookie->state, cookie->runtime, cookie->write, args, 3);
+  const int32_t result = int32_t(cookie->state->gpr.rax.dword);
+  release(address);
+  if (result < 0) return -1;
+  const size_t written = std::min(size_t(result), cookie->pending_write.size());
+  cookie->pending_write.erase(cookie->pending_write.begin(),
+                              cookie->pending_write.begin() + written);
+  if (written != size) { errno = EIO; return -1; }
+  return 0;
+}
+ssize_t guest_cookie_read(void *opaque, char *buffer, size_t size) {
+  auto *cookie = static_cast<GuestCookie *>(opaque);
+  if (!cookie->read) { errno = EBADF; return -1; }
+  if (size > UINT32_MAX) { errno = EOVERFLOW; return -1; }
+  const uint32_t address = size ? allocate(uint32_t(size)) : 0;
+  if (size && !address) return -1;
+  uint32_t args[] = {cookie->cookie, address, uint32_t(size)};
+  invoke(cookie->arena, cookie->state, cookie->runtime, cookie->read, args, 3);
+  int32_t result = int32_t(cookie->state->gpr.rax.dword);
+  if (result > 0) {
+    if (size_t(result) > size) result = int32_t(size);
+    memcpy(buffer, guest(cookie->arena, address, uint32_t(result)), size_t(result));
+  }
+  if (address) release(address);
+  return result;
+}
+ssize_t guest_cookie_write(void *opaque, const char *buffer, size_t size) {
+  auto *cookie = static_cast<GuestCookie *>(opaque);
+  if (!cookie->write) { errno = EBADF; return -1; }
+  if (size) cookie->pending_write.insert(cookie->pending_write.end(), buffer, buffer + size);
+  return ssize_t(size);
+}
+int guest_cookie_seek(void *opaque, off64_t *offset, int whence) {
+  auto *cookie = static_cast<GuestCookie *>(opaque);
+  if (!cookie->seek) { errno = ESPIPE; return -1; }
+  const uint32_t address = allocate(sizeof(*offset));
+  if (!address) return -1;
+  memcpy(guest(cookie->arena, address, sizeof(*offset)), offset, sizeof(*offset));
+  uint32_t args[] = {cookie->cookie, address, uint32_t(whence)};
+  invoke(cookie->arena, cookie->state, cookie->runtime, cookie->seek, args, 3);
+  const int32_t result = int32_t(cookie->state->gpr.rax.dword);
+  memcpy(offset, guest(cookie->arena, address, sizeof(*offset)), sizeof(*offset));
+  release(address);
+  const int flush_result = flush_guest_cookie_write(cookie);
+  return result != 0 ? result : flush_result;
+}
+int guest_cookie_close(void *opaque) {
+  auto *cookie = static_cast<GuestCookie *>(opaque);
+  const int32_t function = int32_t(cookie->close);
+  int result = flush_guest_cookie_write(cookie);
+  if (function) {
+    uint32_t args[] = {cookie->cookie};
+    invoke(cookie->arena, cookie->state, cookie->runtime, uint32_t(function), args, 1);
+    const int close_result = int32_t(cookie->state->gpr.rax.dword);
+    if (result == 0) result = close_result;
+  }
+  delete cookie;
+  return result;
 }
 struct GuestMemStream {
   char *host_buffer = nullptr;
@@ -674,7 +801,10 @@ void format_impl(uint8_t *arena, const Char *input, Arguments args, FormatOutput
       if (invalid_position) { out.clear(); out.fail(EOVERFLOW); return; }
       value_arguments = &positional_value;
     }
-    while (ascii(*p, "-+ #0")) spec += *p++;
+    while (ascii(*p, "-+ #0I")) {
+      if (*p != 'I') spec += *p;
+      ++p;
+    }
     if (*p == '*') {
       ++p;
       uint64_t width_position;
@@ -817,6 +947,27 @@ int print(Call &call, FILE *stream, unsigned format_arg) {
               {call.arena, call.stack + 4 * (format_arg + 2)}, out);
   if (out.error) { errno = out.error; return -1; }
   return int(out.count);
+}
+int print_fd(Call &call, unsigned format_arg) {
+  FormatOutput<char> out;
+  format_impl(call.arena, text(call.arena, call.word(format_arg)),
+              {call.arena, call.stack + 4 * (format_arg + 2)}, out);
+  if (out.error) { errno = out.error; return -1; }
+  size_t offset = 0;
+  const int fd = int32_t(call.word(0));
+  while (offset < out.buffer.size()) {
+    ssize_t written;
+    if (!virtual_socket_write(fd, out.buffer.data() + offset,
+                              out.buffer.size() - offset, written))
+      written = write(fd, out.buffer.data() + offset, out.buffer.size() - offset);
+    if (written < 0) {
+      if (errno == EINTR) continue;
+      return -1;
+    }
+    if (!written) { errno = EIO; return -1; }
+    offset += size_t(written);
+  }
+  return int(offset);
 }
 void parse_end(Call &call, const char *input, const char *end) {
   if (!call.word(1)) return;
@@ -1284,6 +1435,7 @@ IMPORT(fprintf) {
   CALL;
   call.result(print(call, stream(call.word(0)), 1));
 }
+IMPORT(dprintf) { CALL; call.result(print_fd(call, 1)); }
 IMPORT(__printf_chk) { CALL; call.result(print(call, stdout, 1)); }
 IMPORT(__fprintf_chk) { CALL; call.result(print(call, stream(call.word(0)), 2)); }
 IMPORT(__stack_chk_fail) { elfconv_runtime_error("Guest stack protector triggered.\n"); }
@@ -1476,6 +1628,27 @@ IMPORT(fopen) {
   files.emplace(handle, file);
   call.result(handle);
 }
+IMPORT(fopencookie) {
+  CALL;
+  uint32_t functions[4] = {call.word(2), call.word(3), call.word(4), call.word(5)};
+  auto *cookie = new GuestCookie{arena, state, runtime, call.word(0),
+                                 functions[0], functions[1], functions[2], functions[3]};
+  cookie_io_functions_t host_functions{};
+  host_functions.read = functions[0] ? guest_cookie_read : nullptr;
+  host_functions.write = functions[1] ? guest_cookie_write : nullptr;
+  host_functions.seek = functions[2] ? guest_cookie_seek : nullptr;
+  host_functions.close = guest_cookie_close;
+  FILE *file = fopencookie(cookie, text(arena, call.word(1)), host_functions);
+  if (!file) { delete cookie; call.result(0); return; }
+  if (setvbuf(file, nullptr, _IONBF, 0) != 0) {
+    fclose(file);
+    call.result(0);
+    return;
+  }
+  const uint32_t handle = next_file++;
+  files.emplace(handle, file);
+  call.result(handle);
+}
 IMPORT(tmpfile) {
   CALL;
   FILE *file = ::tmpfile();
@@ -1517,13 +1690,31 @@ IMPORT(fread) {
   call.result(fread(guest(arena, call.word(0), length), size, count, stream(call.word(3))));
 }
 IMPORT(fseek) { CALL; call.result(fseek(stream(call.word(0)), int32_t(call.word(1)), call.word(2))); }
-IMPORT(ftell) { CALL; call.result(ftell(stream(call.word(0)))); }
+IMPORT(ftell) {
+  CALL;
+  FILE *file = stream(call.word(0));
+  const bool eof = feof(file);
+  if (fseek(file, 0, SEEK_CUR) != 0) { call.result(-1); return; }
+  if (eof) (void) fgetc(file);
+  call.result(ftell(file));
+}
 IMPORT(ftello) { CALL; call.result(ftello(stream(call.word(0)))); }
 IMPORT(fseeko64) {
   CALL;
   call.result(fseeko(stream(call.word(0)), int64_t(call.wide(1)), int32_t(call.word(3))));
 }
 IMPORT(ftello64) { CALL; call.result64(ftello(stream(call.word(0)))); }
+IMPORT(lseek) {
+  CALL;
+  const off_t result = lseek(int32_t(call.word(0)), int32_t(call.word(1)),
+                             int32_t(call.word(2)));
+  if (result > INT32_MAX || result < INT32_MIN) {
+    errno = EOVERFLOW;
+    call.result(-1);
+  } else {
+    call.result(uint32_t(int32_t(result)));
+  }
+}
 IMPORT(lseek64) {
   CALL;
   call.result64(lseek(int32_t(call.word(0)), int64_t(call.wide(1)), int32_t(call.word(3))));
@@ -1647,7 +1838,20 @@ IMPORT(fputs) { CALL; call.result(fputs(text(arena, call.word(0)), stream(call.w
 IMPORT(perror) { CALL; perror(call.word(0) ? text(arena, call.word(0)) : nullptr); }
 IMPORT(fdopen) {
   CALL;
-  FILE *file = fdopen(int32_t(call.word(0)), text(arena, call.word(1)));
+  const int fd = int32_t(call.word(0));
+  const char *mode = text(arena, call.word(1));
+  const int flags = fcntl(fd, F_GETFL);
+  const int access = flags < 0 ? -1 : flags & O_ACCMODE;
+  const bool update = strchr(mode, '+') != nullptr;
+  const bool read_only_mode = mode[0] == 'r' && !update;
+  if ((update && access != O_RDWR) ||
+      (read_only_mode && access == O_WRONLY) ||
+      (!read_only_mode && !update && mode[0] != 'r' && access == O_RDONLY)) {
+    errno = flags < 0 ? errno : EINVAL;
+    call.result(0);
+    return;
+  }
+  FILE *file = fdopen(fd, mode);
   if (!file) { call.result(0); return; }
   const uint32_t handle = next_file++;
   files.emplace(handle, file);
@@ -1807,16 +2011,50 @@ IMPORT(pipe) {
   if (!result) memcpy(guest(arena, address, sizeof(descriptors)), descriptors, sizeof(descriptors));
   call.result(result);
 }
-IMPORT(close) { CALL; call.result(close(int32_t(call.word(0)))); }
+IMPORT(socketpair) {
+  CALL;
+  const uint32_t address = call.word(3);
+  if (!address) { errno = EFAULT; call.result(-1); return; }
+  const int domain = int32_t(call.word(0));
+  const int type = int32_t(call.word(1));
+  const int protocol = int32_t(call.word(2));
+  if ((domain != AF_LOCAL && domain != AF_UNIX) ||
+      (type & 0xf) != SOCK_DGRAM || protocol != 0) {
+    errno = EPROTONOSUPPORT;
+    call.result(-1);
+    return;
+  }
+  auto pair = std::make_shared<VirtualDatagramPair>();
+  int descriptors[2] = {next_virtual_socket++, next_virtual_socket++};
+  virtual_datagram_sockets.emplace(descriptors[0], VirtualDatagramEnd{pair, 0});
+  virtual_datagram_sockets.emplace(descriptors[1], VirtualDatagramEnd{pair, 1});
+  memcpy(guest(arena, address, sizeof(descriptors)), descriptors, sizeof(descriptors));
+  call.result(0);
+}
+IMPORT(close) {
+  CALL;
+  const int fd = int32_t(call.word(0));
+  call.result(virtual_socket_close(fd) ? 0 : close(fd));
+}
 IMPORT(read) {
   CALL;
+  const int fd = int32_t(call.word(0));
   const uint32_t size = call.word(2);
-  call.result(read(int32_t(call.word(0)), size ? guest(arena, call.word(1), size) : nullptr, size));
+  void *buffer = size ? guest(arena, call.word(1), size) : nullptr;
+  ssize_t result;
+  if (!virtual_socket_read(fd, buffer, size, result))
+    result = read(fd, buffer, size);
+  call.result(result);
 }
 IMPORT(write) {
   CALL;
+  const int fd = int32_t(call.word(0));
   const uint32_t size = call.word(2);
-  call.result(write(int32_t(call.word(0)), size ? guest(arena, call.word(1), size) : nullptr, size));
+  const void *buffer = size ? guest(arena, call.word(1), size) : nullptr;
+  ssize_t result;
+  if (!virtual_socket_write(fd, buffer, size, result))
+    result = write(fd, buffer, size);
+  call.result(result);
 }
 IMPORT(access) { CALL; call.result(access(text(arena, call.word(0)), call.word(1))); }
 IMPORT(pathconf) { CALL; call.result(pathconf(text(arena, call.word(0)), int32_t(call.word(1)))); }

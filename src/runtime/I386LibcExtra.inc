@@ -167,6 +167,14 @@ IMPORT(strerrorname_np) {
   const char *name = i386_strerrorname(call.word(0));
   call.result(name ? copy_string(arena, name, 20) : 0);
 }
+IMPORT(strerrordesc_np) {
+  CALL;
+  const int error = int32_t(call.word(0));
+  if (!i386_strerrorname(error)) { call.result(0); return; }
+  const char *description = i386_strerrordesc(error);
+  if (!description) description = strerror(i386_errno_to_host(error));
+  call.result(copy_string(arena, description, 64));
+}
 IMPORT(abort) { abort(); }
 IMPORT(mtrace) {
   CALL;
@@ -258,6 +266,7 @@ IMPORT(__isoc99_scanf) {
 }
 IMPORT(getchar) { CALL; call.result(uint32_t(getchar())); }
 IMPORT(getwc) { CALL; call.result(uint32_t(getwc(stream(call.word(0))))); }
+IMPORT(fgetwc) { CALL; call.result(uint32_t(fgetwc(stream(call.word(0))))); }
 IMPORT(isalpha) { CALL; call.result(isalpha(int32_t(call.word(0))) ? 0x0400 : 0); }
 IMPORT(iscntrl) { CALL; call.result(iscntrl(int32_t(call.word(0))) ? 0x0002 : 0); }
 IMPORT(ispunct) { CALL; call.result(ispunct(int32_t(call.word(0))) ? 0x0004 : 0); }
