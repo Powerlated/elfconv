@@ -121,15 +121,18 @@ async def chunk_pool() -> None:
         with patch("conversion_display.time.monotonic", return_value=12.0):
             progress.update(owner, "lifting", "partitioning IR", counter=(1, 4))
             assert progress.label(owner, progress.rows[owner]).plain.endswith("[1/4]  2.0s")
-            progress.update(owner, "lifting", "writing bitcode", counter=(0, 4))
-            assert progress.label(owner, progress.rows[owner]).plain.endswith("[0/4]  0.0s")
+            progress.update(owner, "lifting", "writing bitcode", bytes_written=0)
+            assert progress.label(owner, progress.rows[owner]).plain.endswith("[0 bytes]  0.0s")
+        with patch("conversion_display.time.monotonic", return_value=14.0):
+            progress.update(owner, "lifting", "writing bitcode", bytes_written=1048576)
+            assert progress.label(owner, progress.rows[owner]).plain.endswith("[1048576 bytes]  2.0s")
             progress.update(f"{owner}::compile", "compiling", "chunk 1/4",
                             parent=owner, counter=(0, 4))
             progress.console.print(progress.render())
         lines = [line for line in rendered.getvalue().splitlines()
                  if "partitioning IR" in line or "writing bitcode" in line or "chunk 1/4" in line]
         assert lines and all("server.so" in line for line in lines)
-        assert all(re.search(r"\[\d+/\d+\]  \d+\.\ds$", line) for line in lines)
+        assert all(re.search(r"\[\d+(?:/\d+| bytes)\]  \d+\.\ds$", line) for line in lines)
     options = parser().parse_args(["--input", __file__, "--target", "i386-wasm",
                                    "--lift-jobs", "3", "--compile-jobs", "4"])
     assert options.lift_jobs == 3

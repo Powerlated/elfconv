@@ -188,6 +188,15 @@ void PrintLiftingPhase(std::string_view phase, std::size_t completed = 0,
   std::cout << std::endl;
 }
 
+void PrintBitcodeBytes(std::uint64_t bytes) {
+  std::cout << "lifting - writing bitcode [" << bytes << " bytes]" << std::endl;
+}
+
+void StoreBitcode(llvm::Module &module, std::string_view path) {
+  remill::StoreModuleToFile(&module, path, false,
+                           FLAGS_lift_progress ? PrintBitcodeBytes : nullptr);
+}
+
 std::uint64_t ModuleIRDefinitionSize(const llvm::Module &module) {
   std::uint64_t size = 0;
   for (const auto &global : module.global_values()) {
@@ -322,8 +331,7 @@ void StoreIRChunks(llvm::Module &module) {
   }
   manifest << FLAGS_max_ir_chunks_per_elf << '\t' << output_count << '\n';
   if (output_count == 1) {
-    PrintLiftingPhase("writing bitcode");
-    remill::StoreModuleToFile(&module, IRChunkPath(output_base, 0).string());
+    StoreBitcode(module, IRChunkPath(output_base, 0).string());
     manifest << 0 << '\t' << ModuleIRDefinitionSize(module) << '\n';
     return;
   }
@@ -332,7 +340,7 @@ void StoreIRChunks(llvm::Module &module) {
   llvm::SplitModule(module, output_count,
       [&](std::unique_ptr<llvm::Module> chunk) {
         const auto chunk_path = IRChunkPath(output_base, written);
-        remill::StoreModuleToFile(chunk.get(), chunk_path.string());
+        StoreBitcode(*chunk, chunk_path.string());
         const auto size = ModuleIRDefinitionSize(*chunk);
         manifest << written << '\t' << size << '\n';
         std::cout << "IR chunk " << written << ": " << size
@@ -701,8 +709,7 @@ int main(int argc, char *argv[]) {
   if (FLAGS_max_ir_chunks_per_elf) {
     StoreIRChunks(*module);
   } else {
-    PrintLiftingPhase("writing bitcode");
-    remill::StoreModuleToFile(module.get(), FLAGS_bc_out);
+    StoreBitcode(*module, FLAGS_bc_out);
   }
 
   PrintLiftingPhase("releasing module");

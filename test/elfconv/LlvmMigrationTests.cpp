@@ -11,8 +11,44 @@
 #include <remill/BC/InstructionLifter.h>
 #include <remill/BC/Util.h>
 #include <remill/BC/IntrinsicTable.h>
+#include <llvm/Support/FileSystem.h>
+#include <llvm/Support/FileUtilities.h>
+#include <filesystem>
+#include <vector>
 
 remill::ArchName remill::EcvReg::target_elf_arch;
+
+TEST(LlvmMigration, BitcodeProgressMatchesReadableOutput) {
+  llvm::LLVMContext context;
+  llvm::Module module("bitcode_progress", context);
+  const std::string payload(2 * 1024 * 1024 + 17, 'x');
+  auto *data = llvm::ConstantDataArray::getString(context, payload, false);
+  new llvm::GlobalVariable(module, data->getType(), true,
+                           llvm::GlobalValue::ExternalLinkage, data, "payload");
+  llvm::SmallString<128> path;
+  ASSERT_FALSE(llvm::sys::fs::createTemporaryFile("elfconv-byte-progress", "bc", path));
+  llvm::FileRemover cleanup(path);
+  static thread_local std::vector<std::uint64_t> reports;
+  reports.clear();
+  ASSERT_TRUE(remill::StoreModuleToFile(&module, path.str(), false,
+      [](std::uint64_t bytes) { reports.push_back(bytes); }));
+  const auto size = std::filesystem::file_size(path.c_str());
+  ASSERT_GE(reports.size(), 3u);  // Zero, at least one partial write, final size.
+  EXPECT_EQ(reports.front(), 0u);
+  EXPECT_EQ(reports.back(), size);
+  for (std::size_t i = 1; i < reports.size(); ++i) {
+    EXPECT_GT(reports[i], reports[i - 1]);
+    EXPECT_LE(reports[i], size);
+  }
+  llvm::LLVMContext loaded_context;
+  auto loaded = remill::LoadModuleFromFile(&loaded_context, path.c_str());
+  ASSERT_NE(loaded, nullptr);
+  auto *global = loaded->getGlobalVariable("payload");
+  ASSERT_NE(global, nullptr);
+  auto *contents = llvm::dyn_cast<llvm::ConstantDataArray>(global->getInitializer());
+  ASSERT_NE(contents, nullptr);
+  EXPECT_EQ(contents->getAsString(), payload);
+}
 
 TEST(LlvmMigration, CrossContextGlobalAddressPreservesOffsetAndGepBounds) {
   llvm::LLVMContext source_context, destination_context;

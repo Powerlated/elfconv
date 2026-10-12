@@ -178,10 +178,15 @@ class Driver:
                             elif match := re.fullmatch(rb"lifting - (.+)", line):
                                 detail = match[1].decode()
                                 counter = None
+                                bytes_written = None
                                 if counts := re.search(r" \[(\d+)/(\d+)\]$", detail):
                                     counter = tuple(int(value) for value in counts.groups())
                                     detail = detail[:counts.start()]
-                                self.display.update(name, phase, detail, counter=counter)
+                                elif count := re.search(r" \[(\d+) bytes\]$", detail):
+                                    bytes_written = int(count[1])
+                                    detail = detail[:count.start()]
+                                self.display.update(name, phase, detail, counter=counter,
+                                                    bytes_written=bytes_written)
                         if len(pending) > 256:
                             pending = b""
                 status = await process.wait()

@@ -23,6 +23,7 @@ class ProgressRow:
     counter: tuple[int, int] | None
     started: float
     elapsed: float
+    bytes_written: int | None
 
 
 class Display:
@@ -43,6 +44,8 @@ class Display:
             "failed": "red", "done": "green", "cached": "dim"}.get(row.state, ""))
         if row.detail:
             label.append(f" — {row.detail}")
+        if row.bytes_written is not None:
+            label.append(f" [{row.bytes_written} bytes]")
         if row.counter is not None:
             completed, total = row.counter
             label.append(f" [{completed}/{total}]")
@@ -51,7 +54,8 @@ class Display:
         return label
 
     def update(self, name: str, state: str, detail: str = "",
-               parent: str | None = None, counter: tuple[int, int] | None = None) -> None:
+               parent: str | None = None, counter: tuple[int, int] | None = None,
+               bytes_written: int | None = None) -> None:
         if re.search(r" chunk \d+/\d+$", name):
             return
         previous = self.rows.get(name)
@@ -61,13 +65,14 @@ class Display:
         started = previous.started if same_stage else now
         elapsed = (now - previous.started if previous and previous.state in ACTIVE_STATES
                    else 0.0)
-        row = ProgressRow(state, detail, counter, started, elapsed)
+        row = ProgressRow(state, detail, counter, started, elapsed, bytes_written)
         self.rows[name] = row
         if parent:
             self.parents[name] = parent
         if not self.console.is_terminal and (
                 previous is None or state != previous.state or state in ("failed", "done", "cached")
-                or (state == "lifting" and (detail, counter) != (previous.detail, previous.counter))):
+                or (state == "lifting" and (detail, counter, bytes_written) !=
+                    (previous.detail, previous.counter, previous.bytes_written))):
             self.console.print(self.label(name, row), soft_wrap=True)
 
     def render(self) -> Tree:

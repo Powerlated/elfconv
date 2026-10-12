@@ -201,6 +201,8 @@ continue; ready owners rotate through the pool. CMake uses `ELFCONV_LIFT_JOBS`
 (default 2) and `ELFCONV_COMPILE_JOBS` (default 2); target arguments:
 `LIFT_JOBS` and `COMPILE_JOBS`.
 Progress rows show ELF, stage detail, counter, then stage time.
+Bitcode writing shows `[N bytes]` flushed to temporary output; LLVM buffering
+can leave it at zero during serialization. Stage time remains last.
 
 Portal: `./lift_portal.sh` reuses the repository-root cache, with one chunk per ELF,
 12 lifting/compiler jobs, and `-O1`. Overrides: `ELFCONV_LIFT_JOBS`,

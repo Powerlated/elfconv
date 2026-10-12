@@ -557,9 +557,49 @@ std::unique_ptr<llvm::Module> LoadModuleFromFile(llvm::LLVMContext *context,
   return module;
 }
 
+namespace {
+
+class BitcodeProgressStream final : public llvm::raw_ostream {
+ public:
+  BitcodeProgressStream(llvm::raw_fd_ostream &output,
+                        void (*progress)(std::uint64_t))
+      : llvm::raw_ostream(true), output_(output), progress_(progress) {}
+
+  void Report() {
+    if (!output_.has_error() && output_.tell() != reported_) {
+      reported_ = output_.tell();
+      progress_(reported_);
+    }
+  }
+
+ private:
+  void write_impl(const char *data, std::size_t size) override {
+    // Bound writes so a single large LLVM buffer still produces live progress.
+    constexpr std::size_t interval = 1024 * 1024;
+    while (size && !output_.has_error()) {
+      const auto count = std::min(size, interval);
+      output_.write(data, count);
+      output_.flush();
+      data += count;
+      size -= count;
+      if (output_.tell() - reported_ >= interval) Report();
+    }
+  }
+
+  std::uint64_t current_pos() const override { return output_.tell(); }
+
+  llvm::raw_fd_ostream &output_;
+  void (*progress_)(std::uint64_t);
+  std::uint64_t reported_ = 0;
+};
+
+}  // namespace
+
 // Store an LLVM module into a file.
-bool StoreModuleToFile(llvm::Module *module, std::string_view file_name, bool allow_failure) {
+bool StoreModuleToFile(llvm::Module *module, std::string_view file_name,
+                       bool allow_failure, void (*progress)(std::uint64_t)) {
   DLOG(INFO) << "Saving bitcode to file " << file_name;
+  if (progress) progress(0);
 
   std::stringstream ss;
   ss << file_name << ".tmp." << nativeGetProcessID();
@@ -578,7 +618,13 @@ bool StoreModuleToFile(llvm::Module *module, std::string_view file_name, bool al
   llvm::ToolOutputFile bc(tmp_name.c_str(), ec, llvm::sys::fs::OF_None);
   CHECK(!ec) << "Unable to open output bitcode file for writing: " << tmp_name;
 
-  llvm::WriteBitcodeToFile(*module, bc.os());
+  if (progress) {
+    BitcodeProgressStream output(bc.os(), progress);
+    llvm::WriteBitcodeToFile(*module, output);
+    output.Report();
+  } else {
+    llvm::WriteBitcodeToFile(*module, bc.os());
+  }
   bc.keep();
   if (!bc.os().has_error()) {
     std::string file_name_(file_name.data(), file_name.size());

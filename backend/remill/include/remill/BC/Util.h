@@ -33,6 +33,7 @@
 // clang-format on
 
 #include <array>
+#include <cstdint>
 #include <filesystem>
 #include <functional>
 #include <memory>
@@ -182,9 +183,11 @@ std::unique_ptr<llvm::Module> LoadArchSemantics(const Arch *arch);
 std::unique_ptr<llvm::Module> LoadArchSemantics(const Arch *arch,
                                                 const std::vector<std::filesystem::path> &sem_dirs);
 
-// Store an LLVM module into a file.
+// Store an LLVM module into a file. Optional progress reports bytes flushed
+// to the temporary output, starting at zero; it does not imply durable storage.
 bool StoreModuleToFile(llvm::Module *module, std::string_view file_name,
-                       bool allow_failure = false);
+                       bool allow_failure = false,
+                       void (*progress)(std::uint64_t) = nullptr);
 
 // Store a module, serialized to LLVM IR, into a file.
 bool StoreModuleIRToFile(llvm::Module *module, std::string_view file_name,
