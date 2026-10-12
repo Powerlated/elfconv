@@ -41,6 +41,11 @@
 
 ## Testing and verification
 
+- Conversion terminology is enforced. The overall process is **conversion**, with
+  **lifting** (x86 to LLVM bitcode), **compiling** (LLVM bitcode to Wasm object
+  files), and **linking** (Wasm object files to one final binary). Use these names
+  consistently for stage identifiers, progress/log output, documentation, and tests;
+  do not use aliases.
 - The generic word "test" refers to an i386 program lifted to Wasm and checked for correct behavior in Wasm; use the native-versus-Wasm `run_i386.py` path.
 - Use this repository's CMake/CTest and existing native-versus-Wasm fixtures; do not introduce another test framework without need.
 - Prefer vendored tests for regression coverage; do not add project-owned regression tests when a vendored test exercises the behavior.
