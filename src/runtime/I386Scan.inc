@@ -310,7 +310,7 @@ struct GuestScanInput {
 template<typename Char>
 int scan_guest_input(uint8_t *arena, GuestScanInput<Char> &input,
                      const Char *fmt, Arguments arguments) {
-  int assigned = 0, conversions = 0;
+  int assigned = 0;
   auto whitespace = [](Char c) {
     if constexpr (std::is_same_v<Char, char>) return !!isspace(static_cast<unsigned char>(c));
     else return !!iswspace(c);
@@ -326,7 +326,7 @@ int scan_guest_input(uint8_t *arena, GuestScanInput<Char> &input,
         if (literal[0] == '%') literal += *p++;
       }
       result = input.scan(literal, static_cast<int *>(nullptr), true, used);
-      if (used < 0) return result == EOF && !conversions ? EOF : assigned;
+      if (used < 0) return !assigned && (result == EOF || input.exhausted(false)) ? EOF : assigned;
       continue;
     }
     ++p;
@@ -454,10 +454,9 @@ int scan_guest_input(uint8_t *arena, GuestScanInput<Char> &input,
     if (used < 0) {
       const bool skips_whitespace = strchr("diuoxXbAaEeFfGgpsS", conversion) != nullptr;
       // The host scanf may report 0 rather than EOF when a conversion reaches input exhaustion.
-      if (!conversions && (result == EOF || input.exhausted(skips_whitespace))) return EOF;
+      if (!assigned && (result == EOF || input.exhausted(skips_whitespace))) return EOF;
       return assigned;
     }
-    ++conversions;
     if (!suppressed) ++assigned;
   }
   return assigned;
