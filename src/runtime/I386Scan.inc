@@ -18,6 +18,24 @@ struct GuestScanInput {
     }
     return !*next;
   }
+  size_t remaining() const {
+    if (!file) {
+      if constexpr (std::is_same_v<Char, char>) return text ? strlen(text + position) : 0;
+      else return text ? wcslen(text + position) : 0;
+    }
+    const long start = ftell(file);
+    if (start < 0 || fseek(file, 0, SEEK_END) != 0) {
+      clearerr(file);
+      return 4096;
+    }
+    const long end = ftell(file);
+    if (fseek(file, start, SEEK_SET) != 0 || end < start) {
+      clearerr(file);
+      return 4096;
+    }
+    return size_t(end - start);
+  }
+
 
 
   template<typename T>
@@ -410,39 +428,132 @@ int scan_guest_input(uint8_t *arena, GuestScanInput<Char> &input,
           const float number = float(value); memcpy(guest(arena, address, 4), &number, 4);
         }
       }
-    } else if (allocate_output) {
-      result = 0;
-      used = -1;
-    } else if (conversion == 's' || conversion == 'c' || conversion == '[') {
-      const bool wide_output = length == 'l';
-      const uint32_t terminator = conversion != 'c';
+    } else if (conversion == 's' || conversion == 'c' || conversion == '[' ||
+               (allocate_output && (conversion == 'S' || conversion == 'C'))) {
+      const bool wide_output = length == 'l' || conversion == 'S' || conversion == 'C';
+      const char scan_conversion = conversion == 'S' ? 's' : conversion == 'C' ? 'c' : conversion;
+      const uint32_t terminator = scan_conversion != 'c';
       if (!suppressed) {
-        guest(arena, address, 1);
-        uint32_t available = uint32_t(MEMORY_ARENA_SIZE - address) / (wide_output ? 4 : 1);
-        if constexpr (std::is_same_v<Char, wchar_t>)
-          if (!wide_output) available /= std::max(size_t(1), size_t(MB_CUR_MAX));
-        if (available <= terminator) elfconv_runtime_error("Guest scanf output overflow.\n");
-        available -= terminator;
-        width = width ? std::min(width, available) : conversion == 'c' ? 1 : available;
+        if (allocate_output) {
+          const size_t available = input.remaining();
+          if (available > UINT32_MAX) elfconv_runtime_error("Guest scanf input is too large.\n");
+          if (!width) width = scan_conversion == 'c' ? 1 : uint32_t(available);
+        } else {
+          guest(arena, address, 1);
+          uint32_t available = uint32_t(MEMORY_ARENA_SIZE - address) / (wide_output ? 4 : 1);
+          if constexpr (std::is_same_v<Char, wchar_t>)
+            if (!wide_output) available /= std::max(size_t(1), size_t(MB_CUR_MAX));
+          if (available <= terminator) elfconv_runtime_error("Guest scanf output overflow.\n");
+          available -= terminator;
+          width = width ? std::min(width, available) : scan_conversion == 'c' ? 1 : available;
+        }
       }
       append_width(width);
       if (wide_output) spec += 'l';
-      spec += conversion;
-      if (conversion == '[') {
+      spec += scan_conversion;
+      if (scan_conversion == '[') {
         if (*p == '^') spec += *p++;
         if (*p == ']') spec += *p++;
         while (*p && *p != ']') spec += *p++;
         if (*p != ']') elfconv_runtime_error("Invalid guest scanf scanset.\n");
         spec += *p++;
       }
-      if (wide_output) {
+      if (allocate_output && !suppressed) {
+        if (wide_output) {
+          const size_t capacity = std::max<size_t>(1, size_t(width) + terminator);
+          std::vector<wchar_t> temporary(capacity);
+          if constexpr (std::is_same_v<Char, char>) {
+            if (!input.file) {
+              const size_t start = input.position;
+              size_t offset = 0, count = 0;
+              std::mbstate_t state{};
+              const size_t remaining = input.remaining();
+              auto next_character = [&](wchar_t &character, size_t &bytes) {
+                if (offset >= remaining) return false;
+                bytes = mbrtowc(&character, input.text + start + offset, remaining - offset, &state);
+                return bytes != size_t(-1) && bytes != size_t(-2) && bytes != 0;
+              };
+              if (scan_conversion == 's') {
+                wchar_t character;
+                size_t bytes;
+                while (next_character(character, bytes) && iswspace(character)) offset += bytes;
+              }
+              const char *set = scan_conversion == '[' ? strchr(spec.c_str(), '[') + 1 : nullptr;
+              auto in_set = [&](wchar_t character) {
+                if (!set) return false;
+                const char *cursor = set;
+                const bool invert = *cursor == '^';
+                if (invert) ++cursor;
+                bool found = false;
+                while (*cursor && *cursor != ']') {
+                  wchar_t first = static_cast<unsigned char>(*cursor++);
+                  if (*cursor == '-' && cursor[1] && cursor[1] != ']') {
+                    ++cursor;
+                    const wchar_t last = static_cast<unsigned char>(*cursor++);
+                    found |= character >= first && character <= last;
+                  } else {
+                    found |= character == first;
+                  }
+                }
+                return invert ? !found : found;
+              };
+              while (count < width) {
+                wchar_t character;
+                size_t bytes;
+                if (!next_character(character, bytes) ||
+                    (scan_conversion == 's' && iswspace(character)) ||
+                    (scan_conversion == '[' && !in_set(character)))
+                  break;
+                temporary[count++] = character;
+                offset += bytes;
+              }
+              const bool complete = scan_conversion != 'c' || count == width;
+              if (count && complete) {
+                used = int(offset);
+                input.position += offset;
+                if (scan_conversion != 'c') temporary[count] = L'\0';
+                result = 1;
+              } else {
+                used = -1;
+                result = EOF;
+              }
+            } else {
+              result = input.scan(spec, temporary.data(), false, used);
+            }
+          } else {
+            result = input.scan(spec, temporary.data(), false, used);
+          }
+          if (used >= 0) {
+            const size_t count = scan_conversion == 'c' ? (width ? width : 1) : wcslen(temporary.data()) + 1;
+            if (count > UINT32_MAX / sizeof(wchar_t)) elfconv_runtime_error("Guest scanf allocation overflow.\n");
+            const uint32_t output = allocate(uint32_t(count * sizeof(wchar_t)));
+            if (!output) { errno = ENOMEM; return assigned; }
+            memcpy(guest(arena, output, count * sizeof(wchar_t)), temporary.data(), count * sizeof(wchar_t));
+            memcpy(guest(arena, address, 4), &output, 4);
+          }
+        } else {
+          const uint64_t multiplier = std::is_same_v<Char, wchar_t> ? std::max(size_t(1), size_t(MB_CUR_MAX)) : 1;
+          const uint64_t capacity = std::max<uint64_t>(1, (uint64_t(width) + terminator) * multiplier);
+          if (capacity > SIZE_MAX) elfconv_runtime_error("Guest scanf allocation overflow.\n");
+          std::vector<char> temporary(static_cast<size_t>(capacity), '\0');
+          result = input.scan(spec, temporary.data(), false, used);
+          if (used >= 0) {
+            const size_t count = scan_conversion == 'c' ? (width ? width : 1) : strlen(temporary.data()) + 1;
+            if (count > UINT32_MAX) elfconv_runtime_error("Guest scanf allocation overflow.\n");
+            const uint32_t output = allocate(uint32_t(count));
+            if (!output) { errno = ENOMEM; return assigned; }
+            memcpy(guest(arena, output, count), temporary.data(), count);
+            memcpy(guest(arena, address, 4), &output, 4);
+          }
+        }
+      } else if (wide_output) {
         auto *output = suppressed ? nullptr : wide_buffer(arena, address, uint64_t(width) + terminator);
         result = input.scan(spec, output, suppressed, used);
       } else {
         const uint64_t bytes = (uint64_t(width) + terminator) * (std::is_same_v<Char, wchar_t> ? std::max(size_t(1), size_t(MB_CUR_MAX)) : 1);
         auto *output = suppressed ? nullptr : static_cast<char *>(guest(arena, address, bytes));
         if constexpr (std::is_same_v<Char, char>) {
-          if (conversion == 'c')
+          if (scan_conversion == 'c')
             result = input.scan_characters(width, output, suppressed, used);
           else
             result = input.scan(spec, output, suppressed, used);
@@ -450,6 +561,9 @@ int scan_guest_input(uint8_t *arena, GuestScanInput<Char> &input,
           result = input.scan(spec, output, suppressed, used);
         }
       }
+    } else if (allocate_output) {
+      result = 0;
+      used = -1;
     } else { result = 0; used = -1; }
     if (used < 0) {
       const bool skips_whitespace = strchr("diuoxXbAaEeFfGgpsS", conversion) != nullptr;
