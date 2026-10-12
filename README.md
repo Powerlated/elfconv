@@ -201,6 +201,7 @@ continue; ready owners rotate through the pool. CMake uses `ELFCONV_LIFT_JOBS`
 (default 2) and `ELFCONV_COMPILE_JOBS` (default 2); target arguments:
 `LIFT_JOBS` and `COMPILE_JOBS`.
 Progress rows show ELF, stage detail, counter, then stage time.
+Compiling counters count completed chunks, not chunk identities.
 Chunk output separates module verification, bitcode serialization, and bitcode writing.
 Writing shows `[N bytes]` flushed to temporary output.
 

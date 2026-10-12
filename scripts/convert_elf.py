@@ -414,7 +414,7 @@ class Driver:
                 async with compile_slots:
                     self.display.update(
                         progress_name, "compiling",
-                        f"chunk {index + 1}/{total}",
+                        "",
                         parent=owner, counter=(completed[owner], total))
                     compile_key, compiled = await self.stage(
                         chunk_name, "compiling",
@@ -480,12 +480,11 @@ class Driver:
                     completed[owner] += 1
                     changed_owners[owner] |= compiled
                     total = len(lifted_chunks[owner])
-                    chunk_status = "done" if compiled else "cached"
                     status = "compiling" if completed[owner] < total else (
                         "done" if changed_owners[owner] else "cached")
                     self.display.update(
                         f"{owner}::compile", status,
-                        f"chunk {index + 1}/{total}: {chunk_status} - compiling",
+                        "compiling" if completed[owner] == total else "",
                         parent=owner, counter=(completed[owner], total))
 
             async with asyncio.TaskGroup() as group:
