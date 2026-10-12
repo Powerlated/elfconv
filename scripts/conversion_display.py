@@ -9,11 +9,31 @@ import time
 
 from rich.console import Console
 from rich.live import Live
+from rich.segment import Segment
 from rich.spinner import Spinner
 from rich.text import Text
 from rich.tree import Tree
 
+
 ACTIVE_STATES = ("lifting", "compiling", "linking", "running")
+
+
+class _TerminalBounded:
+    def __init__(self, renderable):
+        self.renderable = renderable
+
+    def __rich_console__(self, console, options):
+        lines = console.render_lines(
+            self.renderable, options.update(height=None), pad=False)
+        height = options.height or console.size.height
+        if height is None or len(lines) <= height:
+            yield from console.render(self.renderable, options)
+            return
+        for line in lines[:max(0, height - 1)]:
+            yield from line
+            yield Segment.line()
+        footer = Text("...too long for terminal size", style="italic", overflow="crop")
+        yield from console.render(footer, options.update(height=1))
 
 
 @dataclass
@@ -75,13 +95,17 @@ class Display:
                     (previous.detail, previous.counter, previous.bytes_written))):
             self.console.print(self.label(name, row), soft_wrap=True)
 
-    def render(self) -> Tree:
+    def render(self):
         done = sum(row.state in ("done", "cached") for row in self.rows.values())
         tree = Tree(Text(f"{self.name} [{done}/{len(self.rows)}]  "
                          f"{time.monotonic() - self.started:.1f}s"))
         parent_names = set(self.parents.values())
+        ordered = sorted(
+            self.rows.items(),
+            key=lambda item: (2 if item[1].state in ("done", "cached") else
+                              0 if item[1].state in ACTIVE_STATES else 1))
         nodes = {}
-        for name, row in self.rows.items():
+        for name, row in ordered:
             label = self.label(name, row)
             if row.state in ACTIVE_STATES:
                 if name not in self.spinners:
@@ -97,7 +121,7 @@ class Display:
                 nodes[parent].add(node)
             else:
                 tree.add(node)
-        return tree
+        return _TerminalBounded(tree)
 
     async def refresh(self) -> None:
         while True:
