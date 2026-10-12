@@ -330,6 +330,7 @@ void StoreIRChunks(llvm::Module &module) {
   if (output_count == 1) {
     StoreBitcode(module, IRChunkPath(output_base, 0).string());
     manifest << 0 << '\n';
+    if (FLAGS_lift_progress) std::cout << "ir-chunk-ready 0 1" << std::endl;
     return;
   }
   unsigned written = 0;
@@ -339,6 +340,9 @@ void StoreIRChunks(llvm::Module &module) {
         const auto chunk_path = IRChunkPath(output_base, written);
         StoreBitcode(*chunk, chunk_path.string());
         manifest << written << '\n';
+        if (FLAGS_lift_progress) {
+          std::cout << "ir-chunk-ready " << written << ' ' << output_count << std::endl;
+        }
         PrintLiftingPhase("partitioning IR", ++written, output_count);
       }, false, true);
 }

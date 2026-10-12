@@ -195,8 +195,8 @@ For `i386-wasm`, runtime sources compile as independent cached objects.
 disables chunk output (default). Larger limits are capped by function count.
 LLVM keeps dependent definitions together; chunk sizes can differ.
 Chunked conversion cannot use linker-map incremental units. `--jobs N` bounds
-lifting and compiling jobs combined (default 2). Completed ELF chunks enter
-the shared pool while other lifts continue; ready owners rotate through the pool.
+lifting and compiling jobs combined (default 2). Each written IR chunk enters
+the shared pool before its ELF finishes partitioning; ready owners rotate through the pool.
 CMake uses `ELFCONV_JOBS` (default 2); target argument: `JOBS`.
 Progress rows show ELF, stage detail, counter, then stage time.
 Compiling counters count completed chunks, not chunk identities.

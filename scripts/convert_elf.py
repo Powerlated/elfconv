@@ -141,7 +141,8 @@ class Driver:
         self.compiler_identity: dict[str, str] = {}
         self.script_hash = digest(Path(__file__))
 
-    async def run(self, name: str, phase: str, command: list[object]) -> Path:
+    async def run(self, name: str, phase: str, command: list[object], *,
+                  chunk_ready: Callable[[int, int], None] | None = None) -> Path:
         self.display.update(name, phase)
         command = [str(item) for item in command]
         label = re.sub(r"[^A-Za-z0-9_.-]", "_", Path(name).name)
@@ -169,7 +170,10 @@ class Driver:
                         lines = (pending + data).split(b"\n")
                         pending = lines.pop()
                         for line in lines:
-                            if match := re.fullmatch(rb"\[(\d+)/(\d+)\] lifting funcs", line):
+                            if match := re.fullmatch(rb"ir-chunk-ready (\d+) (\d+)", line):
+                                if chunk_ready is not None:
+                                    chunk_ready(*(int(value) for value in match.groups()))
+                            elif match := re.fullmatch(rb"\[(\d+)/(\d+)\] lifting funcs", line):
                                 completed, total = (int(value) for value in match.groups())
                                 self.display.update(name, phase, "lifting funcs",
                                                     counter=(completed, total))
@@ -222,13 +226,18 @@ class Driver:
                     await process.wait()
 
     async def stage(self, name: str, phase: str, command: list[object], outputs: list[Path],
-                    dependencies: object, stamp: Path, *, force: bool = False) -> tuple[str, bool]:
+                    dependencies: object, stamp: Path, *, force: bool = False,
+                    chunk_ready: Callable[[int, int, str], None] | None = None) -> tuple[str, bool]:
         stage_key = key(self.script_hash, command, dependencies)
         if not force and all(path.is_file() for path in outputs) and stamp.is_file() and stamp.read_text() == stage_key:
             self.display.update(name, "cached", phase)
             return stage_key, False
         stamp.unlink(missing_ok=True)
-        await self.run(name, phase, command)
+        if chunk_ready is None:
+            await self.run(name, phase, command)
+        else:
+            await self.run(name, phase, command,
+                           chunk_ready=lambda index, total: chunk_ready(index, total, stage_key))
         for output in outputs:
             if not output.is_file():
                 self.display.update(name, "failed", f"missing output {output}")
@@ -349,10 +358,9 @@ class Driver:
             self.display.update("Shared metadata", "done" if metadata_compiled else "cached", "compiling")
             return metadata_compile_key
 
-        lifted_chunks: dict[str, list[dict[str, object]]] = {}
-
         async def lift_owner(entry: tuple[str, Path, str, int, int],
-                             count: int) -> list[dict[str, object]]:
+                             count: int, enqueue: Callable[[dict[str, object]], None]
+                             ) -> list[dict[str, object]]:
             owner, fingerprint_path, unit_id, _, _ = entry
             base = self.cache / f"unit-{unit_id}.bc"
             lift_stamp = self.cache / f"unit-{unit_id}.lift.key"
@@ -365,12 +373,20 @@ class Driver:
                     except (OSError, ValueError):
                         lift_stamp.unlink(missing_ok=True)
                 paths = self.ir_chunk_paths(base, count)
+                def chunk_ready(index: int, total: int, lift_key: str) -> None:
+                    if total != count or not 0 <= index < total or not paths[index].is_file():
+                        raise ValueError(f"{owner}: invalid ready chunk {index}/{total}")
+                    enqueue({"owner": owner, "unit_id": unit_id, "index": index,
+                             "bitcode": paths[index],
+                             "object": self.cache / f"unit-{unit_id}-chunk-{index}.wasm.o",
+                             "lift_key": lift_key, "lift_changed": True, "count": total})
                 lift_key, changed = await self.stage(
                     owner, "lifting",
                     [a.lifter, *flags, "--unit_owner", owner, "--unit_id", unit_id,
                      "--max_ir_chunks_per_elf", count, "--ir_chunk_manifest_out", chunk_manifest,
                      "--bc_out", base],
-                    [chunk_manifest, *paths], dependencies, lift_stamp)
+                    [chunk_manifest, *paths], dependencies, lift_stamp,
+                    chunk_ready=chunk_ready)
                 requested, bitcodes = self.read_ir_chunk_manifest(chunk_manifest, base)
                 if requested != count or len(bitcodes) != count or any(not path.is_file() for path in bitcodes):
                     raise ValueError(f"{owner}: invalid chunk manifest for {count} chunks")
@@ -431,14 +447,26 @@ class Driver:
                 lift_entries: list[tuple[str, Path, str, int, int]]) -> None:
             if not lift_entries:
                 return
-            condition = asyncio.Condition()
+            available = asyncio.Event()
             pending: dict[str, deque[dict[str, object]]] = {}
             ready: deque[str] = deque()
             lifts_done = False
+            enqueued: set[tuple[str, int]] = set()
+
+            def enqueue(chunk: dict[str, object]) -> None:
+                owner, index = str(chunk["owner"]), int(chunk["index"])
+                if (owner, index) in enqueued:
+                    return
+                enqueued.add((owner, index))
+                if owner not in pending:
+                    pending[owner] = deque()
+                    ready.append(owner)
+                pending[owner].append(chunk)
+                available.set()
 
             async def lift_entry(entry: tuple[str, Path, str, int, int]
                                  ) -> tuple[str, list[dict[str, object]]]:
-                return entry[0], await lift_owner(entry, chunk_counts[entry[0]])
+                return entry[0], await lift_owner(entry, chunk_counts[entry[0]], enqueue)
 
             async def lift_all() -> None:
                 nonlocal lifts_done
@@ -446,37 +474,33 @@ class Driver:
                 try:
                     async for owner, chunks in bounded_as_completed(
                             ordered_entries, job_slots, lift_entry):
-                        lifted_chunks[owner] = chunks
                         lift_status = "done" if any(
                             bool(chunk["lift_changed"]) for chunk in chunks) else "cached"
                         self.display.update(owner, lift_status, "lifting")
-                        async with condition:
-                            pending[owner] = deque(chunks)
-                            if chunks:
-                                ready.append(owner)
-                            condition.notify_all()
+                        for chunk in chunks:
+                            enqueue(chunk)
                 finally:
-                    async with condition:
-                        lifts_done = True
-                        condition.notify_all()
+                    lifts_done = True
+                    available.set()
 
             async def compile_ready() -> None:
                 while True:
-                    async with condition:
-                        await condition.wait_for(lambda: ready or lifts_done)
-                        if not ready:
-                            return
-                        owner = ready.popleft()
-                        chunk = pending[owner].popleft()
-                        if pending[owner]:
-                            ready.append(owner)
-                        else:
-                            del pending[owner]
+                    while not ready and not lifts_done:
+                        available.clear()
+                        await available.wait()
+                    if not ready:
+                        return
+                    owner = ready.popleft()
+                    chunk = pending[owner].popleft()
+                    if pending[owner]:
+                        ready.append(owner)
+                    else:
+                        del pending[owner]
                     owner, index, obj, compile_key, compiled = await compile_chunk(chunk)
                     compiled_chunks[owner][index] = (obj, compile_key)
                     completed[owner] += 1
                     changed_owners[owner] |= compiled
-                    total = len(lifted_chunks[owner])
+                    total = int(chunk["count"])
                     status = "compiling" if completed[owner] < total else (
                         "done" if changed_owners[owner] else "cached")
                     self.display.update(
@@ -583,11 +607,40 @@ class Driver:
         return header[0], self.ir_chunk_paths(base, header[1])
 
     async def chunked(self) -> None:
+        async with asyncio.TaskGroup() as group:
+            await self.compile_streamed_chunks(group)
+
+    async def compile_streamed_chunks(self, group: asyncio.TaskGroup) -> None:
         a, name = self.a, self.a.elf_name
         emcc = await self.compiler()
         base = self.output / f"{name}.bc"
         manifest = self.cache / f"{name}.ir-chunks.tsv"
         lift_stamp = self.cache / f"{name}.ir-chunks.lift.key"
+        compiler_identity = self.compiler_identity[emcc]
+        compile_flags = [f"-O{a.wasm_opt_level}", *self.thread_compile, *self.exception_flags]
+        semaphore = asyncio.Semaphore(a.jobs)
+        chunk_tasks: dict[int, asyncio.Task[tuple[Path, str]]] = {}
+
+        async def compile_chunk(index: int, bitcode: Path, obj: Path,
+                                lift_key: str) -> tuple[Path, str]:
+            async with semaphore:
+                compile_key, compiled = await self.stage(f"IR chunk {index}", "compiling",
+                    [emcc, *compile_flags, "-c", bitcode, "-o", obj], [obj],
+                    [lift_key, digest(bitcode), compiler_identity],
+                    self.cache / f"{name}-ir-chunk-{index}.compile.key")
+            self.display.update(f"IR chunk {index}", "done" if compiled else "cached")
+            return obj, compile_key
+
+        def chunk_ready(index: int, total: int, lift_key: str) -> None:
+            if not 0 <= index < total <= a.max_ir_chunks_per_elf:
+                raise ValueError(f"{name}: invalid ready chunk {index}/{total}")
+            bitcode = base.with_name(f"{base.stem}.chunk-{index}{base.suffix}")
+            if not bitcode.is_file():
+                raise ValueError(f"{name}: missing ready chunk {bitcode}")
+            if not a.no_compiled and index not in chunk_tasks:
+                obj = self.cache / f"{name}-ir-chunk-{index}.wasm.o"
+                chunk_tasks[index] = group.create_task(compile_chunk(index, bitcode, obj, lift_key))
+
         if a.no_lifted:
             if not manifest.is_file():
                 raise ValueError(f"No IR chunk manifest for {name}; remove --no-lifted")
@@ -610,38 +663,25 @@ class Driver:
                 paths = sorted(a.bitcode_path.rglob("*.bc")) if a.bitcode_path.is_dir() else [a.bitcode_path]
                 semantics = [(str(path), digest(path)) for path in paths]
             lift_identity = key(digest(Path(a.lifter)), semantics)
-            lift_key, lift_changed = await self.stage(name, "lifting",
-                [a.lifter, *self.lift_flags(), "--max_ir_chunks_per_elf", a.max_ir_chunks_per_elf,
-                 "--ir_chunk_manifest_out", manifest, "--bc_out", base],
-                [manifest, *previous_chunks],
-                [digest(a.input), [(str(path), digest(path)) for path in a.shared_library],
-                 lift_identity], lift_stamp)
+            async with semaphore:
+                lift_key, lift_changed = await self.stage(name, "lifting",
+                    [a.lifter, *self.lift_flags(), "--max_ir_chunks_per_elf", a.max_ir_chunks_per_elf,
+                     "--ir_chunk_manifest_out", manifest, "--bc_out", base],
+                    [manifest, *previous_chunks],
+                    [digest(a.input), [(str(path), digest(path)) for path in a.shared_library],
+                     lift_identity], lift_stamp, chunk_ready=chunk_ready)
             self.display.update(name, "done" if lift_changed else "cached", "lifting")
             requested, chunks = self.read_ir_chunk_manifest(manifest, base)
             if requested != a.max_ir_chunks_per_elf or any(not path.is_file() for path in chunks):
                 raise ValueError(f"Lifter produced invalid IR chunks for --max-ir-chunks-per-elf {a.max_ir_chunks_per_elf}")
         self.clean_ir_chunks(base, len(chunks))
 
-        compiler_identity = self.compiler_identity[emcc]
-        compile_flags = [f"-O{a.wasm_opt_level}", *self.thread_compile, *self.exception_flags]
         chunk_objects = [self.cache / f"{name}-ir-chunk-{index}.wasm.o"
                          for index in range(len(chunks))]
-        semaphore = asyncio.Semaphore(a.jobs)
-        chunk_tasks = []
-
-        async def compile_chunk(index: int, bitcode: Path, obj: Path) -> tuple[Path, str]:
-            async with semaphore:
-                compile_key, compiled = await self.stage(f"IR chunk {index}", "compiling",
-                    [emcc, *compile_flags, "-c", bitcode, "-o", obj], [obj],
-                    [lift_key, digest(bitcode), compiler_identity],
-                    self.cache / f"{name}-ir-chunk-{index}.compile.key")
-            self.display.update(f"IR chunk {index}", "done" if compiled else "cached")
-            return obj, compile_key
 
         if not a.no_compiled:
-            chunk_tasks = [
-                asyncio.create_task(compile_chunk(index, bitcode, obj))
-                for index, (bitcode, obj) in enumerate(zip(chunks, chunk_objects))]
+            for index in range(len(chunks)):
+                chunk_ready(index, len(chunks), lift_key)
         elif any(not obj.is_file() for obj in chunk_objects):
             raise ValueError(f"Missing compiled IR chunks for {name}; remove --no-compiled")
 
@@ -668,15 +708,9 @@ class Driver:
                 self.display.update(f"Runtime/{source.name}", "done" if compiled else "cached")
                 return obj, compile_key
 
-            runtime_tasks = [asyncio.create_task(compile_runtime(source)) for source in sources]
-        tasks = [*chunk_tasks, *runtime_tasks]
-        try:
-            results = await asyncio.gather(*tasks)
-        finally:
-            for task in tasks:
-                if not task.done():
-                    task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
+            runtime_tasks = [group.create_task(compile_runtime(source)) for source in sources]
+        tasks = [*[chunk_tasks[index] for index in sorted(chunk_tasks)], *runtime_tasks]
+        results = await asyncio.gather(*tasks)
         chunk_results = results[:len(chunk_tasks)]
         runtime_results = results[len(chunk_tasks):]
         if a.no_compiled:
