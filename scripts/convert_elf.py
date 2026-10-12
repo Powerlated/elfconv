@@ -77,6 +77,8 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--link-map", type=Path)
     result.add_argument("--object-base", type=Path)
     result.add_argument("--wasm-opt-level", choices=list("0123sz"), default="3")
+    result.add_argument("--no-asyncify", action="store_true",
+                        help="Do not instrument browser Wasm with Asyncify.")
     result.add_argument("--legacy-gl", choices=("0", "1"), default="1")
     result.add_argument("--conversion-jobs", type=int, default=8)
     result.add_argument("--ir-chunks", type=int, default=0, metavar="N",
@@ -263,8 +265,10 @@ class Driver:
                  "-std=c++17", *self.definitions, "-DELF_IS_I386", "-DADDRESS_SIZE_BITS=32",
                  "-sUSE_SDL=2", f"-sLEGACY_GL_EMULATION={self.a.legacy_gl}",
                  "-sMIN_WEBGL_VERSION=2", "-sMAX_WEBGL_VERSION=2", f"-DECV_LEGACY_GL={self.a.legacy_gl}",
-                 "-sJSPI=1" if self.a.jspi or self.a.pthreads else "-sASYNCIFY=1",
-                 "-sALLOW_MEMORY_GROWTH=1", "-sINITIAL_MEMORY=335544320", "-sSTACK_SIZE=1048576", "-sEXIT_RUNTIME=1"]
+                 "-sJSPI=1" if self.a.jspi or self.a.pthreads else
+                 "-sASYNCIFY=0" if self.a.no_asyncify else "-sASYNCIFY=1",
+                 "-sALLOW_MEMORY_GROWTH=1", "-sINITIAL_MEMORY=335544320",
+                 "-sSTACK_SIZE=1048576", "-sEXIT_RUNTIME=1"]
         if incremental:
             flags += ["-DELFCONV_INCREMENTAL_UNITS=1"]
         return flags

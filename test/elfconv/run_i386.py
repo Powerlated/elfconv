@@ -46,6 +46,8 @@ def main():
                         help='Set the Emscripten optimization level for the lifted test')
     parser.add_argument('--pthreads', action='store_true',
                         help='Link with pthread support and enable Emscripten pthreads')
+    parser.add_argument('--no-asyncify', action='store_true',
+                        help='Disable Asyncify for the converted test binary')
     parser.add_argument('--browser', action='store_true',
                         help='Run lifted output in Chromium using the browser test harness')
     parser.add_argument('--compare-stderr', action='store_true',
@@ -187,6 +189,7 @@ def main():
         *(['--wasm-opt-level', args.wasm_opt_level] if args.wasm_opt_level else []),
         *[argument for library in libraries for argument in ('--shared-library', str(library))],
         *(['--pthreads'] if args.pthreads else []),
+        *(['--no-asyncify'] if args.no_asyncify else []),
         '--legacy-gl', '0'], 600)
     if converted is None or converted.returncode:
         print(f'Conversion failed; logs: {output}/convert.stdout and convert.stderr')

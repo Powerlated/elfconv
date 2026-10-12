@@ -82,6 +82,7 @@ set(glibc_stdio_common_args
   --objcopy "${ELFCONV_I386_OBJCOPY}"
   --node "${ELFCONV_I386_NODE}"
   --wasm-opt-level 2
+  --no-asyncify
   "--compile-flag=-O0"
   "--compile-flag=-I${glibc_stdio_compat}"
   "--compile-flag=-DOBJPFX=\"\""
