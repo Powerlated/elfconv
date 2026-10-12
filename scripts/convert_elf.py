@@ -137,7 +137,7 @@ def parser() -> argparse.ArgumentParser:
 
 
 class Display:
-    """One live tree; non-terminal output records transitions without escape codes."""
+    """One live tree with trailing counters; plain output records transitions."""
     def __init__(self, name: str, console: Console):
         self.name, self.console = name, console
         self.rows: dict[str, tuple[str, str, float]] = {}
@@ -160,7 +160,7 @@ class Display:
         if not self.console.is_terminal and (
                 previous is None or state != previous[0] or state in ("failed", "done", "cached")
                 or (state == "lifting" and detail != previous[1])):
-            text = detail if detail.startswith("[") else f"{name}: {state}" + (
+            text = detail if re.search(r"\[\d+/\d+\]$", detail) else f"{name}: {state}" + (
                 f" - {detail}" if state == "cached" and detail else
                 f" — {detail}" if detail else "")
             self.console.print(Text(text), soft_wrap=True)
@@ -172,13 +172,19 @@ class Display:
         nodes = {}
         for name, (state, detail, started) in self.rows.items():
             display_name = Path(name).name if Path(name).is_absolute() else name
-            text = detail if detail.startswith("[") else f"{display_name}: {state}" + (
+            text = detail if re.search(r"\[\d+/\d+\]$", detail) else f"{display_name}: {state}" + (
                 f" - {detail}" if state == "cached" and detail else
                 f" — {detail}" if detail else "")
             label = Text(text, style={"failed": "red", "done": "green",
                                      "cached": "dim"}.get(state, ""))
             if state in ("lifting", "compiling", "linking", "running"):
-                label.append(f"  {time.monotonic() - started:.1f}s", style="dim")
+                elapsed = f"{time.monotonic() - started:.1f}s"
+                if counter := re.search(r" \[\d+/\d+\]$", text):
+                    label = Text(text[:counter.start()], style=label.style)
+                    label.append(f"  {elapsed}", style="dim")
+                    label.append(counter.group())
+                else:
+                    label.append(f"  {elapsed}", style="dim")
                 if name not in self.spinners:
                     self.spinners[name] = Spinner("dots")
                 node = self.spinners[name]
@@ -258,7 +264,7 @@ class Driver:
                             if match := re.fullmatch(rb"\[(\d+)/(\d+)\] lifting funcs", line):
                                 completed, total = (value.decode() for value in match.groups())
                                 self.display.update(name, phase,
-                                    f"[{completed}/{total}] - {Path(name).name}: lifting funcs")
+                                    f"{Path(name).name}: lifting funcs [{completed}/{total}]")
                             elif match := re.fullmatch(rb"lifting - (.+)", line):
                                 self.display.update(name, phase, match[1].decode())
                         if len(pending) > 256:
@@ -497,8 +503,8 @@ class Driver:
                 async with compile_slots:
                     self.display.update(
                         progress_name, "compiling",
-                        f"[{completed[owner]}/{total}] ── {Path(owner).name} "
-                        f"chunk {index + 1}/{total}: compiling",
+                        f"── {Path(owner).name} chunk {index + 1}/{total}: "
+                        f"compiling [{completed[owner]}/{total}]",
                         parent=owner)
                     compile_key, compiled = await self.stage(
                         chunk_name, "compiling",
@@ -509,8 +515,8 @@ class Driver:
             except Exception:
                 self.display.update(
                     progress_name, "failed",
-                    f"[{completed[owner]}/{total}] ── {Path(owner).name} "
-                    f"chunk {index + 1}/{total}: failed",
+                    f"── {Path(owner).name} chunk {index + 1}/{total}: "
+                    f"failed [{completed[owner]}/{total}]",
                     parent=owner)
                 raise
             return owner, index, obj, compile_key, compiled
@@ -570,8 +576,8 @@ class Driver:
                         "done" if changed_owners[owner] else "cached")
                     self.display.update(
                         f"{owner}::compile", status,
-                        f"[{completed[owner]}/{total}] ── {Path(owner).name} "
-                        f"chunk {index + 1}/{total}: {chunk_status} - compiling",
+                        f"── {Path(owner).name} chunk {index + 1}/{total}: "
+                        f"{chunk_status} - compiling [{completed[owner]}/{total}]",
                         parent=owner)
 
             async with asyncio.TaskGroup() as group:
