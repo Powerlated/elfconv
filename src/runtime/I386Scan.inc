@@ -74,9 +74,10 @@ struct GuestScanInput {
       return result;
     }
   }
-  int scan_signed_decimal(std::basic_string<Char> spec, uint32_t width,
-                          size_t output_size, bool suppressed,
-                          long long &value, int &consumed) {
+  // Match glibc's signed-overflow saturation; %i also needs base autodetection.
+  int scan_signed_integer(std::basic_string<Char> spec, uint32_t width,
+                         size_t output_size, bool suppressed,
+                         bool automatic_base, long long &value, int &consumed) {
     if constexpr (!std::is_same_v<Char, char>) {
       return scan(std::move(spec), &value, suppressed, consumed);
     } else {
@@ -121,19 +122,43 @@ struct GuestScanInput {
           ? (uint64_t(1) << (bits - 1)) - 1
           : uint64_t(LLONG_MAX);
       const uint64_t limit = negative ? positive_limit + 1 : positive_limit;
-      uint64_t magnitude = 0;
+      unsigned base = automatic_base ? (c == '0' ? 8 : 10) : 10;
+      uint64_t magnitude = uint64_t(c - '0');
       bool overflow = false;
-      do {
-        const uint64_t digit = uint64_t(c - '0');
-        if (magnitude > (limit - digit) / 10) overflow = true;
-        else if (!overflow) magnitude = magnitude * 10 + digit;
-        ++item_size;
-        if (width && item_size >= width) break;
+      ++item_size;
+      if (automatic_base && c == '0' && (!width || item_size < width)) {
+        const int prefix = get();
+        unsigned prefix_base = prefix == 'x' || prefix == 'X' ? 16
+            : prefix == 'b' || prefix == 'B' ? 2 : 0;
+        if (prefix_base) {
+          ++item_size;
+          base = prefix_base;
+          if (width && item_size == width) { consumed = -1; return 0; }
+          c = get();
+          const int digit = c >= '0' && c <= '9' ? c - '0'
+              : c >= 'a' && c <= 'f' ? c - 'a' + 10
+              : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1;
+          if (digit < 0 || unsigned(digit) >= base) {
+            unget(c);
+            consumed = -1;
+            return 0;
+          }
+          magnitude = uint64_t(digit);
+          ++item_size;
+        } else {
+          unget(prefix);
+        }
+      }
+      while (!width || item_size < width) {
         c = get();
-      } while (c >= '0' && c <= '9');
-      if (c != EOF && (c < '0' || c > '9') &&
-          (!width || item_size < width))
-        unget(c);
+        const int digit = c >= '0' && c <= '9' ? c - '0'
+            : c >= 'a' && c <= 'f' ? c - 'a' + 10
+            : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1;
+        if (digit < 0 || unsigned(digit) >= base) { unget(c); break; }
+        if (magnitude > (limit - uint64_t(digit)) / base) overflow = true;
+        else if (!overflow) magnitude = magnitude * base + uint64_t(digit);
+        ++item_size;
+      }
       if (overflow) { magnitude = limit; errno = ERANGE; }
       value = negative
           ? magnitude == uint64_t(LLONG_MAX) + 1 ? LLONG_MIN : -static_cast<long long>(magnitude)
@@ -333,8 +358,9 @@ int scan_guest_input(uint8_t *arena, GuestScanInput<Char> &input,
       uint64_t value = 0;
       if (conversion == 'd' || conversion == 'i') {
         long long signed_value = 0;
-        if (conversion == 'd' && !international_digits)
-          result = input.scan_signed_decimal(spec, width, integer_size, suppressed, signed_value, used);
+        if (!international_digits && (conversion == 'd' || conversion == 'i'))
+          result = input.scan_signed_integer(spec, width, integer_size, suppressed,
+                                             conversion == 'i', signed_value, used);
         else
           result = international_digits
               ? input.scan_international(spec, &signed_value, suppressed, used)
