@@ -42,7 +42,6 @@
 #include <llvm/Transforms/IPO/Internalize.h>
 #include <llvm/Transforms/IPO/GlobalDCE.h>
 #include <llvm/Transforms/Utils/ModuleUtils.h>
-#include <llvm/Linker/Linker.h>
 #include <llvm/Support/raw_ostream.h>
 #include <llvm/Transforms/Utils/SplitModule.h>
 #include <remill/BC/HelperMacro.h>
@@ -309,53 +308,8 @@ void StoreIRChunks(llvm::Module &module) {
 
   const auto output_count = static_cast<unsigned>(
       std::min<std::uint64_t>(FLAGS_ir_chunks, function_count));
-  const auto intermediate_count = static_cast<unsigned>(
-      std::min<std::uint64_t>(function_count,
-                              static_cast<std::uint64_t>(output_count) * 4));
-  struct Piece {
-    std::unique_ptr<llvm::Module> module;
-    std::uint64_t size;
-    bool has_function;
-  };
-  std::vector<Piece> pieces;
-  pieces.reserve(intermediate_count);
-  PrintLiftingPhase("partitioning IR", 0, intermediate_count);
-  llvm::SplitModule(module, intermediate_count,
-      [&](std::unique_ptr<llvm::Module> piece) {
-        bool has_function = false;
-        for (const auto &function : *piece) {
-          if (!function.isDeclaration()) {
-            has_function = true;
-            break;
-          }
-        }
-        const auto size = ModuleIRDefinitionSize(*piece);
-        pieces.push_back({std::move(piece), size, has_function});
-        PrintLiftingPhase("partitioning IR", pieces.size(), intermediate_count);
-      }, false, true);
-  PrintLiftingPhase("balancing chunks");
-
-  const auto nonempty_count = std::count_if(
-      pieces.begin(), pieces.end(),
-      [](const Piece &piece) { return piece.has_function; });
-  const auto actual_count = std::min<std::size_t>(output_count, nonempty_count);
-  if (!actual_count) {
-    elfconv_runtime_error("LLVM partitioning produced no code chunks.\n");
-  }
-  std::stable_sort(pieces.begin(), pieces.end(),
-      [](const Piece &left, const Piece &right) {
-        return left.size > right.size;
-      });
-
-  std::vector<std::vector<std::size_t>> bins(actual_count);
-  std::vector<std::uint64_t> bin_sizes(actual_count, 0);
-  for (std::size_t i = 0; i < pieces.size(); ++i) {
-    const auto bin = static_cast<std::size_t>(
-        std::min_element(bin_sizes.begin(), bin_sizes.end()) - bin_sizes.begin());
-    bins[bin].push_back(i);
-    bin_sizes[bin] += pieces[i].size;
-  }
-
+  // Split directly into final chunks. Intermediate partitions multiply
+  // CloneModule's module-wide work and require another linking pass.
   const std::filesystem::path output_base(FLAGS_bc_out);
   const std::filesystem::path manifest_path(FLAGS_ir_chunk_manifest_out);
   if (!manifest_path.parent_path().empty()) {
@@ -366,28 +320,19 @@ void StoreIRChunks(llvm::Module &module) {
     elfconv_runtime_error("Cannot write IR chunk manifest: %s\n",
                           FLAGS_ir_chunk_manifest_out.c_str());
   }
-  manifest << FLAGS_ir_chunks << '\t' << actual_count << '\n';
-  PrintLiftingPhase("writing bitcode chunks", 0, bins.size());
-
-  for (std::size_t i = 0; i < bins.size(); ++i) {
-    if (bins[i].empty()) {
-      elfconv_runtime_error("LLVM IR chunk %zu has no module partitions.\n", i);
-    }
-    auto combined = std::move(pieces[bins[i].front()].module);
-    for (std::size_t j = 1; j < bins[i].size(); ++j) {
-      if (llvm::Linker::linkModules(
-              *combined, std::move(pieces[bins[i][j]].module))) {
-        elfconv_runtime_error("Cannot combine LLVM IR partitions for chunk %zu.\n", i);
-      }
-    }
-    const auto chunk_path = IRChunkPath(output_base, static_cast<unsigned>(i));
-    remill::StoreModuleToFile(combined.get(), chunk_path.string());
-    const auto size = ModuleIRDefinitionSize(*combined);
-    manifest << i << '\t' << size << '\n';
-    std::cout << "IR chunk " << i << ": " << size << " definition bytes\n";
-    PrintLiftingPhase("writing bitcode chunks", i + 1, bins.size());
-  }
-  PrintLiftingPhase("releasing IR partitions");
+  manifest << FLAGS_ir_chunks << '\t' << output_count << '\n';
+  unsigned written = 0;
+  PrintLiftingPhase("partitioning IR", 0, output_count);
+  llvm::SplitModule(module, output_count,
+      [&](std::unique_ptr<llvm::Module> chunk) {
+        const auto chunk_path = IRChunkPath(output_base, written);
+        remill::StoreModuleToFile(chunk.get(), chunk_path.string());
+        const auto size = ModuleIRDefinitionSize(*chunk);
+        manifest << written << '\t' << size << '\n';
+        std::cout << "IR chunk " << written << ": " << size
+                  << " definition bytes\n";
+        PrintLiftingPhase("partitioning IR", ++written, output_count);
+      }, false, true);
 }
 
 }  // namespace

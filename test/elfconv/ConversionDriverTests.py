@@ -4,10 +4,12 @@ import asyncio
 import io
 import json
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
+from unittest.mock import patch
 
 from rich.console import Console
 
@@ -117,20 +119,26 @@ async def chunk_pool() -> None:
         results.append(result)
     assert sorted(results) == [i * 2 for i in range(8)]
     assert maximum == 3 and active == 0
-    rendered = io.StringIO()
-    progress = Display("conversion", Console(file=rendered))
-    owner = "/tmp/server.so"
-    progress.update(owner, "done", "lifting")
-    progress.update(f"{owner}::compile", "compiling",
-                    "[0/41] ── server.so chunk 1/41: compiling", parent=owner)
-    progress.update(f"{owner}::compile", "compiling",
-                    "[1/41] ── server.so chunk 1/41: done", parent=owner)
-    progress.update(f"{owner}::compile", "done",
-                    "[41/41] ── server.so chunk 41/41: done", parent=owner)
-    tree = progress.render()
-    progress.console.print(tree)
-    assert "\n    └── [41/41] ── server.so chunk 41/41: done\n" in rendered.getvalue()
-    assert "conversion [2/2]" in rendered.getvalue()
+    # Phase counters must not hide the ELF identity in either output mode.
+    for terminal in (False, True):
+        rendered = io.StringIO()
+        progress = Display("conversion", Console(
+            file=rendered, force_terminal=terminal, color_system=None, width=160))
+        owner = "/tmp/server.so"
+        with patch("conversion_display.time.monotonic", return_value=10.0):
+            progress.update(owner, "lifting", "partitioning IR", counter=(0, 4))
+        with patch("conversion_display.time.monotonic", return_value=12.0):
+            progress.update(owner, "lifting", "partitioning IR", counter=(1, 4))
+            assert progress.label(owner, progress.rows[owner]).plain.endswith("[1/4]  2.0s")
+            progress.update(owner, "lifting", "writing bitcode", counter=(0, 4))
+            assert progress.label(owner, progress.rows[owner]).plain.endswith("[0/4]  0.0s")
+            progress.update(f"{owner}::compile", "compiling", "chunk 1/4",
+                            parent=owner, counter=(0, 4))
+            progress.console.print(progress.render())
+        lines = [line for line in rendered.getvalue().splitlines()
+                 if "partitioning IR" in line or "writing bitcode" in line or "chunk 1/4" in line]
+        assert lines and all("server.so" in line for line in lines)
+        assert all(re.search(r"\[\d+/\d+\]  \d+\.\ds$", line) for line in lines)
     options = parser().parse_args(["--input", __file__, "--target", "i386-wasm",
                                    "--lift-jobs", "3", "--compile-jobs", "4"])
     assert options.lift_jobs == 3

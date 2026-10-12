@@ -15,17 +15,14 @@ import shlex
 import shutil
 import signal
 import sys
-import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import TypeVar
 
 from rich.console import Console
-from rich.live import Live
-from rich.spinner import Spinner
 from rich.text import Text
-from rich.tree import Tree
 
 from pack_preload import pack_preload
+from conversion_display import Display
 
 Item = TypeVar("Item")
 Result = TypeVar("Result")
@@ -136,77 +133,6 @@ def parser() -> argparse.ArgumentParser:
     return result
 
 
-class Display:
-    """One live tree with trailing counters; plain output records transitions."""
-    def __init__(self, name: str, console: Console):
-        self.name, self.console = name, console
-        self.rows: dict[str, tuple[str, str, float]] = {}
-        self.parents: dict[str, str] = {}
-        self.spinners: dict[str, Spinner] = {}
-        self.live = Live(self.render(), console=console, refresh_per_second=8,
-                         auto_refresh=False)
-
-    def update(self, name: str, state: str, detail: str = "",
-               parent: str | None = None) -> None:
-        if re.search(r" chunk \d+/\d+$", name):
-            return
-        previous = self.rows.get(name)
-        active_states = ("lifting", "compiling", "linking", "running")
-        started = (previous[2] if previous and previous[0] in active_states
-                   else time.monotonic())
-        self.rows[name] = state, detail, started
-        if parent:
-            self.parents[name] = parent
-        if not self.console.is_terminal and (
-                previous is None or state != previous[0] or state in ("failed", "done", "cached")
-                or (state == "lifting" and detail != previous[1])):
-            text = detail if re.search(r"\[\d+/\d+\]$", detail) else f"{name}: {state}" + (
-                f" - {detail}" if state == "cached" and detail else
-                f" — {detail}" if detail else "")
-            self.console.print(Text(text), soft_wrap=True)
-
-    def render(self) -> Tree:
-        done = sum(state in ("done", "cached") for state, _, _ in self.rows.values())
-        tree = Tree(Text(f"{self.name} [{done}/{len(self.rows)}]"))
-        parent_names = set(self.parents.values())
-        nodes = {}
-        for name, (state, detail, started) in self.rows.items():
-            display_name = Path(name).name if Path(name).is_absolute() else name
-            text = detail if re.search(r"\[\d+/\d+\]$", detail) else f"{display_name}: {state}" + (
-                f" - {detail}" if state == "cached" and detail else
-                f" — {detail}" if detail else "")
-            label = Text(text, style={"failed": "red", "done": "green",
-                                     "cached": "dim"}.get(state, ""))
-            if state in ("lifting", "compiling", "linking", "running"):
-                elapsed = f"{time.monotonic() - started:.1f}s"
-                if counter := re.search(r" \[\d+/\d+\]$", text):
-                    label = Text(text[:counter.start()], style=label.style)
-                    label.append(f"  {elapsed}", style="dim")
-                    label.append(counter.group())
-                else:
-                    label.append(f"  {elapsed}", style="dim")
-                if name not in self.spinners:
-                    self.spinners[name] = Spinner("dots")
-                node = self.spinners[name]
-                node.update(text=label)
-            else:
-                node = label
-            nodes[name] = Tree(node) if name in parent_names else node
-        for name, node in nodes.items():
-            parent = self.parents.get(name)
-            if parent in nodes:
-                nodes[parent].add(node)
-            else:
-                tree.add(node)
-        return tree
-
-    async def refresh(self) -> None:
-        while True:
-            if self.console.is_terminal:
-                self.live.update(self.render(), refresh=True)
-            await asyncio.sleep(0.1)
-
-
 class Driver:
     def __init__(self, args: argparse.Namespace, display: Display):
         self.a, self.display = args, display
@@ -262,11 +188,16 @@ class Driver:
                         pending = lines.pop()
                         for line in lines:
                             if match := re.fullmatch(rb"\[(\d+)/(\d+)\] lifting funcs", line):
-                                completed, total = (value.decode() for value in match.groups())
-                                self.display.update(name, phase,
-                                    f"{Path(name).name}: lifting funcs [{completed}/{total}]")
+                                completed, total = (int(value) for value in match.groups())
+                                self.display.update(name, phase, "lifting funcs",
+                                                    counter=(completed, total))
                             elif match := re.fullmatch(rb"lifting - (.+)", line):
-                                self.display.update(name, phase, match[1].decode())
+                                detail = match[1].decode()
+                                counter = None
+                                if counts := re.search(r" \[(\d+)/(\d+)\]$", detail):
+                                    counter = tuple(int(value) for value in counts.groups())
+                                    detail = detail[:counts.start()]
+                                self.display.update(name, phase, detail, counter=counter)
                         if len(pending) > 256:
                             pending = b""
                 status = await process.wait()
@@ -503,9 +434,8 @@ class Driver:
                 async with compile_slots:
                     self.display.update(
                         progress_name, "compiling",
-                        f"── {Path(owner).name} chunk {index + 1}/{total}: "
-                        f"compiling [{completed[owner]}/{total}]",
-                        parent=owner)
+                        f"chunk {index + 1}/{total}",
+                        parent=owner, counter=(completed[owner], total))
                     compile_key, compiled = await self.stage(
                         chunk_name, "compiling",
                         [emcc, *compile_flags, "-c", bitcode, "-o", obj], [obj],
@@ -515,9 +445,8 @@ class Driver:
             except Exception:
                 self.display.update(
                     progress_name, "failed",
-                    f"── {Path(owner).name} chunk {index + 1}/{total}: "
-                    f"failed [{completed[owner]}/{total}]",
-                    parent=owner)
+                    f"chunk {index + 1}/{total}",
+                    parent=owner, counter=(completed[owner], total))
                 raise
             return owner, index, obj, compile_key, compiled
 
@@ -576,9 +505,8 @@ class Driver:
                         "done" if changed_owners[owner] else "cached")
                     self.display.update(
                         f"{owner}::compile", status,
-                        f"── {Path(owner).name} chunk {index + 1}/{total}: "
-                        f"{chunk_status} - compiling [{completed[owner]}/{total}]",
-                        parent=owner)
+                        f"chunk {index + 1}/{total}: {chunk_status} - compiling",
+                        parent=owner, counter=(completed[owner], total))
 
             async with asyncio.TaskGroup() as group:
                 group.create_task(lift_all())
@@ -641,8 +569,8 @@ class Driver:
                                                 f"{chunk_counts[owner]} rebalanced chunk(s)")
                             self.display.update(
                                 f"{owner}::compile", "queued",
-                                f"[0/{chunk_counts[owner]}] ── {Path(owner).name}: awaiting relift",
-                                parent=owner)
+                                "awaiting relift", parent=owner,
+                                counter=(0, chunk_counts[owner]))
                     await lift_compile_pipeline(changed_entries)
                     atomic_text(allocation_path, json.dumps(
                         {"key": allocation_key, "counts": chunk_counts}, sort_keys=True))

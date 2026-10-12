@@ -192,8 +192,10 @@ Build with `-DCMAKE_BUILD_TYPE=Release` for optimized lifting.
 For `i386-wasm`, runtime sources compile as independent cached objects.
 `--ir-chunks N` targets the total chunks across bundled ELF owners (at least one
 per ELF). Counts are apportioned using code size, then refined using measured
-LLVM IR size; chunks are greedily balanced across the whole bundle. Chunked
-conversion cannot use linker-map incremental units. `--lift-jobs N` bounds
+LLVM IR size. Each ELF is partitioned directly into final chunks; no intermediate
+split-and-merge pass. LLVM distributes functions while keeping dependent definitions
+together; chunk sizes can differ. Chunked conversion cannot use linker-map incremental
+units. `--lift-jobs N` bounds
 concurrent ELF lifts (default 2); `--compile-jobs N` bounds compiler jobs
 (default 8). Completed ELF chunks enter the compiler pool while other lifts
 continue; ready owners rotate through the pool. CMake uses `ELFCONV_LIFT_JOBS`
@@ -201,6 +203,7 @@ continue; ready owners rotate through the pool. CMake uses `ELFCONV_LIFT_JOBS`
 `LIFT_JOBS` and `COMPILE_JOBS`.
 Unchanged bundles reuse the scan and refined chunk allocation; warm conversion
 does not repeat the initial chunk allocation and relift.
+Progress rows show ELF, stage detail, counter, then stage time.
 
 Portal: `./lift_portal.sh` reuses the repository-root cache, with 96 chunks,
 12 lifting/compiler jobs, and `-O1`. Overrides: `ELFCONV_LIFT_JOBS`,
@@ -209,7 +212,6 @@ After lifter/runtime edits, run `ELFCONV_BUILD=1 ./lift_portal.sh` to rebuild fi
 Lifting shows `[completed/known total]`; the total grows as callees are discovered.
 After function translation, the display names IR finalization, partitioning,
 bitcode writing, and cleanup instead of retaining a completed function counter.
-Cache hits retain stage labels: `cached - lifting`, `cached - compiling`.
 
 `elflift --analyze_only` reports ELF headers, executable section sizes, and
 function-extent estimates without lifting; add `--per_elf` to group a bundled
