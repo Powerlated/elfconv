@@ -56,8 +56,9 @@ An ahead-of-time binary translator that converts Linux applications to WebAssemb
     reference counts are honored. Libraries must be supplied at conversion time.
     Defined symbols bind within their ELF, with unresolved references resolved
     against the bundled set or existing host adapters. Selected stdio imports
-    include `clearerr`, `ftello`, `getchar`, `putc_unlocked`, `swprintf`, and
-    `vprintf`.
+    include `clearerr`, `ftello`, `getchar`, `gets`, `putc_unlocked`, `swprintf`,
+    and `vprintf`. Legacy `gets` has no object-size bound; writes are checked
+    only against the guest arena.
     C23 `vfscanf`/`vsscanf` support binary `%b`; `fa_IR` string scans support
     Persian digits with `%I`; scanf `%d` overflow saturates and partial-width
     `%c` returns EOF. GNU printf `%m`

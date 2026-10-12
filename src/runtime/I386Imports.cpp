@@ -1520,6 +1520,25 @@ IMPORT(open_memstream) {
   files.emplace(handle, file);
   call.result(handle);
 }
+IMPORT(gets) {
+  CALL;
+  const uint32_t destination = call.word(0);
+  auto *buffer = static_cast<char *>(guest(arena, destination, 1));
+  size_t length = 0;
+  for (;;) {
+    const int c = fgetc(stdin);
+    if (c == EOF) {
+      if (ferror(stdin) || !length) { call.result(0); return; }
+      break;
+    }
+    if (c == '\n') break;
+    if (uint64_t(destination) + length + 1 >= MEMORY_ARENA_SIZE)
+      elfconv_runtime_error("Guest gets string exceeds the memory arena.\n");
+    buffer[length++] = char(c);
+  }
+  buffer[length] = '\0';
+  call.result(destination);
+}
 IMPORT(fgets) {
   CALL;
   const int size = int32_t(call.word(1));
