@@ -100,10 +100,16 @@ class Display:
         tree = Tree(Text(f"{self.name} [{done}/{len(self.rows)}]  "
                          f"{time.monotonic() - self.started:.1f}s"))
         parent_names = set(self.parents.values())
-        ordered = sorted(
-            self.rows.items(),
-            key=lambda item: (2 if item[1].state in ("done", "cached") else
-                              0 if item[1].state in ACTIVE_STATES else 1))
+        priorities = {
+            name: (2 if row.state in ("done", "cached") else
+                   0 if row.state in ACTIVE_STATES else 1)
+            for name, row in self.rows.items()
+        }
+        for _ in range(len(self.parents)):
+            for child, parent in self.parents.items():
+                if child in priorities and parent in priorities:
+                    priorities[parent] = min(priorities[parent], priorities[child])
+        ordered = sorted(self.rows.items(), key=lambda item: priorities[item[0]])
         nodes = {}
         for name, row in ordered:
             label = self.label(name, row)
