@@ -20,7 +20,13 @@
 
 #include <cstdint>
 #include <sstream>
+#include <algorithm>
+#include <memory>
 #include <string_view>
+#include <filesystem>
+#include <fstream>
+#include <limits>
+#include <vector>
 #if defined(__linux__)
 #  include <signal.h>
 #  include <utils/Util.h>
@@ -35,6 +41,9 @@
 #include <llvm/Transforms/IPO/Internalize.h>
 #include <llvm/Transforms/IPO/GlobalDCE.h>
 #include <llvm/Transforms/Utils/ModuleUtils.h>
+#include <llvm/Linker/Linker.h>
+#include <llvm/Support/raw_ostream.h>
+#include <llvm/Transforms/Utils/SplitModule.h>
 #include <remill/BC/HelperMacro.h>
 #include <remill/BC/InstructionLifter.h>
 #include <remill/BC/Lifter.h>
@@ -64,6 +73,8 @@ DEFINE_string(unit_manifest_out, "", "Write unit owners and content fingerprints
 DEFINE_string(metadata_fingerprint_out, "", "Write the process-wide ELF metadata fingerprint.");
 DEFINE_string(unit_owner, "", "Lift only functions owned by this linker-map object.");
 DEFINE_string(unit_id, "", "Stable suffix used for this incremental unit's metadata symbols.");
+DEFINE_uint64(ir_chunks, 0, "Split lifted IR into approximately equal-size linkable chunks.");
+DEFINE_string(ir_chunk_manifest_out, "", "Write chunk count and IR sizes for --ir_chunks.");
 DEFINE_bool(metadata_only, false, "Emit only process-wide ELF metadata.");
 DEFINE_string(
     norm_mode, "0",
@@ -164,6 +175,116 @@ static void EmitI386Libraries(llvm::Module &module, const BinaryLoader::ELFObjec
   emit("_ecv_i386_tls_static_alignment", llvm::ConstantInt::get(word, object.tls_static_alignment));
 }
 
+namespace {
+
+std::uint64_t ModuleIRDefinitionSize(const llvm::Module &module) {
+  std::uint64_t size = 0;
+  for (const auto &global : module.global_values()) {
+    if (global.isDeclaration()) continue;
+    std::string text;
+    llvm::raw_string_ostream stream(text);
+    global.print(stream);
+    stream.flush();
+    size += text.size();
+  }
+  return size;
+}
+
+std::filesystem::path IRChunkPath(const std::filesystem::path &base,
+                                  unsigned index) {
+  return base.parent_path() /
+         (base.stem().string() + ".chunk-" + std::to_string(index) +
+          base.extension().string());
+}
+
+void StoreIRChunks(llvm::Module &module) {
+  std::size_t function_count = 0;
+  for (const auto &function : module) {
+    if (!function.isDeclaration()) ++function_count;
+  }
+  if (!function_count) {
+    elfconv_runtime_error("Cannot split an LLVM module with no function definitions.\n");
+  }
+
+  const auto output_count = static_cast<unsigned>(
+      std::min<std::uint64_t>(FLAGS_ir_chunks, function_count));
+  const auto intermediate_count = static_cast<unsigned>(
+      std::min<std::uint64_t>(function_count,
+                              static_cast<std::uint64_t>(output_count) * 4));
+  struct Piece {
+    std::unique_ptr<llvm::Module> module;
+    std::uint64_t size;
+    bool has_function;
+  };
+  std::vector<Piece> pieces;
+  pieces.reserve(intermediate_count);
+  llvm::SplitModule(module, intermediate_count,
+      [&](std::unique_ptr<llvm::Module> piece) {
+        bool has_function = false;
+        for (const auto &function : *piece) {
+          if (!function.isDeclaration()) {
+            has_function = true;
+            break;
+          }
+        }
+        const auto size = ModuleIRDefinitionSize(*piece);
+        pieces.push_back({std::move(piece), size, has_function});
+      }, false, true);
+
+  const auto nonempty_count = std::count_if(
+      pieces.begin(), pieces.end(),
+      [](const Piece &piece) { return piece.has_function; });
+  const auto actual_count = std::min<std::size_t>(output_count, nonempty_count);
+  if (!actual_count) {
+    elfconv_runtime_error("LLVM partitioning produced no code chunks.\n");
+  }
+  std::stable_sort(pieces.begin(), pieces.end(),
+      [](const Piece &left, const Piece &right) {
+        return left.size > right.size;
+      });
+
+  std::vector<std::vector<std::size_t>> bins(actual_count);
+  std::vector<std::uint64_t> bin_sizes(actual_count, 0);
+  for (std::size_t i = 0; i < pieces.size(); ++i) {
+    const auto bin = static_cast<std::size_t>(
+        std::min_element(bin_sizes.begin(), bin_sizes.end()) - bin_sizes.begin());
+    bins[bin].push_back(i);
+    bin_sizes[bin] += pieces[i].size;
+  }
+
+  const std::filesystem::path output_base(FLAGS_bc_out);
+  const std::filesystem::path manifest_path(FLAGS_ir_chunk_manifest_out);
+  if (!manifest_path.parent_path().empty()) {
+    std::filesystem::create_directories(manifest_path.parent_path());
+  }
+  std::ofstream manifest(manifest_path, std::ios::trunc);
+  if (!manifest) {
+    elfconv_runtime_error("Cannot write IR chunk manifest: %s\n",
+                          FLAGS_ir_chunk_manifest_out.c_str());
+  }
+  manifest << FLAGS_ir_chunks << '\t' << actual_count << '\n';
+
+  for (std::size_t i = 0; i < bins.size(); ++i) {
+    if (bins[i].empty()) {
+      elfconv_runtime_error("LLVM IR chunk %zu has no module partitions.\n", i);
+    }
+    auto combined = std::move(pieces[bins[i].front()].module);
+    for (std::size_t j = 1; j < bins[i].size(); ++j) {
+      if (llvm::Linker::linkModules(
+              *combined, std::move(pieces[bins[i][j]].module))) {
+        elfconv_runtime_error("Cannot combine LLVM IR partitions for chunk %zu.\n", i);
+      }
+    }
+    const auto chunk_path = IRChunkPath(output_base, static_cast<unsigned>(i));
+    remill::StoreModuleToFile(combined.get(), chunk_path.string());
+    const auto size = ModuleIRDefinitionSize(*combined);
+    manifest << i << '\t' << size << '\n';
+    std::cout << "IR chunk " << i << ": " << size << " definition bytes\n";
+  }
+}
+
+}  // namespace
+
 int main(int argc, char *argv[]) {
   // set custom signal handler for SIGSEGV.
   lift_set_sigaction();
@@ -189,6 +310,21 @@ int main(int argc, char *argv[]) {
       "Enabled by default; the last occurrence wins.");
   google::ParseCommandLineFlags(&argc, &argv, true);
   google::InitGoogleLogging(argv[0]);
+  if (FLAGS_ir_chunks) {
+    if (FLAGS_ir_chunks > std::numeric_limits<unsigned>::max() ||
+        FLAGS_arch != "i386" || FLAGS_target_arch != "emscripten32" ||
+        FLAGS_bc_out.empty() || FLAGS_ir_chunk_manifest_out.empty() ||
+        FLAGS_per_elf || !FLAGS_linker_map.empty() ||
+        !FLAGS_unit_manifest_out.empty() || !FLAGS_unit_owner.empty() ||
+        !FLAGS_unit_id.empty() || FLAGS_metadata_only ||
+        !FLAGS_shared_libraries.empty()) {
+      elfconv_runtime_error(
+          "--ir_chunks requires a single i386 Emscripten lift with --bc_out and "
+          "--ir_chunk_manifest_out.\n");
+    }
+  } else if (!FLAGS_ir_chunk_manifest_out.empty()) {
+    elfconv_runtime_error("--ir_chunk_manifest_out requires --ir_chunks.\n");
+  }
 
   AArch64TraceManager manager(FLAGS_target_elf);
   manager.elf_obj.entry_symbol = FLAGS_entry_symbol;
@@ -432,8 +568,12 @@ int main(int argc, char *argv[]) {
     module->setDataLayout(
         "e-m:e-p:32:32-p10:8:8-p20:8:8-i64:64-i128:128-n32:64-S128-ni:1:10:20");
   }
-  // Make LLVM bitcode file.
-  remill::StoreModuleToFile(module.get(), FLAGS_bc_out);
+  if (FLAGS_ir_chunks) {
+    StoreIRChunks(*module);
+  } else {
+    remill::StoreModuleToFile(module.get(), FLAGS_bc_out);
+  }
 
   return 0;
 }
+

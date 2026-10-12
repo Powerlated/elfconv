@@ -79,6 +79,8 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--wasm-opt-level", choices=list("0123sz"), default="3")
     result.add_argument("--legacy-gl", choices=("0", "1"), default="1")
     result.add_argument("--conversion-jobs", type=int, default=8)
+    result.add_argument("--ir-chunks", type=int, default=0, metavar="N",
+                        help="Split i386 Wasm lifted IR into N approximately equal-size chunks.")
     result.add_argument("--debug-func-addr", default="0")
     for name in ("init-wasm", "debug", "float-status", "text-ir", "no-lifted",
                  "no-compiled", "ready-js", "incremental-units", "jspi", "pthreads"):
@@ -362,6 +364,150 @@ class Driver:
         self.html()
 
     @staticmethod
+    def ir_chunk_paths(base: Path, count: int) -> list[Path]:
+        return [base.with_name(f"{base.stem}.chunk-{index}{base.suffix}")
+                for index in range(count)]
+
+    @staticmethod
+    def clean_ir_chunks(base: Path, count: int) -> None:
+        pattern = re.compile(
+            rf"{re.escape(base.stem)}\.chunk-(\d+){re.escape(base.suffix)}")
+        for path in base.parent.glob(f"{base.stem}.chunk-*{base.suffix}"):
+            match = pattern.fullmatch(path.name)
+            if match and int(match[1]) >= count and path.is_file():
+                path.unlink()
+
+    def read_ir_chunk_manifest(self, manifest: Path, base: Path) -> tuple[int, list[Path], list[int]]:
+        lines = manifest.read_text().splitlines()
+        if not lines:
+            raise ValueError(f"Empty IR chunk manifest: {manifest}")
+        try:
+            header = [int(value) for value in lines[0].split("\t")]
+            entries = []
+            for line in lines[1:]:
+                entry = [int(value) for value in line.split("\t")]
+                if len(entry) != 2:
+                    raise ValueError
+                entries.append((entry[0], entry[1]))
+        except ValueError as error:
+            raise ValueError(f"Malformed IR chunk manifest: {manifest}") from error
+        if (len(header) != 2 or header[0] < 1 or header[1] < 1 or
+                len(entries) != header[1] or any(
+                    index != expected or size < 0 for expected, (index, size) in enumerate(entries))):
+            raise ValueError(f"Malformed IR chunk manifest: {manifest}")
+        return header[0], self.ir_chunk_paths(base, header[1]), [size for _, size in entries]
+
+    async def chunked(self) -> None:
+        a, name = self.a, self.a.elf_name
+        emcc = await self.compiler()
+        base = self.output / f"{name}.bc"
+        manifest = self.cache / f"{name}.ir-chunks.tsv"
+        lift_stamp = self.cache / f"{name}.ir-chunks.lift.key"
+        if a.no_lifted:
+            if not manifest.is_file():
+                raise ValueError(f"No IR chunk manifest for {name}; remove --no-lifted")
+            requested, chunks, ir_sizes = self.read_ir_chunk_manifest(manifest, base)
+            if requested != a.ir_chunks or any(not path.is_file() for path in chunks):
+                raise ValueError(f"Existing IR chunks do not match --ir-chunks {a.ir_chunks}")
+            lift_key = key(digest(manifest), [(digest(path)) for path in chunks])
+            self.display.update(name, "cached", "lifting")
+        else:
+            previous_outputs = [manifest]
+            previous_chunks = []
+            if manifest.is_file():
+                try:
+                    _, previous_chunks, _ = self.read_ir_chunk_manifest(manifest, base)
+                    previous_outputs.extend(previous_chunks)
+                except ValueError:
+                    lift_stamp.unlink(missing_ok=True)
+            semantics = []
+            if a.bitcode_path:
+                paths = sorted(a.bitcode_path.rglob("*.bc")) if a.bitcode_path.is_dir() else [a.bitcode_path]
+                semantics = [(str(path), digest(path)) for path in paths]
+            lift_identity = key(digest(Path(a.lifter)), semantics)
+            lift_key, lift_changed = await self.stage(name, "lifting",
+                [a.lifter, *self.lift_flags(), "--ir_chunks", a.ir_chunks,
+                 "--ir_chunk_manifest_out", manifest, "--bc_out", base],
+                previous_outputs, [digest(a.input), lift_identity], lift_stamp)
+            self.display.update(name, "done" if lift_changed else "cached", "lifting")
+            requested, chunks, ir_sizes = self.read_ir_chunk_manifest(manifest, base)
+            if requested != a.ir_chunks or any(not path.is_file() for path in chunks):
+                raise ValueError(f"Lifter produced invalid IR chunks for --ir-chunks {a.ir_chunks}")
+        self.clean_ir_chunks(base, len(chunks))
+
+        compiler_identity = self.compiler_identity[emcc]
+        compile_flags = [f"-O{a.wasm_opt_level}", *self.thread_compile, *self.exception_flags]
+        chunk_objects = [self.cache / f"{name}-ir-chunk-{index}.wasm.o"
+                         for index in range(len(chunks))]
+        semaphore = asyncio.Semaphore(a.conversion_jobs)
+        chunk_tasks = []
+
+        async def compile_chunk(index: int, bitcode: Path, obj: Path) -> tuple[Path, str]:
+            async with semaphore:
+                compile_key, compiled = await self.stage(f"IR chunk {index}", "compiling",
+                    [emcc, *compile_flags, "-c", bitcode, "-o", obj], [obj],
+                    [lift_key, digest(bitcode), compiler_identity],
+                    self.cache / f"{name}-ir-chunk-{index}.compile.key")
+            self.display.update(f"IR chunk {index}", "done" if compiled else "cached")
+            return obj, compile_key
+
+        if not a.no_compiled:
+            chunk_tasks = [
+                asyncio.create_task(compile_chunk(index, bitcode, obj))
+                for index, (bitcode, obj) in enumerate(zip(chunks, chunk_objects))]
+        elif any(not obj.is_file() for obj in chunk_objects):
+            raise ValueError(f"Missing compiled IR chunks for {name}; remove --no-compiled")
+
+        sources = [*COMMON, ROOT / "src/runtime/I386Imports.cpp"]
+        headers = sorted(path for directory in (ROOT / "src/runtime", ROOT / "src/utils",
+                                                ROOT / "backend/remill/include")
+                         for path in directory.rglob("*") if path.suffix in (".h", ".hpp", ".inc"))
+        header_key = key([(str(path), digest(path)) for path in headers])
+        runtime_flags: list[object] = [
+            f"-O{a.wasm_opt_level}", *self.thread_compile, *self.exception_flags,
+            *(["-g2"] if a.wasm_opt_level == "0" else []), *self.includes, "-std=c++17",
+            *self.definitions, "-DELF_IS_I386", "-DADDRESS_SIZE_BITS=32", "-sUSE_SDL=2",
+            f"-DECV_LEGACY_GL={a.legacy_gl}"]
+
+        async def compile_runtime(source: Path) -> tuple[Path, str]:
+            obj = self.cache / f"ir-chunk-runtime-{source.stem}.wasm.o"
+            async with semaphore:
+                compile_key, compiled = await self.stage(f"Runtime/{source.name}", "compiling",
+                    [emcc, *runtime_flags, "-c", source, "-o", obj], [obj],
+                    [digest(source), header_key, compiler_identity],
+                    self.cache / f"ir-chunk-runtime-{source.stem}.compile.key")
+            self.display.update(f"Runtime/{source.name}", "done" if compiled else "cached")
+            return obj, compile_key
+
+        runtime_tasks = [asyncio.create_task(compile_runtime(source)) for source in sources]
+        tasks = [*chunk_tasks, *runtime_tasks]
+        try:
+            results = await asyncio.gather(*tasks)
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+        chunk_results = results[:len(chunk_tasks)]
+        runtime_results = results[len(chunk_tasks):]
+        if a.no_compiled:
+            chunk_keys = [key("reused", digest(obj)) for obj in chunk_objects]
+        else:
+            chunk_keys = [compile_key for _, compile_key in chunk_results]
+        runtime_objects = [obj for obj, _ in runtime_results]
+        runtime_keys = [compile_key for _, compile_key in runtime_results]
+        js, wasm = self.output / f"{name}.js", self.output / f"{name}.wasm"
+        _, linked = await self.stage("Final link", "linking",
+            [emcc, *self.browser_link_flags(False), *chunk_objects, *runtime_objects, "-o", js],
+            [js, wasm], [lift_key, chunk_keys, runtime_keys, compiler_identity],
+            self.cache / f"{name}.ir-chunks.link.key")
+        self.display.update("Final link", "done" if linked else "cached")
+        self.html()
+        for index, size in enumerate(ir_sizes):
+            print(f"IR chunk {index}: {size} definition bytes")
+
+
+    @staticmethod
     def registry(ids: list[str]) -> str:
         source = '#include "runtime/Memory.h"\nextern "C" {\n'
         declarations = (
@@ -520,6 +666,13 @@ def validate(a: argparse.Namespace) -> None:
         raise ValueError("--elf-name must be a filename, not a path")
     if a.conversion_jobs < 1:
         raise ValueError("--conversion-jobs must be positive")
+    if a.ir_chunks < 0:
+        raise ValueError("--ir-chunks must be non-negative")
+    if a.ir_chunks and a.target != "i386-wasm":
+        raise ValueError("--ir-chunks requires i386-wasm")
+    if a.ir_chunks and (a.shared_library or a.incremental_units or a.link_map or
+                        a.object_base or a.text_ir or a.ready_js):
+        raise ValueError("--ir-chunks cannot be combined with shared libraries, incremental units, linker maps, text IR, or --ready-js")
     if a.pthreads and a.target != "i386-wasm":
         raise ValueError("--pthreads requires i386-wasm")
     if a.entry_symbol and not a.target.startswith("i386-"):
@@ -552,6 +705,8 @@ async def convert(a: argparse.Namespace, console: Console) -> None:
             display.live.start()
         if a.ready_js:
             driver.prepare_browser()
+        elif a.ir_chunks:
+            await driver.chunked()
         elif a.incremental_units or (a.shared_library and a.target == "i386-wasm"):
             await driver.incremental()
         else:
