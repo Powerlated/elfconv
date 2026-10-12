@@ -4,6 +4,7 @@
 - Main agent owns integration and verification.
 - Commit early and commit often. Prefer small, coherent commits; verify significant behavioral changes before committing them.
 - Commit messages: one line; no body. Keep unrelated user changes out of commits.
+- After requested changes pass verification, create a focused commit before reporting completion. Stage only files or hunks belonging to the current task and inspect the staged diff first. Never include unrelated user changes, generated outputs, or secrets. If task changes cannot be safely isolated, do not commit; explain the blocker.
 
 ## Delegation
 
