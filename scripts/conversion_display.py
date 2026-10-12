@@ -101,8 +101,10 @@ class Display:
                          f"{time.monotonic() - self.started:.1f}s"))
         parent_names = set(self.parents.values())
         priorities = {
-            name: (2 if row.state in ("done", "cached") else
-                   0 if row.state in ACTIVE_STATES else 1)
+            name: (0 if name in ("Toolchain", "Bundle scan") else
+                   1 if row.state in ACTIVE_STATES else
+                   2 if row.state == "queued" else
+                   4 if row.state in ("done", "cached") else 3)
             for name, row in self.rows.items()
         }
         for _ in range(len(self.parents)):
