@@ -645,6 +645,14 @@ IMPORT(tmpnam) {
   if(address){memcpy(guest(arena,address,L_tmpnam),name,strlen(name)+1);call.result(address);}
   else call.result(owned_string(arena,name));
 }
+IMPORT(tempnam) {
+  CALL;
+  char *name = ::tempnam(call.word(0) ? text(arena, call.word(0)) : nullptr,
+                         call.word(1) ? text(arena, call.word(1)) : nullptr);
+  const uint32_t result = owned_string(arena, name);
+  free(name);
+  call.result(result);
+}
 IMPORT(mkstemp) {
   CALL;
   const uint32_t address = call.word(0);

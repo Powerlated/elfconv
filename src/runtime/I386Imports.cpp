@@ -1595,6 +1595,46 @@ IMPORT(fgets) {
   auto *buffer = static_cast<char *>(guest(arena, call.word(0), size));
   call.result(fgets(buffer, size, stream(call.word(2))) ? call.word(0) : 0);
 }
+IMPORT(getline) {
+  CALL;
+  const uint32_t line_slot = call.word(0), capacity_slot = call.word(1);
+  FILE *file = stream(call.word(2));
+  uint32_t buffer, capacity;
+  memcpy(&buffer, guest(arena, line_slot, 4), 4);
+  memcpy(&capacity, guest(arena, capacity_slot, 4), 4);
+  size_t length = 0;
+  for (;;) {
+    const int character = fgetc(file);
+    if (character == EOF) {
+      if (!length) { call.result(-1); return; }
+      break;
+    }
+    if (length > UINT32_MAX - 2) { errno = EOVERFLOW; call.result(-1); return; }
+    const uint32_t required = uint32_t(length + 2);
+    if (required > capacity) {
+      uint32_t new_capacity = capacity ? capacity : 128;
+      while (new_capacity < required) {
+        if (new_capacity > UINT32_MAX / 2) { new_capacity = required; break; }
+        new_capacity *= 2;
+      }
+      const uint32_t replacement = allocate(new_capacity);
+      if (!replacement) { errno = ENOMEM; call.result(-1); return; }
+      const uint32_t preserved = buffer ? std::min(capacity, new_capacity) : 0;
+      if (preserved)
+        memcpy(guest(arena, replacement, preserved), guest(arena, buffer, preserved), preserved);
+      if (buffer) release(buffer);
+      buffer = replacement;
+      capacity = new_capacity;
+    }
+    static_cast<char *>(guest(arena, buffer + uint32_t(length), 1))[0] = char(character);
+    ++length;
+    if (character == '\n') break;
+  }
+  static_cast<char *>(guest(arena, buffer + uint32_t(length), 1))[0] = '\0';
+  memcpy(guest(arena, line_slot, 4), &buffer, 4);
+  memcpy(guest(arena, capacity_slot, 4), &capacity, 4);
+  call.result(int32_t(length));
+}
 IMPORT(fgets_unlocked) {
   CALL;
   const uint32_t destination = call.word(0);

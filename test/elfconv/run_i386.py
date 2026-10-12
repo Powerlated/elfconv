@@ -48,6 +48,8 @@ def main():
                         help='Link with pthread support and enable Emscripten pthreads')
     parser.add_argument('--no-asyncify', action='store_true',
                         help='Disable Asyncify for the converted test binary')
+    parser.add_argument('--normalize-tempnam-output', action='store_true',
+                        help='Ignore process-specific tempnam values in fixture output')
     parser.add_argument('--browser', action='store_true',
                         help='Run lifted output in Chromium using the browser test harness')
     parser.add_argument('--compare-stderr', action='store_true',
@@ -238,6 +240,11 @@ def main():
         lifted_returncode = lifted.returncode
     expected = native.stdout.splitlines(keepends=True)
     actual = lifted_stdout.splitlines(keepends=True)
+    if args.normalize_tempnam_output:
+        expected = ['file: <tempnam>\n' if line.startswith('file: ') else line
+                    for line in expected]
+        actual = ['file: <tempnam>\n' if line.startswith('file: ') else line
+                  for line in actual]
     differences = list(difflib.unified_diff(expected, actual,
                        fromfile='native', tofile='lifted'))
     (output / 'output.diff').write_text(''.join(differences))
