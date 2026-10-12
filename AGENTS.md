@@ -82,6 +82,7 @@
 
 ## Environment safety
 
+- If a required i386 compiler, sysroot, or development library is unavailable, acquire a pinned toolchain/sysroot under `~/.local/opt/` instead of requiring host-wide package installation. Record its source and version; never overwrite an existing user toolchain.
 - Steam: non-root user; writable runtime directories. Never store credentials in tracked files or chat.
 - Use `~/emsdk-6` (Emscripten 6.0.12, LLVM 24) for compiling and linking Wasm from LLVM 23 bitcode. Source `~/emsdk-6/emsdk_env.sh`; its `emcc` and `em++` are under `~/emsdk-6/upstream/emscripten`.
 - Do not use `~/emsdk` (Emscripten 4.0.9, LLVM 21) with LLVM 23 bitcode; its reader rejects LLVM 23 attributes.
