@@ -114,6 +114,15 @@ IMPORT(__strtok_r) {
   memcpy(guest(arena, slot, 4), &next, 4);
   call.result(token ? guest_offset(arena, token) : 0);
 }
+IMPORT(wprintf) {
+  CALL;
+  const auto output = wide_format(arena, wide_text(arena, call.word(0)),
+                                 {arena, call.stack + 8});
+  for (wchar_t character : output) {
+    if (fputwc(character, stdout) == WEOF) { call.result(-1); return; }
+  }
+  call.result(output.size());
+}
 IMPORT(swprintf) {
   CALL;
   const uint32_t capacity = call.word(1);

@@ -21,6 +21,7 @@
 #include <cstring>
 #include <cctype>
 #include <cmath>
+#include <fenv.h>
 #include <fcntl.h>
 #include <strings.h>
 #include <dirent.h>
@@ -68,6 +69,19 @@ ssize_t zero_device_read(void *, char *buffer, size_t size) {
 }
 ssize_t zero_device_write(void *, const char *, size_t size) { return ssize_t(size); }
 int zero_device_close(void *) { return 0; }
+ssize_t zero_length_memfile_read(void *, char *, size_t) { return 0; }
+int zero_length_memfile_seek(void *, off64_t *offset, int whence) {
+  if (*offset != 0 || (whence != SEEK_SET && whence != SEEK_CUR && whence != SEEK_END)) {
+    errno = EINVAL;
+    return -1;
+  }
+  *offset = 0;
+  return 0;
+}
+ssize_t zero_length_memfile_write(void *, const char *, size_t) {
+  errno = ENOSPC;
+  return -1;
+}
 int zero_device_seek(void *, off_t *, int) { errno = ESPIPE; return -1; }
 void *guest(uint8_t *arena, uint32_t address, size_t length) {
   if (address < NULL_GUARD_SIZE || address >= MEMORY_ARENA_SIZE ||
@@ -486,6 +500,7 @@ uint32_t register_guest_adapter(uint8_t *arena, RuntimeManager *runtime, LiftedF
 std::map<std::string, uint32_t, std::less<>> environment_values;
 std::map<uint32_t, FILE *> files;
 uint32_t next_file = 0x1000;
+std::map<int, off_t> closed_stream_offsets;
 struct VirtualDatagramPair {
   std::deque<std::vector<char>> incoming[2];
   bool closed[2] = {false, false};
@@ -578,6 +593,11 @@ ssize_t guest_cookie_read(void *opaque, char *buffer, size_t size) {
   if (result > 0) {
     if (size_t(result) > size) result = int32_t(size);
     memcpy(buffer, guest(cookie->arena, address, uint32_t(result)), size_t(result));
+  } else if (result < 0 && cookie->state->addr.gs_base.dword) {
+    int32_t guest_errno;
+    memcpy(&guest_errno,
+           guest(cookie->arena, cookie->state->addr.gs_base.dword + guest_errno_offset, 4), 4);
+    errno = i386_errno_to_host(guest_errno);
   }
   if (address) release(address);
   return result;
@@ -690,6 +710,7 @@ struct FormatOutput {
     buffer.append(data, size);
     count += size;
   }
+  void append(Char value) { append(&value, 1); }
 };
 template<typename Char, typename T>
 void append_format(FormatOutput<Char> &out, const std::basic_string<Char> &spec, T value) {
@@ -753,6 +774,84 @@ void append_wide_numeric_format(FormatOutput<wchar_t> &out, const std::wstring &
   out.append(wide.data(), wide_size);
 }
 template<typename Char>
+void append_binary_format(FormatOutput<Char> &out, uint64_t value, char conversion,
+                          bool alternate, bool left, bool zero, int width, int precision) {
+  Char digits[64];
+  size_t count = 0;
+  if (value || precision != 0) {
+    do {
+      digits[count++] = Char('0' + (value & 1));
+      value >>= 1;
+    } while (value);
+  }
+  while (precision > 0 && count < size_t(precision)) digits[count++] = '0';
+  const bool prefix = alternate && count && digits[0] != '0' ? true
+      : alternate && count && (count > 1 || digits[0] != '0');
+  const int prefix_size = prefix ? 2 : 0;
+  int padding = width > int(count) + prefix_size ? width - int(count) - prefix_size : 0;
+  const bool zero_padding = zero && !left && precision < 0;
+  if (!left && !zero_padding)
+    while (padding-- > 0) out.append(Char(' '));
+  if (prefix) {
+    out.append(Char('0'));
+    out.append(Char(conversion == 'B' ? 'B' : 'b'));
+  }
+  if (zero_padding)
+    while (padding-- > 0) out.append(Char('0'));
+  while (count) out.append(digits[--count]);
+  if (left)
+    while (padding-- > 0) out.append(Char(' '));
+}
+std::map<char, bool> registered_printf_sizes;
+template<typename Char>
+void append_size_format(FormatOutput<Char> &out, double value, char conversion,
+                        bool alternate, bool left, bool zero, bool plus, bool space,
+                        int width, int precision) {
+  const bool decimal = conversion == 'B';
+  const double divisor = decimal ? 1000.0 : 1024.0;
+  const char *units = decimal ? " KMGTPEZY" : " kmgtpezy";
+  char unit = *units;
+  while (value >= divisor && units[1]) {
+    value /= divisor;
+    ++units;
+    unit = *units;
+  }
+  if (precision < 0) precision = 3;
+  std::string spec("%");
+  if (plus) spec += '+';
+  else if (space) spec += ' ';
+  if (alternate) spec += '#';
+  spec += '.';
+  spec += std::to_string(precision);
+  spec += 'f';
+  char small[256];
+  int size = snprintf(small, sizeof(small), spec.c_str(), value);
+  if (size < 0) { out.fail(errno); return; }
+  std::vector<char> large;
+  const char *number = small;
+  if (size >= int(sizeof(small))) {
+    large.resize(size_t(size) + 1);
+    snprintf(large.data(), large.size(), spec.c_str(), value);
+    number = large.data();
+  }
+  const int total = size + 1;
+  int padding = width > total ? width - total : 0;
+  const bool zero_padding = zero && !left;
+  if (!left && !zero_padding)
+    while (padding-- > 0) out.append(Char(' '));
+  int offset = 0;
+  if (zero_padding && size && (number[0] == '+' || number[0] == '-' || number[0] == ' ')) {
+    out.append(Char(number[0]));
+    offset = 1;
+  }
+  if (zero_padding)
+    while (padding-- > 0) out.append(Char('0'));
+  for (int i = offset; i < size; ++i) out.append(Char(number[i]));
+  out.append(Char(unit));
+  if (left)
+    while (padding-- > 0) out.append(Char(' '));
+}
+template<typename Char>
 void format_impl(uint8_t *arena, const Char *input, Arguments args, FormatOutput<Char> &out) {
   const int error_number = errno;
   auto ascii = [](Char value, const char *set) {
@@ -801,10 +900,18 @@ void format_impl(uint8_t *arena, const Char *input, Arguments args, FormatOutput
       if (invalid_position) { out.clear(); out.fail(EOVERFLOW); return; }
       value_arguments = &positional_value;
     }
-    while (ascii(*p, "-+ #0I")) {
+    bool flag_alternate = false, flag_left = false, flag_zero = false;
+    bool flag_plus = false, flag_space = false;
+    while (ascii(*p, "-+ #0I'")) {
       if (*p != 'I') spec += *p;
+      flag_alternate |= *p == '#';
+      flag_left |= *p == '-';
+      flag_zero |= *p == '0';
+      flag_plus |= *p == '+';
+      flag_space |= *p == ' ';
       ++p;
     }
+    int field_width = -1;
     if (*p == '*') {
       ++p;
       uint64_t width_position;
@@ -815,10 +922,18 @@ void format_impl(uint8_t *arena, const Char *input, Arguments args, FormatOutput
         width = int32_t(positional_width.word());
       } else width = int32_t(args.word());
       if (width == INT32_MIN) elfconv_runtime_error("Guest printf width overflow.\n");
-      if (width < 0) { spec += '-'; width = -width; }
+      if (width < 0) { spec += '-'; flag_left = true; width = -width; }
+      field_width = width;
       const auto digits = std::to_string(width);
       spec.append(digits.begin(), digits.end());
-    } else while (*p >= '0' && *p <= '9') spec += *p++;
+    } else {
+      while (*p >= '0' && *p <= '9') {
+        const int digit = int(*p - '0');
+        field_width = field_width < 0 ? digit : std::min(INT_MAX, field_width * 10 + digit);
+        spec += *p++;
+      }
+    }
+    int field_precision = -1;
     if (*p == '.') {
       ++p;
       if (*p == '*') {
@@ -831,17 +946,37 @@ void format_impl(uint8_t *arena, const Char *input, Arguments args, FormatOutput
           precision = int32_t(positional_precision.word());
         } else precision = int32_t(args.word());
         if (precision >= 0) {
+          field_precision = precision;
           spec += '.';
           const auto digits = std::to_string(precision);
           spec.append(digits.begin(), digits.end());
         }
       } else {
+        field_precision = 0;
         spec += '.';
-        while (*p >= '0' && *p <= '9') spec += *p++;
+        while (*p >= '0' && *p <= '9') {
+          field_precision = std::min(INT_MAX, field_precision * 10 + int(*p - '0'));
+          spec += *p++;
+        }
       }
     }
     char length = 0;
-    if (ascii(*p, "hljztLZ")) {
+    unsigned bit_width = 0;
+    if (*p == 'w') {
+      ++p;
+      length = 'w';
+      if (*p == 'f') { ++p; length = 'W'; }
+      while (*p >= '0' && *p <= '9') {
+        bit_width = std::min(1024u, bit_width * 10 + unsigned(*p++ - '0'));
+      }
+      if (!bit_width || (bit_width != 8 && bit_width != 16 && bit_width != 32 && bit_width != 64)) {
+        if (out.stream) out.fail(EINVAL);
+        else { out.clear(); out.fail(EINVAL); }
+        errno = EINVAL;
+        return;
+      }
+      if (length == 'W' && bit_width == 16) bit_width = 32;
+    } else if (ascii(*p, "hljztLZ")) {
       length = char(*p++);
       if (*p == length && (length == 'h' || length == 'l')) {
         ++p;
@@ -850,18 +985,40 @@ void format_impl(uint8_t *arena, const Char *input, Arguments args, FormatOutput
     }
     const char conversion = char(*p++);
     if (!conversion) elfconv_runtime_error("Incomplete guest printf format.\n");
-    if (strchr("diuoxX", conversion)) {
-      bool wide = length == 'q' || length == 'j';
+    if ((conversion == 'b' || conversion == 'B') && !length &&
+        registered_printf_sizes.find(conversion) != registered_printf_sizes.end()) {
+      const uint64_t bits = value_arguments->wide();
+      double value;
+      memcpy(&value, &bits, sizeof(value));
+      append_size_format(out, value, conversion, flag_alternate, flag_left, flag_zero,
+                         flag_plus, flag_space, field_width, field_precision);
+    } else if (strchr("diuoxXbB", conversion)) {
+      const bool wide = length == 'q' || length == 'j' || bit_width > 32;
       uint64_t value = wide ? value_arguments->wide() : value_arguments->word();
-      if (length == 'h') value = uint16_t(value);
-      if (length == 'H') value = uint8_t(value);
-      spec += 'l'; spec += 'l'; spec += conversion;
-      if (conversion == 'd' || conversion == 'i') {
-        int64_t signed_value = wide ? int64_t(value) : int32_t(value);
-        if (length == 'h') signed_value = int16_t(value);
-        if (length == 'H') signed_value = int8_t(value);
-        append_format(out, spec, static_cast<long long>(signed_value));
-      } else append_format(out, spec, static_cast<unsigned long long>(value));
+      if (bit_width) {
+        if (bit_width > 64) elfconv_runtime_error("Unsupported guest printf bit width.\n");
+        const uint64_t mask = bit_width == 64 ? UINT64_MAX : (UINT64_C(1) << bit_width) - 1;
+        value &= mask;
+      } else {
+        if (length == 'h') value = uint16_t(value);
+        if (length == 'H') value = uint8_t(value);
+      }
+      if (conversion == 'b' || conversion == 'B') {
+        append_binary_format(out, value, conversion, flag_alternate, flag_left, flag_zero,
+                             field_width, field_precision);
+      } else {
+        spec += 'l'; spec += 'l'; spec += conversion;
+        if (conversion == 'd' || conversion == 'i') {
+          int64_t signed_value = wide ? int64_t(value) : int32_t(value);
+          if (bit_width && bit_width < 64) {
+            const uint64_t sign = UINT64_C(1) << (bit_width - 1);
+            signed_value = int64_t((value ^ sign) - sign);
+          }
+          if (!bit_width && length == 'h') signed_value = int16_t(value);
+          if (!bit_width && length == 'H') signed_value = int8_t(value);
+          append_format(out, spec, static_cast<long long>(signed_value));
+        } else append_format(out, spec, static_cast<unsigned long long>(value));
+      }
     } else if (strchr("aAeEfFgG", conversion)) {
       double value;
       if (length == 'L') {
@@ -912,7 +1069,8 @@ void format_impl(uint8_t *arena, const Char *input, Arguments args, FormatOutput
     } else if (conversion == 'n') {
       const uint32_t address = value_arguments->word();
       const uint64_t count = out.count;
-      const size_t size = length == 'q' || length == 'j' ? 8 : length == 'h' ? 2 : length == 'H' ? 1 : 4;
+      const size_t size = bit_width ? bit_width / 8
+          : length == 'q' || length == 'j' ? 8 : length == 'h' ? 2 : length == 'H' ? 1 : 4;
       memcpy(guest(arena, address, size), &count, size);
     } else if (conversion == 'm' && !length) {
       const char *message = strerror(error_number);
@@ -1446,7 +1604,137 @@ IMPORT(fwrite) {
   if (!size || !count) { call.result(0); return; }
   uint64_t length = uint64_t(size) * count;
   if (length > MEMORY_ARENA_SIZE) elfconv_runtime_error("Guest fwrite buffer is too large.\n");
-  call.result(fwrite(guest(arena, call.word(0), length), size, count, stream(call.word(3))));
+  FILE *file = stream(call.word(3));
+  const size_t result = fwrite(guest(arena, call.word(0), length), size, count, file);
+  if (result < count && ferror(file) && !errno) errno = EBADF;
+  call.result(result);
+}
+void obstack_newchunk(uint8_t *arena, uint32_t handle, uint32_t needed) {
+  uint32_t fields[11]{};
+  memcpy(fields, guest(arena, handle, sizeof(fields)), sizeof(fields));
+  const uint32_t old_chunk = fields[1], object_base = fields[2], next_free = fields[3];
+  const uint32_t chunk_size = fields[0];
+  if (!old_chunk || next_free < object_base) elfconv_runtime_error("Invalid guest obstack state.\n");
+  const uint32_t used = next_free - object_base;
+  const uint64_t requested = uint64_t(used) + needed + fields[6] + 1;
+  const uint32_t capacity = uint32_t(std::max<uint64_t>(chunk_size, requested));
+  if (capacity > UINT32_MAX - 8) elfconv_runtime_error("Guest obstack chunk is too large.\n");
+  const uint32_t chunk = allocate(capacity + 8);
+  if (!chunk) elfconv_runtime_error("Guest obstack allocation failed.\n");
+  uint8_t *header = static_cast<uint8_t *>(guest(arena, chunk, capacity + 8));
+  const uint32_t limit = chunk + 8 + capacity;
+  memcpy(header, &limit, 4);
+  memcpy(header + 4, &old_chunk, 4);
+  if (used) memcpy(header + 8, guest(arena, object_base, used), used);
+  fields[1] = chunk;
+  fields[2] = chunk + 8;
+  fields[3] = chunk + 8 + used;
+  fields[4] = limit;
+  memcpy(guest(arena, handle, sizeof(fields)), fields, sizeof(fields));
+}
+IMPORT(_obstack_begin) {
+  CALL;
+  const uint32_t handle = call.word(0);
+  const uint32_t capacity = call.word(1) ? call.word(1) : 4096;
+  const uint32_t alignment = call.word(2) ? call.word(2) - 1 : 7;
+  if (capacity > UINT32_MAX - 8) { errno = ENOMEM; call.result(0); return; }
+  const uint32_t chunk = allocate(capacity + 8);
+  if (!chunk) { call.result(0); return; }
+  uint32_t fields[11]{};
+  fields[0] = capacity;
+  fields[1] = chunk;
+  fields[2] = fields[3] = chunk + 8;
+  fields[4] = chunk + 8 + capacity;
+  fields[6] = alignment;
+  memcpy(guest(arena, chunk, 8), &fields[4], 4);
+  const uint32_t previous = 0;
+  memcpy(guest(arena, chunk + 4, 4), &previous, 4);
+  memcpy(guest(arena, handle, sizeof(fields)), fields, sizeof(fields));
+  call.result(1);
+}
+IMPORT(_obstack_newchunk) {
+  CALL;
+  obstack_newchunk(arena, call.word(0), call.word(1));
+}
+IMPORT(obstack_printf) {
+  CALL;
+  int error = 0;
+  const std::string output = format(arena, text(arena, call.word(1)),
+                                    {arena, call.stack + 12}, &error);
+  if (error) { errno = error; call.result(-1); return; }
+  const uint32_t handle = call.word(0);
+  uint32_t next_free, chunk_limit;
+  memcpy(&next_free, guest(arena, handle + 12, 4), 4);
+  memcpy(&chunk_limit, guest(arena, handle + 16, 4), 4);
+  if (output.size() > chunk_limit - next_free)
+    obstack_newchunk(arena, handle, uint32_t(output.size()));
+  memcpy(&next_free, guest(arena, handle + 12, 4), 4);
+  memcpy(guest(arena, next_free, output.size()), output.data(), output.size());
+  next_free += uint32_t(output.size());
+  memcpy(guest(arena, handle + 12, 4), &next_free, 4);
+  call.result(output.size());
+}
+IMPORT(mcheck_check_all) {
+  CALL;
+  std::lock_guard<std::recursive_mutex> lock(allocation_mutex);
+  uint64_t end = 0;
+  for (const auto &entry : allocations) {
+    if (entry.first < end || !entry.second.size ||
+        uint64_t(entry.first) + entry.second.size > MEMORY_ARENA_SIZE)
+      elfconv_runtime_error("Guest heap metadata is corrupt.\n");
+    end = uint64_t(entry.first) + entry.second.size;
+  }
+}
+IMPORT(mcheck_pedantic) {
+  CALL;
+  std::lock_guard<std::recursive_mutex> lock(allocation_mutex);
+  uint64_t end = 0;
+  for (const auto &entry : allocations) {
+    if (entry.first < end || !entry.second.size ||
+        uint64_t(entry.first) + entry.second.size > MEMORY_ARENA_SIZE)
+      elfconv_runtime_error("Guest heap metadata is corrupt.\n");
+    end = uint64_t(entry.first) + entry.second.size;
+  }
+  call.result(0);
+}
+IMPORT(register_printf_function) {
+  CALL;
+  const int spec = int32_t(call.word(0));
+  if (spec <= 0 || spec > 127 || !call.word(1) || !call.word(2)) {
+    errno = EINVAL;
+    call.result(-1);
+    return;
+  }
+  registered_printf_sizes[char(spec)] = true;
+  call.result(0);
+}
+IMPORT(printf_size_info) {
+  CALL;
+  if (call.word(1)) {
+    const int32_t type = 6;
+    memcpy(guest(arena, call.word(2), 4), &type, 4);
+  }
+  call.result(1);
+}
+IMPORT(printf_size) {
+  CALL;
+  const uint32_t info = call.word(1), args_address = call.word(2);
+  int32_t precision, width;
+  uint32_t spec, flags;
+  memcpy(&precision, guest(arena, info, 4), 4);
+  memcpy(&width, guest(arena, info + 4, 4), 4);
+  memcpy(&spec, guest(arena, info + 8, 4), 4);
+  memcpy(&flags, guest(arena, info + 12, 4), 4);
+  uint32_t value_address;
+  memcpy(&value_address, guest(arena, args_address, 4), 4);
+  double value;
+  memcpy(&value, guest(arena, value_address, 8), 8);
+  FormatOutput<char> output;
+  output.stream = stream(call.word(0));
+  append_size_format(output, value, char(spec), flags & (1u << 3), flags & (1u << 5),
+                     false, flags & (1u << 6), flags & (1u << 4), width, precision);
+  if (output.error) { errno = output.error; call.result(-1); }
+  else call.result(output.count);
 }
 IMPORT(malloc) { CALL; call.result(allocate(call.word(0))); }
 IMPORT(free) { CALL; release(call.word(0)); }
@@ -1623,6 +1911,7 @@ IMPORT(fopen) {
   } else {
     file = fopen(path, mode);
   }
+  if (file && mode[0] == 'a' && !strchr(mode, '+')) (void) fseek(file, 0, SEEK_END);
   if (!file) { call.result(0); return; }
   uint32_t handle = next_file++;
   files.emplace(handle, file);
@@ -1672,6 +1961,9 @@ IMPORT(fclose) {
   CALL;
   const uint32_t handle = call.word(0);
   FILE *file = stream(handle);
+  const int descriptor = fileno(file);
+  const off_t position = ftello(file);
+  if (descriptor >= 0 && position >= 0) closed_stream_offsets[descriptor] = position;
   int result = fclose(file);
   auto mem = memstreams.find(handle);
   if (mem != memstreams.end()) {
@@ -1687,9 +1979,13 @@ IMPORT(fread) {
   uint32_t size = call.word(1), count = call.word(2);
   if (!size || !count) { call.result(0); return; }
   uint64_t length = uint64_t(size) * count;
-  call.result(fread(guest(arena, call.word(0), length), size, count, stream(call.word(3))));
+  FILE *file = stream(call.word(3));
+  const size_t result = fread(guest(arena, call.word(0), length), size, count, file);
+  if (result < count && ferror(file) && !errno) errno = EBADF;
+  call.result(result);
 }
 IMPORT(fseek) { CALL; call.result(fseek(stream(call.word(0)), int32_t(call.word(1)), call.word(2))); }
+IMPORT(fseeko) { CALL; call.result(fseeko(stream(call.word(0)), int32_t(call.word(1)), call.word(2))); }
 IMPORT(ftell) {
   CALL;
   FILE *file = stream(call.word(0));
@@ -1704,10 +2000,70 @@ IMPORT(fseeko64) {
   call.result(fseeko(stream(call.word(0)), int64_t(call.wide(1)), int32_t(call.word(3))));
 }
 IMPORT(ftello64) { CALL; call.result64(ftello(stream(call.word(0)))); }
+IMPORT(fgetpos) {
+  CALL;
+  const off_t position = ftello(stream(call.word(0)));
+  if (position < INT32_MIN || position > INT32_MAX) {
+    errno = EOVERFLOW;
+    call.result(-1);
+    return;
+  }
+  const int32_t guest_position = int32_t(position);
+  memcpy(guest(arena, call.word(1), 4), &guest_position, 4);
+  call.result(0);
+}
+IMPORT(fsetpos) {
+  CALL;
+  int32_t position;
+  memcpy(&position, guest(arena, call.word(1), 4), 4);
+  call.result(fseeko(stream(call.word(0)), position, SEEK_SET));
+}
+IMPORT(fgetpos64) {
+  CALL;
+  const int64_t position = ftello(stream(call.word(0)));
+  if (position == -1) { call.result(-1); return; }
+  memcpy(guest(arena, call.word(1), 8), &position, 8);
+  call.result(0);
+}
+IMPORT(fsetpos64) {
+  CALL;
+  int64_t position;
+  memcpy(&position, guest(arena, call.word(1), 8), 8);
+  call.result(fseeko(stream(call.word(0)), position, SEEK_SET));
+}
+IMPORT(fegetround) { CALL; call.result(fegetround()); }
+#if defined(__EMSCRIPTEN__)
+IMPORT(fesetround) {
+  CALL;
+  const int mode = int32_t(call.word(0));
+  if (mode != FE_TONEAREST) { errno = ENOTSUP; call.result(-1); }
+  else call.result(0);
+}
+#else
+IMPORT(fesetround) { CALL; call.result(fesetround(int32_t(call.word(0)))); }
+#endif
+off_t guest_lseek(int fd, off_t offset, int whence) {
+  if (!offset && whence == SEEK_CUR) {
+    for (auto it = files.rbegin(); it != files.rend(); ++it) {
+      if (fileno(it->second) == fd) {
+        const off_t position = ftello(it->second);
+        if (position >= 0) return ::lseek(fd, position, SEEK_SET);
+      }
+    }
+    auto it = closed_stream_offsets.find(fd);
+    if (it != closed_stream_offsets.end()) {
+      const off_t position = it->second;
+      closed_stream_offsets.erase(it);
+      return ::lseek(fd, position, SEEK_SET);
+    }
+  }
+  closed_stream_offsets.erase(fd);
+  return ::lseek(fd, offset, whence);
+}
 IMPORT(lseek) {
   CALL;
-  const off_t result = lseek(int32_t(call.word(0)), int32_t(call.word(1)),
-                             int32_t(call.word(2)));
+  const off_t result = guest_lseek(int32_t(call.word(0)), int32_t(call.word(1)),
+                                   int32_t(call.word(2)));
   if (result > INT32_MAX || result < INT32_MIN) {
     errno = EOVERFLOW;
     call.result(-1);
@@ -1717,7 +2073,8 @@ IMPORT(lseek) {
 }
 IMPORT(lseek64) {
   CALL;
-  call.result64(lseek(int32_t(call.word(0)), int64_t(call.wide(1)), int32_t(call.word(3))));
+  call.result64(guest_lseek(int32_t(call.word(0)), int64_t(call.wide(1)),
+                           int32_t(call.word(3))));
 }
 IMPORT(feof) { CALL; call.result(feof(stream(call.word(0)))); }
 IMPORT(rewind) { CALL; rewind(stream(call.word(0))); }
@@ -1725,8 +2082,21 @@ IMPORT(fflush) {
   CALL;
   const uint32_t handle = call.word(0);
   int result = fflush(handle ? stream(handle) : nullptr);
-  if (result == 0)
-    result = handle ? sync_memstream(arena, handle) : sync_memstreams(arena);
+  if (result == 0) {
+    if (handle) {
+      FILE *file = stream(handle);
+      const int saved_errno = errno;
+      if (fseek(file, 0, SEEK_CUR) != 0) { clearerr(file); errno = saved_errno; }
+      result = sync_memstream(arena, handle);
+    } else {
+      for (const auto &entry : files) {
+        const int saved_errno = errno;
+        if (fseek(entry.second, 0, SEEK_CUR) != 0) clearerr(entry.second);
+        errno = saved_errno;
+      }
+      result = sync_memstreams(arena);
+    }
+  }
   call.result(result);
 }
 IMPORT(fgetc) { CALL; call.result(fgetc(stream(call.word(0)))); }
@@ -1738,8 +2108,20 @@ IMPORT(fileno) { CALL; call.result(fileno(stream(call.word(0)))); }
 IMPORT(fmemopen) {
   CALL;
   const uint32_t buffer_address = call.word(0), size = call.word(1);
-  FILE *file = fmemopen(buffer_address ? guest(arena, buffer_address, size) : nullptr,
-                        size, text(arena, call.word(2)));
+  const char *mode = text(arena, call.word(2));
+  if (buffer_address && mode[0] == 'w' && strchr(mode, '+'))
+    *static_cast<char *>(guest(arena, buffer_address, 1)) = 0;
+  FILE *file;
+  if (size == 0) {
+    cookie_io_functions_t io{};
+    if (mode[0] == 'r' || strchr(mode, '+')) io.read = zero_length_memfile_read;
+    if (mode[0] != 'r' || strchr(mode, '+')) io.write = zero_length_memfile_write;
+    io.seek = zero_length_memfile_seek;
+    io.close = zero_device_close;
+    file = fopencookie(nullptr, mode, io);
+  } else {
+    file = fmemopen(buffer_address ? guest(arena, buffer_address, size) : nullptr, size, mode);
+  }
   if (!file) { call.result(0); return; }
   const uint32_t handle = next_file++;
   files.emplace(handle, file);
@@ -1783,16 +2165,41 @@ IMPORT(fgets) {
   CALL;
   const int size = int32_t(call.word(1));
   if (size <= 0) { call.result(0); return; }
-  auto *buffer = static_cast<char *>(guest(arena, call.word(0), size));
-  call.result(fgets(buffer, size, stream(call.word(2))) ? call.word(0) : 0);
+  FILE *file = stream(call.word(2));
+  const uint32_t destination = call.word(0);
+  if (!destination) {
+    const int character = fgetc(file);
+    if (character == EOF) { call.result(0); return; }
+    ungetc(character, file);
+    errno = EFAULT;
+    call.result(0);
+    return;
+  }
+  auto *buffer = static_cast<char *>(guest(arena, destination, size));
+  call.result(fgets(buffer, size, file) ? destination : 0);
 }
 IMPORT(getline) {
   CALL;
   const uint32_t line_slot = call.word(0), capacity_slot = call.word(1);
   FILE *file = stream(call.word(2));
+  if (!line_slot || !capacity_slot) {
+    errno = EINVAL;
+    (void) fputc(0, file);
+    errno = EINVAL;
+    call.result(-1);
+    return;
+  }
   uint32_t buffer, capacity;
   memcpy(&buffer, guest(arena, line_slot, 4), 4);
   memcpy(&capacity, guest(arena, capacity_slot, 4), 4);
+  if (!buffer) {
+    capacity = 128;
+    buffer = allocate(capacity);
+    if (!buffer) { errno = ENOMEM; call.result(-1); return; }
+    memcpy(guest(arena, line_slot, 4), &buffer, 4);
+    memcpy(guest(arena, capacity_slot, 4), &capacity, 4);
+  }
+  if (ferror(file)) { call.result(-1); return; }
   size_t length = 0;
   for (;;) {
     const int character = fgetc(file);
@@ -1835,7 +2242,46 @@ IMPORT(fgets_unlocked) {
   call.result(fgets(buffer, size, stream(call.word(2))) ? destination : 0);
 }
 IMPORT(fputs) { CALL; call.result(fputs(text(arena, call.word(0)), stream(call.word(1)))); }
-IMPORT(perror) { CALL; perror(call.word(0) ? text(arena, call.word(0)) : nullptr); }
+IMPORT(perror) {
+  CALL;
+  const int saved_errno = errno;
+  std::string message;
+  if (call.word(0)) {
+    message = text(arena, call.word(0));
+    message += ": ";
+  }
+  const char *description = saved_errno == EILSEQ
+      ? "Invalid or incomplete multibyte or wide character" : strerror(saved_errno);
+  message += description;
+  message += '\n';
+  FILE *target = stderr;
+  for (auto it = files.rbegin(); it != files.rend(); ++it) {
+    if (fileno(it->second) == STDERR_FILENO) {
+      target = it->second;
+      break;
+    }
+  }
+  if (target) fflush(target);
+  const int fd = target && fileno(target) >= 0 ? fileno(target) : STDERR_FILENO;
+  size_t offset = 0;
+  while (offset < message.size()) {
+    const ssize_t written = ::write(fd, message.data() + offset, message.size() - offset);
+    if (written < 0) break;
+    offset += size_t(written);
+  }
+  errno = saved_errno;
+}
+IMPORT(error) {
+  CALL;
+  int format_error = 0;
+  const auto message = format(arena, text(arena, call.word(2)),
+                              {arena, call.stack + 16}, &format_error);
+  if (format_error) errno = format_error;
+  fprintf(stderr, "%s", message.c_str());
+  if (call.word(1)) fprintf(stderr, ": %s", strerror(i386_errno_to_host(call.word(1))));
+  fputc('\n', stderr);
+  if (call.word(0)) exit(call.word(0));
+}
 IMPORT(fdopen) {
   CALL;
   const int fd = int32_t(call.word(0));
@@ -1863,6 +2309,8 @@ IMPORT(setvbuf) {
   call.result(setvbuf(stream(call.word(0)), address ? static_cast<char *>(guest(arena, address, size)) : nullptr,
                      call.word(2), size));
 }
+IMPORT(setlinebuf) { CALL; call.result(setvbuf(stream(call.word(0)), nullptr, _IOLBF, 0)); }
+IMPORT(fwide) { CALL; call.result(fwide(stream(call.word(0)), int32_t(call.word(1)))); }
 IMPORT(_exit) { CALL; _Exit(int32_t(call.word(0))); }
 IMPORT(fputc) { CALL; call.result(fputc(call.word(0), stream(call.word(1)))); }
 IMPORT(putc) { CALL; call.result(putc(int32_t(call.word(0)), stream(call.word(1)))); }
@@ -1976,6 +2424,22 @@ IMPORT(vsnprintf) { CALL; buffer_format(call, true, true); }
 IMPORT(__snprintf_chk) { CALL; buffer_format(call, true, false, true); }
 IMPORT(__sprintf_chk) { CALL; buffer_format(call, false, false, true); }
 IMPORT(__vsnprintf_chk) { CALL; buffer_format(call, true, true, true); }
+IMPORT(asprintf) {
+  CALL;
+  const uint32_t output = call.word(0);
+  const uint32_t null_pointer = 0;
+  memcpy(guest(arena, output, 4), &null_pointer, 4);
+  int format_error = 0;
+  auto result = format(arena, text(arena, call.word(1)), {arena, call.stack + 12}, &format_error);
+  if (format_error) { errno = format_error; call.result(-1); return; }
+  const uint32_t address = allocate(uint32_t(result.size() + 1));
+  if (!address) { call.result(-1); return; }
+  auto *buffer = static_cast<char *>(guest(arena, address, result.size() + 1));
+  memcpy(buffer, result.data(), result.size());
+  buffer[result.size()] = 0;
+  memcpy(guest(arena, output, 4), &address, 4);
+  call.result(uint32_t(result.size()));
+}
 IMPORT(vasprintf) {
   CALL;
   const uint32_t output = call.word(0);
@@ -2174,6 +2638,13 @@ IMPORT(fstat64) {
   CALL;
   struct stat host;
   int result = fstat(int32_t(call.word(0)), &host);
+  if (!result) result = store_stat64(arena, call.word(1), host);
+  call.result(result);
+}
+IMPORT(stat64) {
+  CALL;
+  struct stat host;
+  int result = stat(text(arena, call.word(0)), &host);
   if (!result) result = store_stat64(arena, call.word(1), host);
   call.result(result);
 }

@@ -82,6 +82,10 @@ IMPORT(ftruncate) {
   CALL;
   call.result(ftruncate(int32_t(call.word(0)), int32_t(call.word(1))));
 }
+IMPORT(ftruncate64) {
+  CALL;
+  call.result(ftruncate(int32_t(call.word(0)), int64_t(call.wide(1))));
+}
 IMPORT(__lxstat) {
   CALL; struct stat st; int r = lstat(text(arena, call.word(1)), &st);
   if (!r) r = store_stat32_extra(arena, call.word(2), st);
@@ -117,6 +121,14 @@ IMPORT(ctermid) {
   else call.result(extra_string(arena,"/dev/tty",10));
 }
 IMPORT(dup) { CALL; call.result(dup(int32_t(call.word(0)))); }
+IMPORT(dup2) { CALL; call.result(dup2(int32_t(call.word(0)), int32_t(call.word(1)))); }
+IMPORT(renameat2) {
+  CALL;
+  const int flags = int32_t(call.word(4));
+  if (flags) { errno = EINVAL; call.result(-1); return; }
+  call.result(renameat(int32_t(call.word(0)), text(arena, call.word(1)),
+                      int32_t(call.word(2)), text(arena, call.word(3))));
+}
 IMPORT(fcntl) {
   CALL;const int fd=int32_t(call.word(0)),cmd=int32_t(call.word(1));uint32_t arg=call.word(2);
   int r=-1;
@@ -602,6 +614,13 @@ IMPORT(scandir64) {
 IMPORT(setbuf) {
   CALL; FILE *f=stream(call.word(0)); uint32_t b=call.word(1);
   setbuf(f,b?static_cast<char *>(guest(arena,b,BUFSIZ)):nullptr);
+}
+IMPORT(setbuffer) {
+  CALL;
+  FILE *file = stream(call.word(0));
+  const uint32_t address = call.word(1), size = call.word(2);
+  setvbuf(file, address ? static_cast<char *>(guest(arena, address, size)) : nullptr,
+          address ? _IOFBF : _IONBF, size);
 }
 IMPORT(shm_open) {
   CALL;

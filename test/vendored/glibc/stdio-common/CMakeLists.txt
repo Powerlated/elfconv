@@ -62,7 +62,33 @@ list(REMOVE_ITEM glibc_stdio_test_names
   bug5
   test-popen
   tst-popen
-  tst-popen2)
+  tst-popen2
+  tst-fflush-all-input
+  tst-fwrite-pipe)
+
+# This test derives a physical host path from argv[0], unavailable in Emscripten's MEMFS.
+list(REMOVE_ITEM glibc_stdio_test_names tst-fmemopen)
+# These tests require procfs descriptor enumeration unavailable in Emscripten.
+list(REMOVE_ITEM glibc_stdio_test_names
+  tst-freopen2
+  tst-freopen3
+  tst-freopen5
+  tst-freopen64-2
+  tst-freopen64-3)
+
+# These tests require root/chroot, unavailable in the native test sandbox.
+list(REMOVE_ITEM glibc_stdio_test_names tst-freopen4 tst-freopen64-4)
+# These tests require pthread cancellation and semaphores unavailable in Wasm.
+list(REMOVE_ITEM glibc_stdio_test_names tst-freopen7 tst-freopen64-7)
+# This test requires FUSE mounts unavailable in the native test sandbox.
+list(REMOVE_ITEM glibc_stdio_test_names tst-fwrite-pos)
+# The test relies on RLIMIT_AS to force allocation failure, unsupported by Wasm.
+list(REMOVE_ITEM glibc_stdio_test_names tst-getline-enomem)
+# These tests depend on locale grouping not implemented by Emscripten libc.
+list(REMOVE_ITEM glibc_stdio_test_names
+  tst-grouping
+  tst-grouping2
+  tst-grouping3)
 
 find_program(ELFCONV_GLIBC_BASH bash REQUIRED)
 set(glibc_stdio_generated_dir "${CMAKE_CURRENT_BINARY_DIR}/generated")
