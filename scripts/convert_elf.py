@@ -16,6 +16,8 @@ import shutil
 import signal
 import sys
 import time
+from collections.abc import AsyncIterator, Awaitable, Callable
+from typing import TypeVar
 
 from rich.console import Console
 from rich.live import Live
@@ -24,6 +26,9 @@ from rich.text import Text
 from rich.tree import Tree
 
 from pack_preload import pack_preload
+
+Item = TypeVar("Item")
+Result = TypeVar("Result")
 
 ROOT = Path(__file__).resolve().parents[1]
 COMMON = [ROOT / "src" / path for path in (
@@ -38,6 +43,42 @@ def digest(path: Path) -> str:
 
 def key(*values: object) -> str:
     return hashlib.sha256(json.dumps(values, sort_keys=True, default=str).encode()).hexdigest()
+
+
+async def bounded_as_completed(items: list[Item], semaphore: asyncio.Semaphore,
+                               worker: Callable[[Item], Awaitable[Result]]
+                               ) -> AsyncIterator[Result]:
+    """Yield worker results as ready, with bounded concurrency and sibling cleanup."""
+    async def run(item: Item) -> Result:
+        async with semaphore:
+            return await worker(item)
+
+    tasks = [asyncio.create_task(run(item)) for item in items]
+    try:
+        for task in asyncio.as_completed(tasks):
+            yield await task
+    finally:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+def allocate_chunks(entries: list[tuple[str, Path, str, int, int]],
+                    requested: int) -> dict[str, int]:
+    """Apportion a global chunk budget by ELF code size, with one per owner."""
+    functions = sum(entry[3] for entry in entries)
+    target = min(max(requested, len(entries)), functions)
+    chunks = {entry[0]: 1 for entry in entries}
+    weights = {entry[0]: max(entry[4], 1) for entry in entries}
+    for _ in range(target - len(entries)):
+        owner = max(
+            (entry[0] for entry in entries if chunks[entry[0]] < entry[3]),
+            key=lambda value: (weights[value] / chunks[value], value))
+        chunks[owner] += 1
+    return chunks
+
+
 
 
 def atomic_text(path: Path, text: str) -> None:
@@ -82,9 +123,12 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--no-asyncify", action="store_true",
                         help="Do not instrument browser Wasm with Asyncify.")
     result.add_argument("--legacy-gl", choices=("0", "1"), default="1")
-    result.add_argument("--conversion-jobs", type=int, default=8)
+    result.add_argument("--lift-jobs", type=int, default=2,
+                        help="Maximum concurrent ELF lifting processes")
+    result.add_argument("--compile-jobs", type=int, default=8,
+                        help="Maximum concurrent compiler jobs")
     result.add_argument("--ir-chunks", type=int, default=0, metavar="N",
-                        help="Split i386 Wasm lifted IR into N approximately equal-size chunks.")
+                        help="Target total linkable i386 chunks, apportioned across ELF owners.")
     result.add_argument("--debug-func-addr", default="0")
     for name in ("init-wasm", "debug", "float-status", "text-ir", "no-lifted",
                  "no-compiled", "ready-js", "incremental-units", "jspi", "pthreads"):
@@ -97,34 +141,54 @@ class Display:
     def __init__(self, name: str, console: Console):
         self.name, self.console = name, console
         self.rows: dict[str, tuple[str, str, float]] = {}
+        self.parents: dict[str, str] = {}
         self.spinners: dict[str, Spinner] = {}
         self.live = Live(self.render(), console=console, refresh_per_second=8,
                          auto_refresh=False)
 
-    def update(self, name: str, state: str, detail: str = "") -> None:
+    def update(self, name: str, state: str, detail: str = "",
+               parent: str | None = None) -> None:
+        if re.search(r" chunk \d+/\d+$", name):
+            return
         previous = self.rows.get(name)
-        started = previous[2] if previous and previous[0] != "queued" else time.monotonic()
+        active_states = ("lifting", "compiling", "linking", "running")
+        started = (previous[2] if previous and previous[0] in active_states
+                   else time.monotonic())
         self.rows[name] = state, detail, started
-        if not self.console.is_terminal:
-            self.console.print(Text(f"{name}: {state}{' — ' + detail if detail else ''}"), soft_wrap=True)
+        if parent:
+            self.parents[name] = parent
+        if not self.console.is_terminal and (
+                previous is None or state != previous[0] or state in ("failed", "done", "cached")):
+            text = detail if detail.startswith("[") else f"{name}: {state}" + (
+                f" — {detail}" if detail else "")
+            self.console.print(Text(text), soft_wrap=True)
 
     def render(self) -> Tree:
         done = sum(state in ("done", "cached") for state, _, _ in self.rows.values())
         tree = Tree(Text(f"{self.name} [{done}/{len(self.rows)}]"))
+        parent_names = set(self.parents.values())
+        nodes = {}
         for name, (state, detail, started) in self.rows.items():
-            label = Text(f"{Path(name).name if Path(name).is_absolute() else name}: {state}", style={"failed": "red", "done": "green",
-                         "cached": "dim"}.get(state, ""))
-            if detail:
-                label.append(f" — {detail}")
+            display_name = Path(name).name if Path(name).is_absolute() else name
+            text = detail if detail.startswith("[") else f"{display_name}: {state}" + (
+                f" — {detail}" if detail else "")
+            label = Text(text, style={"failed": "red", "done": "green",
+                                     "cached": "dim"}.get(state, ""))
             if state in ("lifting", "compiling", "linking", "running"):
                 label.append(f"  {time.monotonic() - started:.1f}s", style="dim")
                 if name not in self.spinners:
                     self.spinners[name] = Spinner("dots")
-                spinner = self.spinners[name]
-                spinner.update(text=label)
-                tree.add(spinner)
+                node = self.spinners[name]
+                node.update(text=label)
             else:
-                tree.add(label)
+                node = label
+            nodes[name] = Tree(node) if name in parent_names else node
+        for name, node in nodes.items():
+            parent = self.parents.get(name)
+            if parent in nodes:
+                nodes[parent].add(node)
+            else:
+                tree.add(node)
         return tree
 
     async def refresh(self) -> None:
@@ -287,14 +351,21 @@ class Driver:
         self.display.update("Bundle scan", "done")
         entries = []
         for line in manifest.read_text().splitlines():
-            owner, separator, path = line.partition("\t")
-            if not separator or not owner or not Path(path).is_file():
+            fields = line.split("\t")
+            if (len(fields) != 4 or not fields[0] or not Path(fields[1]).is_file()):
                 raise ValueError(f"Malformed unit manifest entry: {line}")
-            entries.append((owner, Path(path), hashlib.sha256(owner.encode()).hexdigest()[:24]))
+            owner, path, functions, code_size = fields
+            function_count, estimated_size = int(functions), int(code_size)
+            if function_count < 1 or estimated_size < 0:
+                raise ValueError(f"Malformed unit size in manifest entry: {line}")
+            entries.append((owner, Path(path), hashlib.sha256(owner.encode()).hexdigest()[:24],
+                            function_count, estimated_size))
         if not entries:
             raise ValueError("The ELF bundle produced no code units")
-        for owner, _, _ in entries:
-            self.display.update(owner, "queued", "lift → compile")
+        chunk_counts = allocate_chunks(entries, a.ir_chunks) if a.ir_chunks else {
+            entry[0]: 1 for entry in entries}
+        for owner, _, _, _, _ in entries:
+            self.display.update(owner, "queued", f"{chunk_counts[owner]} chunk(s)")
         queued_runtime = [] if a.runtime_archive else [
             f"Runtime/{source.name}" for source in [*COMMON, ROOT / "src/runtime/I386Imports.cpp"]]
         for name in ["Shared metadata", "Unit registry", *queued_runtime, "Final link"]:
@@ -306,39 +377,169 @@ class Driver:
         lift_identity = key(digest(Path(a.lifter)), semantics)
         compiler_identity = self.compiler_identity[emcc]
         compile_flags = [f"-O{a.wasm_opt_level}", *self.thread_compile, *self.exception_flags]
+        compile_slots = asyncio.Semaphore(a.compile_jobs)
+        lift_slots = asyncio.Semaphore(a.lift_jobs)
         metadata_bc, metadata_object = self.cache / "metadata.bc", self.cache / "metadata.wasm.o"
-        metadata_key, metadata_changed = await self.stage("Shared metadata", "lifting",
-            [a.lifter, *flags, "--metadata_only", "--bc_out", metadata_bc], [metadata_bc],
-            [digest(fingerprint), lift_identity], self.cache / "metadata.lift.key")
-        metadata_compile_key, _ = await self.stage("Shared metadata", "compiling",
-            [emcc, *compile_flags, "-c", metadata_bc, "-o", metadata_object], [metadata_object],
-            [metadata_key, compiler_identity], self.cache / "metadata.compile.key", force=metadata_changed)
-        self.display.update("Shared metadata", "done")
-        semaphore = asyncio.Semaphore(a.conversion_jobs)
 
-        async def convert_unit(entry: tuple[str, Path, str]) -> tuple[Path, str]:
-            owner, fingerprint_path, unit_id = entry
-            async with semaphore:
-                bc = self.cache / f"unit-{unit_id}.bc"
-                obj = self.cache / f"unit-{unit_id}.wasm.o"
-                lift_key, changed = await self.stage(owner, "lifting",
-                    [a.lifter, *flags, "--unit_owner", owner, "--unit_id", unit_id, "--bc_out", bc],
-                    [bc], [digest(fingerprint_path), lift_identity], self.cache / f"unit-{unit_id}.lift.key")
-                compile_key, compiled = await self.stage(owner, "compiling",
-                    [emcc, *compile_flags, "-c", bc, "-o", obj], [obj],
-                    [lift_key, compiler_identity], self.cache / f"unit-{unit_id}.compile.key", force=changed)
-                self.display.update(owner, "done" if changed or compiled else "cached", "2/2 stages")
-                return obj, compile_key
+        async def compile_metadata() -> str:
+            async with lift_slots:
+                metadata_key, metadata_changed = await self.stage("Shared metadata", "lifting",
+                    [a.lifter, *flags, "--metadata_only", "--bc_out", metadata_bc], [metadata_bc],
+                    [digest(fingerprint), lift_identity], self.cache / "metadata.lift.key")
+            async with compile_slots:
+                metadata_compile_key, _ = await self.stage("Shared metadata", "compiling",
+                    [emcc, *compile_flags, "-c", metadata_bc, "-o", metadata_object],
+                    [metadata_object], [metadata_key, compiler_identity],
+                    self.cache / "metadata.compile.key", force=metadata_changed)
+            self.display.update("Shared metadata", "done")
+            return metadata_compile_key
 
-        tasks = [asyncio.create_task(convert_unit(entry)) for entry in entries]
-        try:
-            units = await asyncio.gather(*tasks)
-        finally:
-            for task in tasks:
-                if not task.done():
-                    task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
-        headers = sorted(path for directory in (ROOT / "src/runtime", ROOT / "src/utils", ROOT / "backend/remill/include")
+        lifted_chunks: dict[str, list[dict[str, object]]] = {}
+
+        async def lift_owner(entry: tuple[str, Path, str, int, int],
+                             count: int) -> list[dict[str, object]]:
+            owner, fingerprint_path, unit_id, _, code_size = entry
+            base = self.cache / f"unit-{unit_id}.bc"
+            lift_stamp = self.cache / f"unit-{unit_id}.lift.key"
+            dependencies = [digest(fingerprint_path), lift_identity]
+            if a.ir_chunks:
+                chunk_manifest = self.cache / f"unit-{unit_id}.ir-chunks.tsv"
+                if chunk_manifest.is_file():
+                    try:
+                        self.read_ir_chunk_manifest(chunk_manifest, base)
+                    except (OSError, ValueError):
+                        lift_stamp.unlink(missing_ok=True)
+                paths = self.ir_chunk_paths(base, count)
+                lift_key, changed = await self.stage(
+                    owner, "lifting",
+                    [a.lifter, *flags, "--unit_owner", owner, "--unit_id", unit_id,
+                     "--ir_chunks", count, "--ir_chunk_manifest_out", chunk_manifest,
+                     "--bc_out", base],
+                    [chunk_manifest, *paths], dependencies, lift_stamp)
+                requested, bitcodes, sizes = self.read_ir_chunk_manifest(chunk_manifest, base)
+                if requested != count or len(bitcodes) != count or any(not path.is_file() for path in bitcodes):
+                    raise ValueError(f"{owner}: invalid chunk manifest for {count} chunks")
+                self.clean_ir_chunks(base, len(bitcodes))
+                return [
+                    {"owner": owner, "unit_id": unit_id, "index": index,
+                     "bitcode": bitcode, "object": self.cache / f"unit-{unit_id}-chunk-{index}.wasm.o",
+                     "lift_key": lift_key, "lift_changed": changed, "size": sizes[index],
+                     "count": count}
+                    for index, bitcode in enumerate(bitcodes)]
+            chunk_manifest = self.cache / f"unit-{unit_id}.ir-chunks.tsv"
+            chunk_manifest.unlink(missing_ok=True)
+            self.clean_ir_chunks(base, 0)
+            lift_key, changed = await self.stage(
+                owner, "lifting",
+                [a.lifter, *flags, "--unit_owner", owner, "--unit_id", unit_id, "--bc_out", base],
+                [base], dependencies, lift_stamp)
+            return [{"owner": owner, "unit_id": unit_id, "index": 0, "bitcode": base,
+                     "object": self.cache / f"unit-{unit_id}-chunk-0.wasm.o",
+                     "lift_key": lift_key, "lift_changed": changed, "size": code_size,
+                     "count": 1}]
+
+        completed = {owner: 0 for owner, _, _, _, _ in entries}
+        changed_owners = {owner: False for owner, _, _, _, _ in entries}
+        compiled_chunks: dict[str, dict[int, tuple[Path, str]]] = {
+            owner: {} for owner, _, _, _, _ in entries}
+
+        async def compile_chunk(chunk: dict[str, object]) -> tuple[str, int, Path, str, bool]:
+            owner = str(chunk["owner"])
+            index = int(chunk["index"])
+            unit_id = str(chunk["unit_id"])
+            obj = Path(chunk["object"])
+            bitcode = Path(chunk["bitcode"])
+            total = int(chunk["count"])
+            chunk_name = f"{owner} chunk {index + 1}/{total}"
+            progress_name = f"{owner}::compile"
+            try:
+                async with compile_slots:
+                    self.display.update(
+                        progress_name, "compiling",
+                        f"[{completed[owner]}/{total}] ── {Path(owner).name} "
+                        f"chunk {index + 1}/{total}: compiling",
+                        parent=owner)
+                    compile_key, compiled = await self.stage(
+                        chunk_name, "compiling",
+                        [emcc, *compile_flags, "-c", bitcode, "-o", obj], [obj],
+                        [chunk["lift_key"], digest(bitcode), compiler_identity],
+                        self.cache / f"unit-{unit_id}-chunk-{index}.compile.key",
+                        force=bool(chunk["lift_changed"]))
+            except Exception:
+                self.display.update(
+                    progress_name, "failed",
+                    f"[{completed[owner]}/{total}] ── {Path(owner).name} "
+                    f"chunk {index + 1}/{total}: failed",
+                    parent=owner)
+                raise
+            return owner, index, obj, compile_key, compiled
+
+        async def lift_compile_pipeline(
+                lift_entries: list[tuple[str, Path, str, int, int]]) -> None:
+            if not lift_entries:
+                return
+            condition = asyncio.Condition()
+            pending: dict[str, deque[dict[str, object]]] = {}
+            ready: deque[str] = deque()
+            lifts_done = False
+
+            async def lift_entry(entry: tuple[str, Path, str, int, int]
+                                 ) -> tuple[str, list[dict[str, object]]]:
+                return entry[0], await lift_owner(entry, chunk_counts[entry[0]])
+
+            async def lift_all() -> None:
+                nonlocal lifts_done
+                ordered_entries = sorted(lift_entries, key=lambda value: value[4], reverse=True)
+                try:
+                    async for owner, chunks in bounded_as_completed(
+                            ordered_entries, lift_slots, lift_entry):
+                        lifted_chunks[owner] = chunks
+                        lift_status = "done" if any(
+                            bool(chunk["lift_changed"]) for chunk in chunks) else "cached"
+                        self.display.update(owner, lift_status, "lifting")
+                        async with condition:
+                            pending[owner] = deque(chunks)
+                            if chunks:
+                                ready.append(owner)
+                            condition.notify_all()
+                finally:
+                    async with condition:
+                        lifts_done = True
+                        condition.notify_all()
+
+            async def compile_ready() -> None:
+                while True:
+                    async with condition:
+                        await condition.wait_for(lambda: ready or lifts_done)
+                        if not ready:
+                            return
+                        owner = ready.popleft()
+                        chunk = pending[owner].popleft()
+                        if pending[owner]:
+                            ready.append(owner)
+                        else:
+                            del pending[owner]
+                    owner, index, obj, compile_key, compiled = await compile_chunk(chunk)
+                    compiled_chunks[owner][index] = (obj, compile_key)
+                    completed[owner] += 1
+                    changed_owners[owner] |= compiled
+                    total = len(lifted_chunks[owner])
+                    chunk_status = "done" if compiled else "cached"
+                    status = "compiling" if completed[owner] < total else (
+                        "done" if changed_owners[owner] else "cached")
+                    self.display.update(
+                        f"{owner}::compile", status,
+                        f"[{completed[owner]}/{total}] ── {Path(owner).name} "
+                        f"chunk {index + 1}/{total}: {chunk_status}",
+                        parent=owner)
+
+            async with asyncio.TaskGroup() as group:
+                group.create_task(lift_all())
+                for _ in range(a.compile_jobs):
+                    group.create_task(compile_ready())
+
+        headers = sorted(path for directory in (ROOT / "src/runtime", ROOT / "src/utils",
+                                                ROOT / "backend/remill/include")
                          for path in directory.rglob("*") if path.suffix in (".h", ".hpp", ".inc"))
         header_key = key([(str(path), digest(path)) for path in headers])
         runtime_flags = [*compile_flags, "-sUSE_SDL=2", *self.includes, "-std=c++17", *self.definitions,
@@ -347,24 +548,67 @@ class Driver:
         registry_text = self.registry([entry[2] for entry in entries])
         atomic_text(registry, registry_text)
         registry_object = self.cache / "UnitRegistry.wasm.o"
-        registry_key, _ = await self.stage("Unit registry", "compiling",
-            [emcc, *runtime_flags, "-c", registry, "-o", registry_object], [registry_object],
-            [key(registry_text), header_key, compiler_identity], self.cache / "UnitRegistry.compile.key")
-        self.display.update("Unit registry", "done")
-        runtime_objects, runtime_keys = [], []
-        if a.runtime_archive:
-            runtime_objects = [a.runtime_archive]
-            runtime_keys = [digest(a.runtime_archive)]
-        else:
-            for source in [*COMMON, ROOT / "src/runtime/I386Imports.cpp"]:
-                obj = self.cache / f"runtime-{source.stem}.wasm.o"
+        async def compile_registry() -> tuple[Path, str]:
+            async with compile_slots:
+                registry_key, _ = await self.stage("Unit registry", "compiling",
+                    [emcc, *runtime_flags, "-c", registry, "-o", registry_object], [registry_object],
+                    [key(registry_text), header_key, compiler_identity],
+                    self.cache / "UnitRegistry.compile.key")
+            self.display.update("Unit registry", "done")
+            return registry_object, registry_key
+
+        runtime_sources = [] if a.runtime_archive else [*COMMON, ROOT / "src/runtime/I386Imports.cpp"]
+
+        async def compile_runtime(source: Path) -> tuple[Path, str]:
+            obj = self.cache / f"runtime-{source.stem}.wasm.o"
+            async with compile_slots:
                 stage_key, _ = await self.stage(f"Runtime/{source.name}", "compiling",
                     [emcc, *runtime_flags, f"-DECV_LEGACY_GL={a.legacy_gl}", "-c", source, "-o", obj],
                     [obj], [digest(source), header_key, compiler_identity],
                     self.cache / f"runtime-{source.stem}.compile.key")
-                self.display.update(f"Runtime/{source.name}", "done")
-                runtime_objects.append(obj)
-                runtime_keys.append(stage_key)
+            self.display.update(f"Runtime/{source.name}", "done")
+            return obj, stage_key
+
+        async def run_pipeline() -> tuple[str, tuple[Path, str], list[tuple[Path, str]]]:
+            async with asyncio.TaskGroup() as group:
+                metadata_task = group.create_task(compile_metadata())
+                registry_task = group.create_task(compile_registry())
+                runtime_tasks = [group.create_task(compile_runtime(source))
+                                 for source in runtime_sources]
+                await lift_compile_pipeline(entries)
+                if a.ir_chunks:
+                    measured_entries = [
+                        (*entry[:4], sum(int(chunk["size"]) for chunk in lifted_chunks[entry[0]]))
+                        for entry in entries]
+                    refined_counts = allocate_chunks(measured_entries, a.ir_chunks)
+                    changed_entries = []
+                    for entry in entries:
+                        owner = entry[0]
+                        if refined_counts[owner] != chunk_counts[owner]:
+                            chunk_counts[owner] = refined_counts[owner]
+                            completed[owner] = 0
+                            changed_owners[owner] = False
+                            compiled_chunks[owner] = {}
+                            changed_entries.append(entry)
+                            self.display.update(owner, "queued",
+                                                f"{chunk_counts[owner]} rebalanced chunk(s)")
+                            self.display.update(
+                                f"{owner}::compile", "queued",
+                                f"[0/{chunk_counts[owner]}] ── {Path(owner).name}: awaiting relift",
+                                parent=owner)
+                    await lift_compile_pipeline(changed_entries)
+            return (metadata_task.result(), registry_task.result(),
+                    [task.result() for task in runtime_tasks])
+
+        metadata_compile_key, (registry_object, registry_key), runtime_results = await run_pipeline()
+        if a.runtime_archive:
+            runtime_objects, runtime_keys = [a.runtime_archive], [digest(a.runtime_archive)]
+        else:
+            runtime_objects = [obj for obj, _ in runtime_results]
+            runtime_keys = [stage_key for _, stage_key in runtime_results]
+        units = [compiled_chunks[owner][index]
+                 for owner, _, _, _, _ in entries
+                 for index in sorted(compiled_chunks[owner])]
         js, wasm = self.output / f"{a.elf_name}.js", self.output / f"{a.elf_name}.wasm"
         _, linked = await self.stage("Final link", "linking",
             [emcc, *self.browser_link_flags(True), *[obj for obj, _ in units], metadata_object,
@@ -439,7 +683,9 @@ class Driver:
             lift_key, lift_changed = await self.stage(name, "lifting",
                 [a.lifter, *self.lift_flags(), "--ir_chunks", a.ir_chunks,
                  "--ir_chunk_manifest_out", manifest, "--bc_out", base],
-                previous_outputs, [digest(a.input), lift_identity], lift_stamp)
+                [manifest, *previous_chunks],
+                [digest(a.input), [(str(path), digest(path)) for path in a.shared_library],
+                 lift_identity], lift_stamp)
             self.display.update(name, "done" if lift_changed else "cached", "lifting")
             requested, chunks, ir_sizes = self.read_ir_chunk_manifest(manifest, base)
             if requested != a.ir_chunks or any(not path.is_file() for path in chunks):
@@ -450,7 +696,7 @@ class Driver:
         compile_flags = [f"-O{a.wasm_opt_level}", *self.thread_compile, *self.exception_flags]
         chunk_objects = [self.cache / f"{name}-ir-chunk-{index}.wasm.o"
                          for index in range(len(chunks))]
-        semaphore = asyncio.Semaphore(a.conversion_jobs)
+        semaphore = asyncio.Semaphore(a.compile_jobs)
         chunk_tasks = []
 
         async def compile_chunk(index: int, bitcode: Path, obj: Path) -> tuple[Path, str]:
@@ -621,7 +867,7 @@ class Driver:
                         *(["-g2"] if a.wasm_opt_level == "0" else []), *self.includes, "-std=c++17",
                         *self.definitions, "-DELF_IS_I386", "-DADDRESS_SIZE_BITS=32", "-sUSE_SDL=2",
                         f"-DECV_LEGACY_GL={a.legacy_gl}"]
-                    semaphore = asyncio.Semaphore(a.conversion_jobs)
+                    semaphore = asyncio.Semaphore(a.compile_jobs)
 
                     async def compile_runtime(source: Path) -> Path:
                         runtime_obj = self.cache / f"single-runtime-{source.stem}.wasm.o"
@@ -683,15 +929,17 @@ def validate(a: argparse.Namespace) -> None:
     a.elf_name = a.elf_name or a.input.name
     if Path(a.elf_name).name != a.elf_name or a.elf_name in (".", ".."):
         raise ValueError("--elf-name must be a filename, not a path")
-    if a.conversion_jobs < 1:
-        raise ValueError("--conversion-jobs must be positive")
+    if a.compile_jobs < 1:
+        raise ValueError("--compile-jobs must be positive")
+    if a.lift_jobs < 1:
+        raise ValueError("--lift-jobs must be positive")
     if a.ir_chunks < 0:
         raise ValueError("--ir-chunks must be non-negative")
     if a.ir_chunks and a.target != "i386-wasm":
         raise ValueError("--ir-chunks requires i386-wasm")
-    if a.ir_chunks and (a.shared_library or a.incremental_units or a.link_map or
+    if a.ir_chunks and (a.incremental_units or a.link_map or
                         a.object_base or a.text_ir or a.ready_js):
-        raise ValueError("--ir-chunks cannot be combined with shared libraries, incremental units, linker maps, text IR, or --ready-js")
+        raise ValueError("--ir-chunks cannot be combined with incremental units, linker maps, text IR, or --ready-js")
     if a.pthreads and a.target != "i386-wasm":
         raise ValueError("--pthreads requires i386-wasm")
     if a.runtime_archive:
@@ -700,7 +948,7 @@ def validate(a: argparse.Namespace) -> None:
         a.runtime_archive = a.runtime_archive.resolve(strict=True)
         if a.legacy_gl != "0" or a.debug or a.float_status:
             raise ValueError("--runtime-archive requires --legacy-gl 0 without --debug or --float-status")
-        incremental = bool(a.shared_library or a.incremental_units)
+        incremental = bool(a.incremental_units or a.shared_library)
         suffix = ("-incremental" if incremental else "") + ("-pthreads" if a.pthreads else "")
         expected = f"libelfconv-runtime-i386-wasm{suffix}.a"
         if a.runtime_archive.name != expected:
@@ -725,7 +973,7 @@ def validate(a: argparse.Namespace) -> None:
         default = ROOT / "bin/elflift" if (ROOT / "bin/elflift").is_file() else ROOT / "build/src/lifter/elflift"
         a.lifter = tool(a.lifter or str(default))
     if a.target == "i386-wasm" and not a.runtime_archive and a.lifter:
-        incremental = bool(a.shared_library or a.incremental_units)
+        incremental = bool(a.incremental_units or a.shared_library)
         suffix = ("-incremental" if incremental else "") + ("-pthreads" if a.pthreads else "")
         sibling_archive = Path(a.lifter).resolve().with_name(
             f"libelfconv-runtime-i386-wasm{suffix}.a")
@@ -742,9 +990,11 @@ async def convert(a: argparse.Namespace, console: Console) -> None:
             display.live.start()
         if a.ready_js:
             driver.prepare_browser()
+        elif a.shared_library and a.target == "i386-wasm":
+            await driver.incremental()
         elif a.ir_chunks:
             await driver.chunked()
-        elif a.incremental_units or (a.shared_library and a.target == "i386-wasm"):
+        elif a.incremental_units:
             await driver.incremental()
         else:
             await driver.single()

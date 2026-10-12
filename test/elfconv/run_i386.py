@@ -44,6 +44,12 @@ def main():
                         help='Add one linker argument after standalone fixture sources (repeatable)')
     parser.add_argument('--wasm-opt-level', choices=list('0123sz'),
                         help='Set the Emscripten optimization level for the lifted test')
+    parser.add_argument('--ir-chunks', type=int,
+                        help='Partition an i386 ELF bundle into this many total chunks')
+    parser.add_argument('--lift-jobs', type=int,
+                        help='Bound concurrent ELF lifting processes')
+    parser.add_argument('--compile-jobs', type=int,
+                        help='Bound concurrent Wasm chunk compilation')
     parser.add_argument('--pthreads', action='store_true',
                         help='Link with pthread support and enable Emscripten pthreads')
     parser.add_argument('--no-asyncify', action='store_true',
@@ -197,6 +203,8 @@ def main():
         '--runtime-archive', str(runtime_archive),
         *(['--entry-symbol', 'main'] if args.shared else []),
         *(['--wasm-opt-level', args.wasm_opt_level] if args.wasm_opt_level else []),
+        *(['--lift-jobs', str(args.lift_jobs)] if args.lift_jobs else []),
+        *(['--compile-jobs', str(args.compile_jobs)] if args.compile_jobs else []),
         *[argument for library in libraries for argument in ('--shared-library', str(library))],
         *(['--pthreads'] if args.pthreads else []),
         *(['--no-asyncify'] if args.no_asyncify else []),

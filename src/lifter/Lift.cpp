@@ -311,16 +311,16 @@ int main(int argc, char *argv[]) {
   google::ParseCommandLineFlags(&argc, &argv, true);
   google::InitGoogleLogging(argv[0]);
   if (FLAGS_ir_chunks) {
+    const bool has_unit_args =
+        !FLAGS_unit_owner.empty() && !FLAGS_unit_id.empty();
     if (FLAGS_ir_chunks > std::numeric_limits<unsigned>::max() ||
         FLAGS_arch != "i386" || FLAGS_target_arch != "emscripten32" ||
         FLAGS_bc_out.empty() || FLAGS_ir_chunk_manifest_out.empty() ||
-        FLAGS_per_elf || !FLAGS_linker_map.empty() ||
-        !FLAGS_unit_manifest_out.empty() || !FLAGS_unit_owner.empty() ||
-        !FLAGS_unit_id.empty() || FLAGS_metadata_only ||
-        !FLAGS_shared_libraries.empty()) {
+        (FLAGS_per_elf != has_unit_args) || !FLAGS_linker_map.empty() ||
+        !FLAGS_unit_manifest_out.empty() || FLAGS_metadata_only) {
       elfconv_runtime_error(
-          "--ir_chunks requires a single i386 Emscripten lift with --bc_out and "
-          "--ir_chunk_manifest_out.\n");
+          "--ir_chunks requires an i386 Emscripten lift with --bc_out and "
+          "--ir_chunk_manifest_out, optionally for a --per_elf unit.\n");
     }
   } else if (!FLAGS_ir_chunk_manifest_out.empty()) {
     elfconv_runtime_error("--ir_chunk_manifest_out requires --ir_chunks.\n");
@@ -536,6 +536,7 @@ int main(int argc, char *argv[]) {
     auto host_arch = remill::Arch::Build(&context, os_name, remill::GetArchName(REMILL_ARCH));
     host_arch->PrepareModule(module.get());
   }
+  std::set<std::string> unit_exports;
   if (arch_name == remill::kArchX86) {
     // Instruction selectors are a lifting-time registry, not runtime roots.
     llvm::removeFromUsedLists(*module, [](llvm::Constant *value) {
@@ -544,7 +545,6 @@ int main(int argc, char *argv[]) {
                         global->getName().starts_with("COND_"));
     });
     llvm::ModulePassManager passes;
-    std::set<std::string> unit_exports;
     if (unit_mode) {
       for (const auto &[_, function_name] : addr_fun_name_map) {
         unit_exports.insert(function_name);
@@ -558,6 +558,15 @@ int main(int argc, char *argv[]) {
     llvm::ModuleAnalysisManager analyses;
     builder.registerModuleAnalyses(analyses);
     passes.run(*module, analyses);
+  }
+  if (FLAGS_ir_chunks && unit_mode) {
+    for (auto &global : module->global_values()) {
+      if (global.isDeclaration()) continue;
+      const auto name = global.getName();
+      if (name.starts_with("_ecv_") || name.starts_with("llvm.") ||
+          unit_exports.contains(name.str())) continue;
+      global.setName(name + "." + FLAGS_unit_id);
+    }
   }
   if (manager.target_arch == "emscripten32") {
     module->setTargetTriple(llvm::Triple("wasm32-unknown-emscripten"));

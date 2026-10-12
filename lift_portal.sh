@@ -26,6 +26,9 @@ python3 scripts/convert_elf.py \
   "${ARGS[@]}" \
   --lifter "$PWD/build/llvm23/src/lifter/elflift" \
   --emcc "$HOME/emsdk-6/upstream/emscripten/em++" \
-  --output-dir "$PWD/build/portal/multi-elf" \
-  --conversion-jobs 12
+  --legacy-gl 0 \
+  --ir-chunks 96 \
+  --runtime-archive "$PWD/build/llvm23/src/lifter/libelfconv-runtime-i386-wasm-incremental.a" \
+  --lift-jobs 12 \
+  --compile-jobs 12
 

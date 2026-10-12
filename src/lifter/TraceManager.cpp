@@ -227,6 +227,8 @@ void AArch64TraceManager::WriteIncrementalManifest(
       WriteString(fingerprint, name);
     }
     const uint64_t function_count = functions.size();
+    uint64_t code_size = 0;
+    for (const auto *function : functions) code_size += function->func_size;
     WriteScalar(fingerprint, function_count);
     uint64_t owner_range_count = 0;
     for (const auto &range : code_owner_ranges) {
@@ -282,7 +284,8 @@ void AArch64TraceManager::WriteIncrementalManifest(
     }
     if (!fingerprint) elfconv_runtime_error("Failed writing unit fingerprint: %s\n",
                                             fingerprint_path.c_str());
-    manifest << owner << '\t' << fingerprint_path << '\n';
+    manifest << owner << '\t' << fingerprint_path << '\t' << function_count << '\t'
+             << code_size << '\n';
   }
 
   std::ofstream metadata(metadata_fingerprint_path, std::ios::binary | std::ios::trunc);

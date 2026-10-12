@@ -15,7 +15,7 @@ FetchContent_MakeAvailable(googletest)
 enable_testing()
 include(GoogleTest)
 find_package(Python3 3.11 REQUIRED COMPONENTS Interpreter)
-foreach(case IN ITEMS cache failure cancellation preload)
+foreach(case IN ITEMS cache failure cancellation preload chunk_pool)
   add_test(NAME conversion_driver_${case}
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/ConversionDriverTests.py" "${case}")
   set_tests_properties(conversion_driver_${case} PROPERTIES TIMEOUT 15)

@@ -310,16 +310,21 @@ Steam's `ubuntu12_32/steam-runtime/usr/lib/i386-linux-gnu/libstdc++.so.6`,
 Use absolute paths for all six entries; system SDL/libc/pthread libraries still
 require guest-ABI adapters rather than native host pointers.
 
-Bundled i386 Wasm conversion lifts and caches each ELF separately, then links
-one Wasm module with shared guest layout/loader metadata and import adapters.
-Portal uses this per-ELF path. Cache: output directory's `.elfconv-incremental/`.
-Each uncached ELF runs lift → Wasm compilation as one parallel job.
-`--conversion-jobs` limits concurrent jobs (default 2); lower it for
-memory-constrained hosts. CMake: `ELFCONV_CONVERSION_JOBS`; target API: `CONVERSION_JOBS`.
-The manifest, shared metadata, registry/runtime compilation, and final link
-remain serial. Successful stages retain their cache keys if another job fails.
-TTY: live per-library progress tree. Redirected output: plain stage transitions.
-Tool output: `.elfconv-logs/`; failures print the log tail and full log path.
+Bundled i386 Wasm conversion lifts each ELF separately with bounded concurrent
+workers, then links one Wasm module with shared guest layout/loader metadata and
+import adapters. Portal uses this per-ELF path. Cache: output directory's
+`.elfconv-incremental/`.
+`--ir-chunks N` targets total chunks across ELF owners (minimum one per ELF);
+counts use code-size estimates then measured LLVM IR sizes, and chunks are
+balanced across the bundle. `--lift-jobs` bounds concurrent ELF lifts (default
+2); completed ELF chunks enter the compiler pool while other lifts continue.
+`--compile-jobs` caps all compiler jobs (default 8); ready ELF owners rotate
+through the pool. CMake: `ELFCONV_LIFT_JOBS` and `ELFCONV_COMPILE_JOBS` (both
+default 2); target arguments: `LIFT_JOBS`, `COMPILE_JOBS`.
+Shared metadata, registry, and runtime compilation share the pool; final link
+waits for them and all chunks. Successful stages retain cache keys if another
+job fails. TTY: live per-library progress tree. Redirected output: plain stage
+transitions. Tool logs: `.elfconv-logs/`; failures print log tail and path.
 
 
 This is an explicit AOT bundle, not a runtime native-ELF compiler or a general

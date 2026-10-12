@@ -188,11 +188,16 @@ Set `ELFCONV_ARCH=aarch64` when building the AArch64 semantics instead. Configur
 the dependency and project builds with the same LLVM installation.
 After rebuilding `elflift`, rerun conversion. Incremental caches automatically
 invalidate when the lifter binary changes.
-For `i386-wasm`, runtime sources compile as independent cached objects, with up
-to eight concurrent jobs by default; set `--conversion-jobs` to change the limit.
-Use `--ir-chunks N` to partition an i386 lift into up to N linkable chunks,
-greedily balanced by printed LLVM IR definition size. Compile concurrency is
-limited by `--conversion-jobs`.
+For `i386-wasm`, runtime sources compile as independent cached objects.
+`--ir-chunks N` targets the total chunks across bundled ELF owners (at least one
+per ELF). Counts are apportioned using code size, then refined using measured
+LLVM IR size; chunks are greedily balanced across the whole bundle. Chunked
+conversion cannot use linker-map incremental units. `--lift-jobs N` bounds
+concurrent ELF lifts (default 2); `--compile-jobs N` bounds compiler jobs
+(default 8). Completed ELF chunks enter the compiler pool while other lifts
+continue; ready owners rotate through the pool. CMake uses `ELFCONV_LIFT_JOBS`
+(default 2) and `ELFCONV_COMPILE_JOBS` (default 2); target arguments:
+`LIFT_JOBS` and `COMPILE_JOBS`.
 Direct CLI: `python scripts/convert_elf.py --help`. CMake conversion targets
 invoke the same driver. Select the virtual environment with
 `-DPython3_EXECUTABLE="$PWD/.venv/bin/python"` if needed.

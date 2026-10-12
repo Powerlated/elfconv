@@ -12,7 +12,7 @@ import tempfile
 from rich.console import Console
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
-from convert_elf import Display, Driver, digest, parser, tool
+from convert_elf import Display, Driver, allocate_chunks, bounded_as_completed, digest, parser, tool
 from pack_preload import pack_preload
 
 
@@ -76,7 +76,7 @@ async def cancellation(directory: Path) -> None:
         pids = json.loads(pid_file.read_text())
         task.cancel()
         result = await asyncio.gather(task, return_exceptions=True)
-        assert isinstance(result[0], asyncio.CancelledError)
+        assert isinstance(result[0], asyncio.CancelledError), f"Expected cancellation, got {result[0]!r}"
         for pid in pids:
             status = Path(f"/proc/{pid}/stat")
             assert not status.exists() or status.read_text().split(") ", 1)[1].startswith("Z"), (
@@ -85,6 +85,56 @@ async def cancellation(directory: Path) -> None:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
 
+
+
+async def chunk_pool() -> None:
+    entries = [
+        ("large.so", Path("large.fingerprint"), "large", 30, 9000),
+        ("medium.so", Path("medium.fingerprint"), "medium", 20, 3000),
+        ("small.so", Path("small.fingerprint"), "small", 10, 500),
+    ]
+    counts = allocate_chunks(entries, 18)
+    assert sum(counts.values()) == 18
+    assert counts["large.so"] > counts["medium.so"] > counts["small.so"]
+    assert all(counts[entry[0]] <= entry[3] for entry in entries)
+
+    active = 0
+    maximum = 0
+
+    async def worker(value: int) -> int:
+        nonlocal active, maximum
+        active += 1
+        maximum = max(maximum, active)
+        try:
+            await asyncio.sleep(0.01)
+            return value * 2
+        finally:
+            active -= 1
+
+    results = []
+    async for result in bounded_as_completed(
+            list(range(8)), asyncio.Semaphore(3), worker):
+        results.append(result)
+    assert sorted(results) == [i * 2 for i in range(8)]
+    assert maximum == 3 and active == 0
+    rendered = io.StringIO()
+    progress = Display("conversion", Console(file=rendered))
+    owner = "/tmp/server.so"
+    progress.update(owner, "done", "lifting")
+    progress.update(f"{owner}::compile", "compiling",
+                    "[0/41] ── server.so chunk 1/41: compiling", parent=owner)
+    progress.update(f"{owner}::compile", "compiling",
+                    "[1/41] ── server.so chunk 1/41: done", parent=owner)
+    progress.update(f"{owner}::compile", "done",
+                    "[41/41] ── server.so chunk 41/41: done", parent=owner)
+    tree = progress.render()
+    progress.console.print(tree)
+    assert "\n    └── [41/41] ── server.so chunk 41/41: done\n" in rendered.getvalue()
+    assert "conversion [2/2]" in rendered.getvalue()
+    options = parser().parse_args(["--input", __file__, "--target", "i386-wasm",
+                                   "--lift-jobs", "3", "--compile-jobs", "4"])
+    assert options.lift_jobs == 3
+    assert options.compile_jobs == 4
 
 def preload(directory: Path) -> None:
     source, output = directory / "input", directory / "out"
@@ -119,6 +169,8 @@ if __name__ == "__main__":
             preload(directory)
         elif case == "compiler":
             compiler(directory)
+        elif case == "chunk_pool":
+            asyncio.run(chunk_pool())
         else:
             asyncio.run({"cache": cache, "failure": failure, "cancellation": cancellation}[case](directory))
         print(f"{case}: passed")
