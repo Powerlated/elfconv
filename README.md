@@ -86,9 +86,9 @@ Vendored test status uses `vendor: passing/included/total vendored tests`.
 | Surface | Portal needs | elfconv status | Vendored test status |
 |---|---|---|---|
 | i386 ABI and CPU | 32-bit calling conventions and instructions used by the game and bundled libraries | SDL/OpenGL samples pass. Portal bundle lifts 17,008 functions; optional AVX code fails to decode and x87 arithmetic uses binary64. | QEMU i386: 0/2/2 |
-| ELF startup and shared objects | `hl2_linux`, `launcher.so`, `libsteam_api.so`, `libtier0.so`, `libvstdlib.so`, `libtogl.so`, Steam's `libstdc++.so.6` and `libgcc_s.so.1`; expanded bundle also includes engine, client, server, and filesystem ELFs | Explicit bundling supports guest constructors, TLS, and dynamic symbol lookup; no general loader search/interposition or IFUNC support. `hl2_linux` alone reaches only the missing-launcher error path. | glibc loader: 0/2/2 |
-| C and C++ runtimes | glibc memory/string, stdio, parsing, math, locale, plus C++ ABI, RTTI, exceptions, and unwind behavior | Current Portal bundle conversion links; this proves import resolution, not runtime behavior. Full libc/C++ compatibility is unverified. | glibc libc: 0/4/4<br>glibc stdio-common: 6/188/476 |
-| POSIX and Linux services | Game-data filesystem, process/environment, mapping, clocks, sockets, and required syscalls | Current Portal bundle conversion links; raw i386 Linux syscalls are rejected and runtime behavior is unverified. | glibc filesystem: 0/4/4 |
+| ELF startup and shared objects | `hl2_linux`, `launcher.so`, `libsteam_api.so`, `libtier0.so`, `libvstdlib.so`, `libtogl.so`, Steam's `libstdc++.so.6` and `libgcc_s.so.1`; expanded bundle also includes engine, client, server, and filesystem ELFs | Explicit bundling supports guest constructors, TLS, and dynamic symbol lookup; no general loader search/interposition or IFUNC support. Browser startup reaches an unbundled `/bin/filesystem_steam.so` load and exits. | glibc loader: 0/2/2 |
+| C and C++ runtimes | glibc memory/string, stdio, parsing, math, locale, plus C++ ABI, RTTI, exceptions, and unwind behavior | JSPI module instantiates and enters guest startup; complete libc/C++ compatibility remains unverified. | glibc libc: 0/4/4<br>glibc stdio-common: 6/188/476 |
+| POSIX and Linux services | Game-data filesystem, process/environment, mapping, clocks, sockets, and required syscalls | Startup reaches the missing-library error; raw i386 Linux syscalls are rejected and service behavior is not established. | glibc filesystem: 0/4/4 |
 | pthreads and ELF TLS | Worker creation, synchronization, thread-specific data, destructors, and library TLS | Adapters and ELF TLS models exist; Portal thread behavior is unverified. Browser threads require JSPI and cross-origin isolation. | glibc pthread: 0/2/2 |
 | SDL2 window, input, and surfaces | Window/context lifecycle, events, input, surfaces, and pixel operations | Triangle/cube exercise limited paths. SDL surface/pixel lifted conversion currently fails; broader SDL compatibility is unproven. | SDL2: 0/17/17 |
 | OpenGL | Context setup, GL entry-point lookup, rendering, and readback through `libtogl.so` | Sample cube rendering/readback passes; Portal's `libtogl` call set is unverified. | |
@@ -203,8 +203,8 @@ Compiling counters count completed chunks, not chunk identities.
 Chunk output separates module verification, bitcode serialization, and bitcode writing.
 Writing shows `[N bytes]` flushed to temporary output.
 
-Portal: `./lift_portal.sh` reuses the repository-root cache and uses a shared
-lifting/compiling pool with `-O1`. Overrides: `ELFCONV_JOBS`,
+Portal: `./lift_portal.sh` reuses the repository-root cache, uses a shared
+lifting/compiling pool with `-O1`, and enables JSPI. Overrides: `ELFCONV_JOBS`,
 `ELFCONV_WASM_OPT_LEVEL`; extra driver flags pass through.
 After lifter/runtime edits, run `ELFCONV_BUILD=1 ./lift_portal.sh` to rebuild first.
 Lifting shows `[completed/known total]`; the total grows as callees are discovered.
