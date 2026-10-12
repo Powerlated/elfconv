@@ -202,6 +202,11 @@ IMPORT(__isoc23_vsscanf) {
 IMPORT(fscanf) {
   CALL;
   call.result(scan_guest_file(arena, stream(call.word(0)), text(arena, call.word(1)),
+                             {arena, call.stack + 12}, true));
+}
+IMPORT(__isoc99_fscanf) {
+  CALL;
+  call.result(scan_guest_file(arena, stream(call.word(0)), text(arena, call.word(1)),
                              {arena, call.stack + 12}));
 }
 IMPORT(__isoc23_vfscanf) {
@@ -212,7 +217,44 @@ IMPORT(__isoc23_vfscanf) {
 IMPORT(sscanf) {
   CALL;
   call.result(scan_guest_string(arena, text(arena, call.word(0)), text(arena, call.word(1)),
-                               {arena, call.stack + 12}));
+                               {arena, call.stack + 12}, true));
+}
+IMPORT(vsscanf) {
+  CALL;
+  call.result(scan_guest_string(arena, text(arena, call.word(0)), text(arena, call.word(1)),
+                               {arena, call.word(2)}, true));
+}
+IMPORT(__isoc99_vsscanf) {
+  CALL;
+  call.result(scan_guest_string(arena, text(arena, call.word(0)), text(arena, call.word(1)),
+                               {arena, call.word(2)}));
+}
+IMPORT(vscanf) {
+  CALL;
+  call.result(scan_guest_file(arena, stdin, text(arena, call.word(0)), {arena, call.word(1)}, true));
+}
+IMPORT(__isoc99_vscanf) {
+  CALL;
+  call.result(scan_guest_file(arena, stdin, text(arena, call.word(0)), {arena, call.word(1)}));
+}
+IMPORT(vfscanf) {
+  CALL;
+  call.result(scan_guest_file(arena, stream(call.word(0)), text(arena, call.word(1)),
+                             {arena, call.word(2)}, true));
+}
+IMPORT(__isoc99_vfscanf) {
+  CALL;
+  call.result(scan_guest_file(arena, stream(call.word(0)), text(arena, call.word(1)),
+                             {arena, call.word(2)}));
+}
+IMPORT(scanf) {
+  CALL;
+  call.result(scan_guest_file(arena, stdin, text(arena, call.word(0)),
+                             {arena, call.stack + 8}, true));
+}
+IMPORT(__isoc99_scanf) {
+  CALL;
+  call.result(scan_guest_file(arena, stdin, text(arena, call.word(0)), {arena, call.stack + 8}));
 }
 IMPORT(getchar) { CALL; call.result(uint32_t(getchar())); }
 IMPORT(getwc) { CALL; call.result(uint32_t(getwc(stream(call.word(0))))); }

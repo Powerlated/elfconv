@@ -531,7 +531,8 @@ struct Arguments {
   uint64_t wide() { uint64_t lo = word(); return lo | (uint64_t(word()) << 32); }
 };
 const wchar_t *wide_text(uint8_t *arena, uint32_t address);
-int scan_guest_string(uint8_t *arena, const char *input, const char *fmt, Arguments args);
+int scan_guest_string(uint8_t *arena, const char *input, const char *fmt, Arguments args,
+                      bool deprecated_scanf = false);
 bool write_event(uint8_t *arena, uint32_t address, SDL_Event &event);
 
 template<typename Char>

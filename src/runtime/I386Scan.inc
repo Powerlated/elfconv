@@ -327,7 +327,7 @@ struct GuestScanInput {
 
 template<typename Char>
 int scan_guest_input(uint8_t *arena, GuestScanInput<Char> &input,
-                     const Char *fmt, Arguments arguments) {
+                     const Char *fmt, Arguments arguments, bool deprecated_scanf = false) {
   int assigned = 0;
   auto whitespace = [](Char c) {
     if constexpr (std::is_same_v<Char, char>) return !!isspace(static_cast<unsigned char>(c));
@@ -355,7 +355,7 @@ int scan_guest_input(uint8_t *arena, GuestScanInput<Char> &input,
       if (width > (UINT32_MAX - 9) / 10) elfconv_runtime_error("Guest scanf width overflow.\n");
       width = width * 10 + uint32_t(*p++ - '0');
     }
-    const bool allocate_output = *p == 'm';
+    const bool allocate_output = *p == 'm' || (deprecated_scanf && *p == 'a' && strchr("sS[", p[1]));
     if (allocate_output) ++p;
     const bool international_digits = *p == 'I';
     if (international_digits) ++p;
@@ -575,20 +575,24 @@ int scan_guest_input(uint8_t *arena, GuestScanInput<Char> &input,
   }
   return assigned;
 }
-int scan_guest_string(uint8_t *arena, const char *input, const char *fmt, Arguments arguments) {
+int scan_guest_string(uint8_t *arena, const char *input, const char *fmt, Arguments arguments,
+                      bool deprecated_scanf) {
   GuestScanInput<char> source{input};
-  return scan_guest_input(arena, source, fmt, arguments);
+  return scan_guest_input(arena, source, fmt, arguments, deprecated_scanf);
 }
-int scan_guest_wide_string(uint8_t *arena, const wchar_t *input, const wchar_t *fmt, Arguments arguments) {
+int scan_guest_wide_string(uint8_t *arena, const wchar_t *input, const wchar_t *fmt,
+                           Arguments arguments, bool deprecated_scanf = false) {
   GuestScanInput<wchar_t> source{input};
-  return scan_guest_input(arena, source, fmt, arguments);
+  return scan_guest_input(arena, source, fmt, arguments, deprecated_scanf);
 }
-int scan_guest_wide_file(uint8_t *arena, FILE *file, const wchar_t *fmt, Arguments arguments) {
+int scan_guest_wide_file(uint8_t *arena, FILE *file, const wchar_t *fmt, Arguments arguments,
+                         bool deprecated_scanf = false) {
   GuestScanInput<wchar_t> source{nullptr, file};
-  return scan_guest_input(arena, source, fmt, arguments);
+  return scan_guest_input(arena, source, fmt, arguments, deprecated_scanf);
 }
-int scan_guest_file(uint8_t *arena, FILE *file, const char *fmt, Arguments arguments) {
+int scan_guest_file(uint8_t *arena, FILE *file, const char *fmt, Arguments arguments,
+                    bool deprecated_scanf = false) {
   GuestScanInput<char> source{nullptr, file};
-  return scan_guest_input(arena, source, fmt, arguments);
+  return scan_guest_input(arena, source, fmt, arguments, deprecated_scanf);
 }
 }  // namespace

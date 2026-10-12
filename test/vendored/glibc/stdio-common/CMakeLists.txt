@@ -103,12 +103,17 @@ foreach(test_name IN LISTS glibc_stdio_test_names)
   if(NOT EXISTS "${test_source}")
     message(FATAL_ERROR "Missing upstream glibc stdio test source: ${test_source}")
   endif()
+  set(test_compile_args)
+  if(test_name STREQUAL "scanf18" OR test_name STREQUAL "scanf19")
+    list(APPEND test_compile_args "--compile-flag=-std=gnu89")
+  endif()
   set(test_stdin_args)
   if(EXISTS "${glibc_stdio_source}/${test_name}.input")
     list(APPEND test_stdin_args --stdin-file "${glibc_stdio_source}/${test_name}.input")
   endif()
   add_test(NAME "i386_glibc_stdio_${test_name}"
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/test/elfconv/run_i386.py"
+      ${test_compile_args}
       ${glibc_stdio_common_args}
       --source "${test_source}"
       ${test_stdin_args}
