@@ -58,6 +58,9 @@ address-taken imports. This requires G++ multilib and `libssp_nonshared`.
 control/status/TOP, physical abridged tags, MXCSR, XMM0/XMM7, and preservation of
 the software-owned save-area tail. It also checks empty tags after popping.
 
+`indirect-dispatch` checks local computed branches, indirect function tails,
+and a symbol-less unwind helper separated from its caller by padding.
+
 
 
 ## Run

@@ -459,13 +459,28 @@ std::string AArch64TraceManager::GetUniqueLiftedFuncName(std::string func_name, 
 }
 
 uint64_t AArch64TraceManager::GetFuncVMA_E(uint64_t vma_s) {
-  if (disasm_funcs.count(vma_s) == 1) {
-    return vma_s + disasm_funcs[vma_s].func_size;
-  } else if (rest_disasm_funcs.count(vma_s) == 1) {
-    return vma_s + rest_disasm_funcs[vma_s].func_size;
+  uint64_t end_addr;
+  if (auto it = disasm_funcs.find(vma_s); it != disasm_funcs.end()) {
+    end_addr = vma_s + it->second.func_size;
+  } else if (auto it = rest_disasm_funcs.find(vma_s); it != rest_disasm_funcs.end()) {
+    end_addr = vma_s + it->second.func_size;
   } else {
     elfconv_runtime_error("[ERROR] vma_s (%ld) is not a start address of function.\n", vma_s);
   }
+
+  // A guessed size must never make indirect-branch lifting consume a later
+  // function as part of this function. The next known function entry is a
+  // hard boundary even when the current function's symbol size is oversized.
+  if (auto it = disasm_funcs.upper_bound(vma_s); it != disasm_funcs.end()) {
+    end_addr = std::min<uint64_t>(end_addr, it->first);
+  }
+  if (auto it = rest_disasm_funcs.upper_bound(vma_s); it != rest_disasm_funcs.end()) {
+    end_addr = std::min<uint64_t>(end_addr, it->first);
+  }
+  if (auto *section = elf_obj.GetIncludedSection(vma_s)) {
+    end_addr = std::min<uint64_t>(end_addr, bfd_section_vma(section) + bfd_section_size(section));
+  }
+  return end_addr;
 }
 
 uint64_t AArch64TraceManager::GetFuncNums() {

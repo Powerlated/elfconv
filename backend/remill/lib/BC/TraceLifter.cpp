@@ -931,12 +931,14 @@ bool TraceLifter::Impl::Lift(uint64_t addr, const char *fn_name,
       }
     }
 
+    // The trace manager returns the bounded extent of this function. Enumerate
+    // that extent for local indirect targets only; targets beyond it use the
+    // far-jump dispatch path instead of being lifted into this function.
     auto end_addr =
         lift_config.has_symtab ? manager.GetFuncVMA_E(trace_addr) : *addrset_in_func.begin();
-    // auto end_addr = (uint64_t) std::min(manager.GetFuncVMA_E(trace_addr), *addrset_in_func.begin());
-
-    // if the func includes intraprocedural indirect jump instruction, it is necessary to lift all instructions of the func.
-    if (br_bb && !lift_all_insn /* always be vrp_opt_mode || !vrp_opt_mode*/) {
+    // An intraprocedural indirect jump needs all local basic blocks available
+    // as destinations, including blocks not reached by direct control flow.
+    if (br_bb && !lift_all_insn) {
       for (uint64_t insn_vma = trace_addr; insn_vma < end_addr;) {
         if (lifted_block_map.count(insn_vma) == 0) {
           inst_work_list.insert(insn_vma);

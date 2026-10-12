@@ -40,16 +40,6 @@
 - Extend reusable helpers for repeated queries. Keep compact verified facts near affected code: binary/hash, module-relative address, signature/layout, ownership/order, evidence.
 - Stop tracing when required behavior is proven. Implement and exercise affected path; no unrelated binary inventory.
 
-## MUSTFIX: Portal conversion blocker
-
-- MUST fix function-boundary recovery and indirect-tail dispatch before treating Portal conversion as supported. More chunks or `-O0` are not fixes.
-- `client.so` SHA-256: `00b6e45eb84a93f0974c23d3e2656aa9e32e9ada64443f651899a78cde694aae`. Guest entry `0x2bf98c0` = ELF `0x6798c0`; `.eh_frame` range `[0x6798c0, 0x6798e2)` (34 bytes). Direct tail jumps reach helpers at ELF `0x679860` and `0x679800`; Ghidra follows 210 bytes, ending one path in virtual dispatch via `jmp eax`.
-- Partial `.symtab` selects `LoadStaticSymbolsBFD` instead of unwind recovery (`src/lifter/Binary/Loader.cpp`). Missing entries become `_ecv_rest_fun`; `AddRestDisasmFunc` bounds them by the next known entry. `TraceLifter.cpp` exhaustively lifts that assumed range after encountering an indirect jump and lists every lifted instruction block as an indirect destination.
-- Preserved `_ecv_rest_fun_____2bf98c0`: 37,423 LLVM blocks, 306,956 instructions, 37,420 indirect destinations; 33 direct lifted call sites. Only 15 instruction blocks lie inside the 34-byte native entry. This is not evidence of a giant native function.
-- Required: merge symbol/unwind boundaries, preserve extracted unwind sizes, and distinguish inter-function tail dispatch from local indirect branches without discarding valid guest targets. Rebuild/reconvert; verify recovered boundaries, native-versus-Wasm behavior, and actual compilation timing.
-- Reproduction: `unit-49367809dea17a587bf5e69d.chunk-28.bc`, 3,342,624 bytes; `-O1` Wasm object, 2,805,948 bytes. Compiler passes: ~428 s; CFG Stackify 164 s, CodeGen Prepare 128 s, Register Coloring 69 s. `-O0`: ~79 s.
-- Evidence: `/tmp/elfconv-compile-investigation/` (preserved cache, ELF, inspection helpers/reports); saved Ghidra program `build/portal-ghidra/PortalAudit:/client.so`. Temporary evidence may disappear; binary hash and module-relative addresses identify the reproduction.
-
 ## Testing and verification
 
 - Conversion terminology is enforced. The overall process is **conversion**, with

@@ -246,13 +246,11 @@ void ELFObject::LoadELFBFD() {
   // get every section
   LoadSectionsBFD();
 
-  // functions detection.
+  // Merge unwind boundaries and exact FDE sizes with static symbols when available.
   symbol_table_size = bfd_get_symtab_upper_bound(bfd_h);
   if (symbol_table_size <= 8) {
     // The ELF binary is stripped.
     is_stripped = true;
-    // The ELF binary generated from gcc or clang has `eh_frame` section even if it is stripped,
-    // and we can detect the function entry and length from the section if the section exists.
     int eh_frame_anal = GetSblFromEhFrame();
 #if defined(R2_ANALYSIS)
     R2Detect();
@@ -268,10 +266,10 @@ void ELFObject::LoadELFBFD() {
           "elfconv cannot convert the ELF binary if it is stripped and doesn't have `eh_frame` section because elfconv has some bugs. Please see the issues of the repository.");
     }
   } else {
-    // we can detect all functions by watching the symbol table.
     LoadStaticSymbolsBFD();
     is_stripped = false;
     able_vrp_opt = true;
+    GetSblFromEhFrame();
   }
 
   if (bin_arch == ARCH_I386) {
@@ -341,6 +339,7 @@ void ELFObject::LoadStaticSymbolsBFD() {
     func_symbols.emplace_back(ELFSymbol::SYM_TYPE_FUNC, sym_name, address,
                               GetIncludedSection(address), sym_size);
   }
+  free(bfd_symtab);
 }
 
 void ELFObject::LoadDynamicSymbolsBFD() {
@@ -745,99 +744,111 @@ void ELFObject::LoadSectionsBFD() {
   }
 }
 
-// We can get function entry address and function size (but not necessary for elfconv) by watching the `eh_frame` section.
-// In order to parse eh_frame, we use libdwarf library.
+// Unwind entries and exact extents supplement partial static symbol tables.
 int ELFObject::GetSblFromEhFrame() {
-
-  Dwarf_Debug dbg;
-  Dwarf_Error error;
-  Dwarf_Ptr errarg = 0;
-  Dwarf_Handler errhand = 0;
-  int elf_fd;
-  int reg_table_rule_count;
-  int dwarf_res;
-
-  if ((elf_fd = open(file_name.c_str(), O_RDONLY)) < 0) {
+  const int elf_fd = open(file_name.c_str(), O_RDONLY);
+  if (elf_fd < 0) {
     elfconv_runtime_error("open ELF file on ELFObject::GetSblOfEhFrame. file_name: %s.\n",
                           file_name.c_str());
   }
 
-  // libdwarf init.
-  if ((dwarf_res = dwarf_init(elf_fd, /*DW_DLC_REA*/ 0, errhand, errarg, &dbg, &error)) !=
-      DW_DLV_OK) {
+  Dwarf_Debug dbg = nullptr;
+  Dwarf_Error error;
+  if (dwarf_init(elf_fd, /* DW_DLC_READ */ 0, nullptr, nullptr, &dbg, &error) != DW_DLV_OK) {
     LOG(INFO) << "[INFO] dwarf_init() failed.\n";
+    close(elf_fd);
     return -1;
   }
 
-  // Set various meta data of Dwarf_dbg.
-  reg_table_rule_count = 1999;
+  constexpr int reg_table_rule_count = 1999;
   dwarf_set_frame_undefined_value(dbg, ECV_DWARF_UNDEF_VAL);
   dwarf_set_frame_rule_initial_value(dbg, ECV_DWARF_UNDEF_VAL);
   dwarf_set_frame_same_value(dbg, ECV_DWARF_SAME_VAL);
   dwarf_set_frame_cfa_value(dbg, ECV_DWARF_CFA_VAL);
   dwarf_set_frame_rule_table_size(dbg, reg_table_rule_count);
 
-  // Parse `eh_frame` section and make all function symbols.
-  dwarf_res = ParseEhFrame(dbg);
-  if (dwarf_res != 0) {
-    return -1;
-  }
-  dwarf_res = dwarf_finish(dbg, &error);
-
-  if (dwarf_res != DW_DLV_OK) {
+  const int parse_result = ParseEhFrame(dbg);
+  const int finish_result = dwarf_finish(dbg, &error);
+  close(elf_fd);
+  if (finish_result != DW_DLV_OK) {
     fprintf(stderr, "dwarf_finish failed!\n");
     exit(EXIT_FAILURE);
   }
-
-  close(elf_fd);
-  return 0;
+  return parse_result;
 }
 
 int ELFObject::ParseEhFrame(Dwarf_Debug dbg) {
-
   Dwarf_Error error;
   Dwarf_Signed cie_element_count = 0;
   Dwarf_Signed fde_element_count = 0;
-  Dwarf_Cie *cie_data = 0;
-  Dwarf_Fde *fde_data = 0;
-  int p_res = DW_DLV_ERROR;
+  Dwarf_Cie *cie_data = nullptr;
+  Dwarf_Fde *fde_data = nullptr;
 
-  // Parse `eh_frame` section.
-  p_res = dwarf_get_fde_list_eh(dbg, &cie_data, &cie_element_count, &fde_data, &fde_element_count,
-                                &error);
-  if (p_res == DW_DLV_NO_ENTRY) {
+  const auto dealloc = [&]() {
+    if (cie_data || fde_data)
+      dwarf_fde_cie_list_dealloc(dbg, cie_data, cie_element_count, fde_data, fde_element_count);
+  };
+  const int parse_result = dwarf_get_fde_list_eh(dbg, &cie_data, &cie_element_count,
+                                                  &fde_data, &fde_element_count, &error);
+  if (parse_result == DW_DLV_NO_ENTRY) {
     LOG(INFO) << "[INFO] No frame data on the ELF.\n";
+    dealloc();
     return -1;
-  } else if (p_res == DW_DLV_ERROR) {
+  }
+  if (parse_result != DW_DLV_OK) {
     LOG(WARNING) << "Error reading frame data.\n";
+    dealloc();
     return -1;
   }
 
-  // Get every function entry address and fucntion size from the parsed data.
-  for (Dwarf_Signed fdenum = 0; fdenum < fde_element_count; ++fdenum) {
+  std::unordered_map<uint64_t, std::vector<size_t>> static_symbols;
+  for (size_t i = 0; i < func_symbols.size(); ++i)
+    static_symbols[func_symbols[i].addr].push_back(i);
+  std::unordered_set<uint64_t> seen_entries;
 
-    Dwarf_Cie cie = 0;
+  for (Dwarf_Signed fdenum = 0; fdenum < fde_element_count; ++fdenum) {
+    Dwarf_Cie cie = nullptr;
     uint64_t ehf_fun_entry = 0;
     size_t ehf_fun_size = 0;
-
-    p_res = dwarf_get_cie_of_fde(fde_data[fdenum], &cie, &error);
-    if (p_res != DW_DLV_OK) {
+    const int cie_result = dwarf_get_cie_of_fde(fde_data[fdenum], &cie, &error);
+    if (cie_result != DW_DLV_OK) {
+      dwarf_fde_cie_list_dealloc(dbg, cie_data, cie_element_count, fde_data, fde_element_count);
       elfconv_runtime_error("Error accessing fdenum %" DW_PR_DSd " to get its cie\n", fdenum);
     }
 
-    // Make all func symbols.
     GetFuncFromEhFrame(&ehf_fun_entry, &ehf_fun_size, dbg, fde_data[fdenum]);
     ehf_fun_entry += load_bias;
+    if (!ehf_fun_size) continue;
+
+    auto *section = GetIncludedSection(ehf_fun_entry);
+    if (!section || !(bfd_section_flags(section) & SEC_CODE)) continue;
+    const uint64_t section_vma = bfd_section_vma(section);
+    const uint64_t section_size = bfd_section_size(section);
+    if (ehf_fun_entry < section_vma || ehf_fun_entry - section_vma > section_size ||
+        ehf_fun_size > section_size - (ehf_fun_entry - section_vma)) continue;
+    if (!seen_entries.insert(ehf_fun_entry).second) continue;
+
+    auto symbols = static_symbols.find(ehf_fun_entry);
+    if (symbols != static_symbols.end()) {
+      for (size_t index : symbols->second) func_symbols[index].size = ehf_fun_size;
+      continue;
+    }
+
+    auto existing = func_symbols_map.find(ehf_fun_entry);
+    if (existing != func_symbols_map.end()) {
+      existing->second.size = ehf_fun_size;
+      continue;
+    }
+
     std::stringstream ehf_fun_name;
     ehf_fun_name << "_ecv_lifted_fun_0x" << std::hex << ehf_fun_entry;
-    func_symbols_map.insert({ehf_fun_entry,
-                             {ELFSymbol::SYM_TYPE_FUNC, ehf_fun_name.str(), ehf_fun_entry,
-                              GetIncludedSection(ehf_fun_entry)}});
+    func_symbols_map.emplace(
+        ehf_fun_entry,
+        ELFSymbol(ELFSymbol::SYM_TYPE_FUNC, ehf_fun_name.str(), ehf_fun_entry, section,
+                 ehf_fun_size));
   }
 
-  // Destructor.
-  dwarf_fde_cie_list_dealloc(dbg, cie_data, cie_element_count, fde_data, fde_element_count);
-
+  dealloc();
   return 0;
 }
 

@@ -59,6 +59,19 @@ foreach(profile IN ITEMS dead-eflags shift-defined double-shift-defined rotate-d
   set_tests_properties(i386_${test_suffix} PROPERTIES
     LABELS "i386;regression" TIMEOUT 1000 RUN_SERIAL TRUE)
 endforeach()
+add_test(NAME i386_indirect_dispatch
+  COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/../run_i386.py"
+    --lifter "$<TARGET_FILE:elflift>"
+    --emcc "${ELFCONV_EMCC}"
+    --cc "${ELFCONV_I386_CC}"
+    --objcopy "${ELFCONV_I386_OBJCOPY}"
+    --node "${ELFCONV_I386_NODE}"
+    --source "${CMAKE_CURRENT_SOURCE_DIR}/indirect-dispatch.c"
+    --extra-source "${CMAKE_CURRENT_SOURCE_DIR}/indirect-dispatch.S"
+    --output-dir "${CMAKE_CURRENT_BINARY_DIR}/indirect-dispatch")
+set_tests_properties(i386_indirect_dispatch PROPERTIES
+  LABELS "i386;regression" TIMEOUT 1000 RUN_SERIAL TRUE)
+
 option(ELFCONV_STEAM_TESTS "Run native-versus-Wasm Steam API regression" OFF)
 if(ELFCONV_STEAM_TESTS)
   find_program(ELFCONV_I386_CXX NAMES g++ REQUIRED)
