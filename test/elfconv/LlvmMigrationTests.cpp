@@ -29,10 +29,18 @@ TEST(LlvmMigration, BitcodeProgressMatchesReadableOutput) {
   ASSERT_FALSE(llvm::sys::fs::createTemporaryFile("elfconv-byte-progress", "bc", path));
   llvm::FileRemover cleanup(path);
   static thread_local std::vector<std::uint64_t> reports;
+  static thread_local std::vector<remill::BitcodeWritePhase> phases;
   reports.clear();
+  phases.clear();
   ASSERT_TRUE(remill::StoreModuleToFile(&module, path.str(), false,
-      [](std::uint64_t bytes) { reports.push_back(bytes); }));
+      [](remill::BitcodeWritePhase phase, std::uint64_t bytes) {
+        if (phases.empty() || phases.back() != phase) phases.push_back(phase);
+        if (phase == remill::BitcodeWritePhase::Write) reports.push_back(bytes);
+      }));
   const auto size = std::filesystem::file_size(path.c_str());
+  EXPECT_EQ(phases, (std::vector<remill::BitcodeWritePhase>{
+      remill::BitcodeWritePhase::Verify, remill::BitcodeWritePhase::Serialize,
+      remill::BitcodeWritePhase::Write}));
   ASSERT_GE(reports.size(), 3u);  // Zero, at least one partial write, final size.
   EXPECT_EQ(reports.front(), 0u);
   EXPECT_EQ(reports.back(), size);

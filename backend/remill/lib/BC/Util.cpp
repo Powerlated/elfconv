@@ -562,13 +562,13 @@ namespace {
 class BitcodeProgressStream final : public llvm::raw_ostream {
  public:
   BitcodeProgressStream(llvm::raw_fd_ostream &output,
-                        void (*progress)(std::uint64_t))
+                        void (*progress)(BitcodeWritePhase, std::uint64_t))
       : llvm::raw_ostream(true), output_(output), progress_(progress) {}
 
   void Report() {
     if (!output_.has_error() && output_.tell() != reported_) {
       reported_ = output_.tell();
-      progress_(reported_);
+      progress_(BitcodeWritePhase::Write, reported_);
     }
   }
 
@@ -576,6 +576,10 @@ class BitcodeProgressStream final : public llvm::raw_ostream {
   void write_impl(const char *data, std::size_t size) override {
     // Bound writes so a single large LLVM buffer still produces live progress.
     constexpr std::size_t interval = 1024 * 1024;
+    if (!writing_) {
+      writing_ = true;
+      progress_(BitcodeWritePhase::Write, 0);
+    }
     while (size && !output_.has_error()) {
       const auto count = std::min(size, interval);
       output_.write(data, count);
@@ -589,17 +593,19 @@ class BitcodeProgressStream final : public llvm::raw_ostream {
   std::uint64_t current_pos() const override { return output_.tell(); }
 
   llvm::raw_fd_ostream &output_;
-  void (*progress_)(std::uint64_t);
+  void (*progress_)(BitcodeWritePhase, std::uint64_t);
   std::uint64_t reported_ = 0;
+  bool writing_ = false;
 };
 
 }  // namespace
 
 // Store an LLVM module into a file.
 bool StoreModuleToFile(llvm::Module *module, std::string_view file_name,
-                       bool allow_failure, void (*progress)(std::uint64_t)) {
+                       bool allow_failure,
+                       void (*progress)(BitcodeWritePhase, std::uint64_t)) {
   DLOG(INFO) << "Saving bitcode to file " << file_name;
-  if (progress) progress(0);
+  if (progress) progress(BitcodeWritePhase::Verify, 0);
 
   std::stringstream ss;
   ss << file_name << ".tmp." << nativeGetProcessID();
@@ -619,6 +625,7 @@ bool StoreModuleToFile(llvm::Module *module, std::string_view file_name,
   CHECK(!ec) << "Unable to open output bitcode file for writing: " << tmp_name;
 
   if (progress) {
+    progress(BitcodeWritePhase::Serialize, 0);
     BitcodeProgressStream output(bc.os(), progress);
     llvm::WriteBitcodeToFile(*module, output);
     output.Report();

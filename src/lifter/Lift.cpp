@@ -188,16 +188,27 @@ void PrintLiftingPhase(std::string_view phase, std::size_t completed = 0,
   std::cout << std::endl;
 }
 
-void PrintBitcodeBytes(std::uint64_t bytes) {
-  std::cout << "lifting - writing bitcode [" << bytes << " bytes]" << std::endl;
+void PrintBitcodeProgress(remill::BitcodeWritePhase phase, std::uint64_t bytes) {
+  switch (phase) {
+    case remill::BitcodeWritePhase::Verify:
+      PrintLiftingPhase("verifying module");
+      break;
+    case remill::BitcodeWritePhase::Serialize:
+      PrintLiftingPhase("serializing bitcode");
+      break;
+    case remill::BitcodeWritePhase::Write:
+      std::cout << "lifting - writing bitcode [" << bytes << " bytes]" << std::endl;
+      break;
+  }
 }
 
 void StoreBitcode(llvm::Module &module, std::string_view path) {
   remill::StoreModuleToFile(&module, path, false,
-                           FLAGS_lift_progress ? PrintBitcodeBytes : nullptr);
+                           FLAGS_lift_progress ? PrintBitcodeProgress : nullptr);
 }
 
 std::uint64_t ModuleIRDefinitionSize(const llvm::Module &module) {
+  PrintLiftingPhase("measuring IR size");
   std::uint64_t size = 0;
   for (const auto &global : module.global_values()) {
     if (global.isDeclaration()) continue;
