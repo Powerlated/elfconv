@@ -205,6 +205,7 @@ def main():
         *(['--wasm-opt-level', args.wasm_opt_level] if args.wasm_opt_level else []),
         *(['--lift-jobs', str(args.lift_jobs)] if args.lift_jobs else []),
         *(['--compile-jobs', str(args.compile_jobs)] if args.compile_jobs else []),
+        *(['--ir-chunks', str(args.ir_chunks)] if args.ir_chunks else []),
         *[argument for library in libraries for argument in ('--shared-library', str(library))],
         *(['--pthreads'] if args.pthreads else []),
         *(['--no-asyncify'] if args.no_asyncify else []),

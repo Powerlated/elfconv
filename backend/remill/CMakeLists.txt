@@ -202,9 +202,6 @@ else()
       "DEBUG"
     )
   else()
-    target_compile_options(remill_settings INTERFACE
-      -O0
-    )
     target_compile_definitions(remill_settings INTERFACE
       "NDEBUG"
     )

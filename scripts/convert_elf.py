@@ -346,9 +346,19 @@ class Driver:
             "--linker_map", a.link_map, "--object_base", a.object_base]
         flags = self.lift_flags() + partition
         manifest, fingerprint = self.cache / "units.tsv", self.cache / "metadata.fingerprint"
-        await self.run("Bundle scan", "running", [a.lifter, *flags, "--unit_manifest_out", manifest,
-                                                   "--metadata_fingerprint_out", fingerprint])
-        self.display.update("Bundle scan", "done")
+        scan_outputs = [manifest, fingerprint]
+        if manifest.is_file():
+            scan_outputs += [Path(fields[1]) for line in manifest.read_text().splitlines()
+                             if len(fields := line.split("\t")) == 4]
+        scan_inputs = [a.input, *a.shared_library]
+        if a.link_map:
+            scan_inputs.append(a.link_map)
+        _, scan_changed = await self.stage("Bundle scan", "running",
+            [a.lifter, *flags, "--unit_manifest_out", manifest,
+             "--metadata_fingerprint_out", fingerprint], [manifest, fingerprint],
+            [digest(Path(a.lifter)), [(str(path), digest(path)) for path in scan_inputs]],
+            self.cache / "scan.key", force=any(not path.is_file() for path in scan_outputs))
+        self.display.update("Bundle scan", "done" if scan_changed else "cached")
         entries = []
         for line in manifest.read_text().splitlines():
             fields = line.split("\t")
@@ -360,21 +370,31 @@ class Driver:
                 raise ValueError(f"Malformed unit size in manifest entry: {line}")
             entries.append((owner, Path(path), hashlib.sha256(owner.encode()).hexdigest()[:24],
                             function_count, estimated_size))
+        semantics = []
+        if a.bitcode_path:
+            paths = sorted(a.bitcode_path.rglob("*.bc")) if a.bitcode_path.is_dir() else [a.bitcode_path]
+            semantics = [(str(path), digest(path)) for path in paths]
+        lift_identity = key(digest(Path(a.lifter)), semantics)
         if not entries:
             raise ValueError("The ELF bundle produced no code units")
         chunk_counts = allocate_chunks(entries, a.ir_chunks) if a.ir_chunks else {
             entry[0]: 1 for entry in entries}
+        allocation_key = key(flags, lift_identity, a.ir_chunks,
+                             [(owner, digest(path)) for owner, path, _, _, _ in entries])
+        allocation_path = self.cache / "chunk-allocation.json"
+        if a.ir_chunks and allocation_path.is_file():
+            allocation = json.loads(allocation_path.read_text())
+            counts = allocation.get("counts", {})
+            if (allocation.get("key") == allocation_key and counts.keys() == chunk_counts.keys()
+                    and all(isinstance(count, int) and count > 0 for count in counts.values())
+                    and sum(counts.values()) == sum(chunk_counts.values())):
+                chunk_counts = counts
         for owner, _, _, _, _ in entries:
             self.display.update(owner, "queued", f"{chunk_counts[owner]} chunk(s)")
         queued_runtime = [] if a.runtime_archive else [
             f"Runtime/{source.name}" for source in [*COMMON, ROOT / "src/runtime/I386Imports.cpp"]]
         for name in ["Shared metadata", "Unit registry", *queued_runtime, "Final link"]:
             self.display.update(name, "queued")
-        semantics = []
-        if a.bitcode_path:
-            paths = sorted(a.bitcode_path.rglob("*.bc")) if a.bitcode_path.is_dir() else [a.bitcode_path]
-            semantics = [(str(path), digest(path)) for path in paths]
-        lift_identity = key(digest(Path(a.lifter)), semantics)
         compiler_identity = self.compiler_identity[emcc]
         compile_flags = [f"-O{a.wasm_opt_level}", *self.thread_compile, *self.exception_flags]
         compile_slots = asyncio.Semaphore(a.compile_jobs)
@@ -597,6 +617,8 @@ class Driver:
                                 f"[0/{chunk_counts[owner]}] ── {Path(owner).name}: awaiting relift",
                                 parent=owner)
                     await lift_compile_pipeline(changed_entries)
+                    atomic_text(allocation_path, json.dumps(
+                        {"key": allocation_key, "counts": chunk_counts}, sort_keys=True))
             return (metadata_task.result(), registry_task.result(),
                     [task.result() for task in runtime_tasks])
 
