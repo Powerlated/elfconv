@@ -35,7 +35,7 @@ class Display:
         self.parents: dict[str, str] = {}
         self.spinners: dict[str, Spinner] = {}
         self.live = Live(self.render(), console=console, refresh_per_second=8,
-                         auto_refresh=False)
+                         auto_refresh=False, vertical_overflow="visible")
 
     def label(self, name: str, row: ProgressRow) -> Text:
         owner = self.parents.get(name, name)
