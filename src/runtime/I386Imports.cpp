@@ -534,8 +534,38 @@ const wchar_t *wide_text(uint8_t *arena, uint32_t address);
 int scan_guest_string(uint8_t *arena, const char *input, const char *fmt, Arguments args);
 bool write_event(uint8_t *arena, uint32_t address, SDL_Event &event);
 
+template<typename Char>
+struct FormatOutput {
+  FILE *stream = nullptr;
+  std::basic_string<Char> buffer;
+  uint64_t count = 0;
+  int error = 0;
+
+  void fail(int value) { if (!error) error = value ? value : EIO; }
+  void clear() {
+    if (stream) fail(EOVERFLOW);
+    else { buffer.clear(); count = 0; }
+  }
+  void append(const Char *data, size_t size) {
+    if (error) return;
+    if (size > uint64_t(INT_MAX) - count) { fail(EOVERFLOW); return; }
+    if (stream) {
+      if constexpr (std::is_same_v<Char, char>) {
+        const size_t written = fwrite(data, 1, size, stream);
+        count += written;
+        if (written != size) fail(errno);
+      } else {
+        fail(EINVAL);
+      }
+      return;
+    }
+    buffer.append(data, size);
+    count += size;
+  }
+};
 template<typename Char, typename T>
-void append_format(std::basic_string<Char> &out, const std::basic_string<Char> &spec, T value) {
+void append_format(FormatOutput<Char> &out, const std::basic_string<Char> &spec, T value) {
+  if (out.error) return;
   Char buffer[256];
   int size;
   if constexpr (std::is_same_v<Char, char>)
@@ -544,7 +574,18 @@ void append_format(std::basic_string<Char> &out, const std::basic_string<Char> &
     size = swprintf(buffer, 256, spec.c_str(), value);
   if (size >= 0 && size < 256) { out.append(buffer, size); return; }
   if constexpr (std::is_same_v<Char, char>) {
-    if (size < 0) elfconv_runtime_error("Invalid guest printf format.\n");
+    if (size < 0) {
+      if (errno == EOVERFLOW) out.fail(EOVERFLOW);
+      else elfconv_runtime_error("Invalid guest printf format.\n");
+      return;
+    }
+    if (uint64_t(size) > uint64_t(INT_MAX) - out.count) { out.fail(EOVERFLOW); return; }
+    if (out.stream) {
+      const int written = fprintf(out.stream, spec.c_str(), value);
+      if (written < 0) { out.fail(errno); return; }
+      out.count += uint32_t(written);
+      return;
+    }
     std::vector<Char> large(size_t(size) + 1);
     snprintf(large.data(), large.size(), spec.c_str(), value);
     out.append(large.data(), size);
@@ -559,7 +600,7 @@ void append_format(std::basic_string<Char> &out, const std::basic_string<Char> &
   }
 }
 template<typename T>
-void append_wide_numeric_format(std::wstring &out, const std::wstring &spec, T value) {
+void append_wide_numeric_format(FormatOutput<wchar_t> &out, const std::wstring &spec, T value) {
   const std::string narrow_spec(spec.begin(), spec.end());
   char small[256];
   int size = snprintf(small, sizeof(small), narrow_spec.c_str(), value);
@@ -584,8 +625,7 @@ void append_wide_numeric_format(std::wstring &out, const std::wstring &spec, T v
   out.append(wide.data(), wide_size);
 }
 template<typename Char>
-std::basic_string<Char> format_impl(uint8_t *arena, const Char *input, Arguments args) {
-  std::basic_string<Char> out;
+void format_impl(uint8_t *arena, const Char *input, Arguments args, FormatOutput<Char> &out) {
   const int error_number = errno;
   auto ascii = [](Char value, const char *set) {
     return value > 0 && value < 128 && strchr(set, int(value));
@@ -621,16 +661,16 @@ std::basic_string<Char> format_impl(uint8_t *arena, const Char *input, Arguments
     return Arguments{arena, uint32_t(address)};
   };
   for (const Char *p = input; *p;) {
-    if (*p != '%') { out += *p++; continue; }
+    if (*p != '%') { out.append(p++, 1); continue; }
     ++p;
-    if (*p == '%') { out += *p++; continue; }
+    if (*p == '%') { out.append(p++, 1); continue; }
     std::basic_string<Char> spec(1, '%');
     uint64_t value_position;
     Arguments positional_value{arena, argument_base};
     Arguments *value_arguments = &args;
     if (take_position(p, value_position)) {
       positional_value = argument_at(value_position);
-      if (invalid_position) { out.clear(); return out; }
+      if (invalid_position) { out.clear(); out.fail(EOVERFLOW); return; }
       value_arguments = &positional_value;
     }
     while (ascii(*p, "-+ #0")) spec += *p++;
@@ -640,7 +680,7 @@ std::basic_string<Char> format_impl(uint8_t *arena, const Char *input, Arguments
       int32_t width;
       if (take_position(p, width_position)) {
         Arguments positional_width = argument_at(width_position);
-        if (invalid_position) { out.clear(); return out; }
+        if (invalid_position) { out.clear(); out.fail(EOVERFLOW); return; }
         width = int32_t(positional_width.word());
       } else width = int32_t(args.word());
       if (width == INT32_MIN) elfconv_runtime_error("Guest printf width overflow.\n");
@@ -656,7 +696,7 @@ std::basic_string<Char> format_impl(uint8_t *arena, const Char *input, Arguments
         int32_t precision;
         if (take_position(p, precision_position)) {
           Arguments positional_precision = argument_at(precision_position);
-          if (invalid_position) { out.clear(); return out; }
+          if (invalid_position) { out.clear(); out.fail(EOVERFLOW); return; }
           precision = int32_t(positional_precision.word());
         } else precision = int32_t(args.word());
         if (precision >= 0) {
@@ -740,7 +780,7 @@ std::basic_string<Char> format_impl(uint8_t *arena, const Char *input, Arguments
       }
     } else if (conversion == 'n') {
       const uint32_t address = value_arguments->word();
-      const uint64_t count = out.size();
+      const uint64_t count = out.count;
       const size_t size = length == 'q' || length == 'j' ? 8 : length == 'h' ? 2 : length == 'H' ? 1 : 4;
       memcpy(guest(arena, address, size), &count, size);
     } else if (conversion == 'm' && !length) {
@@ -755,20 +795,27 @@ std::basic_string<Char> format_impl(uint8_t *arena, const Char *input, Arguments
         append_format(out, spec, wide.data());
       }
     } else elfconv_runtime_error("Unsupported guest printf conversion: %c.\n", conversion);
-    if (out.size() > INT_MAX) elfconv_runtime_error("Guest printf output overflow.\n");
+    if (out.error) { errno = out.error; return; }
   }
-  return out;
 }
-std::string format(uint8_t *arena, const char *input, Arguments args) {
-  return format_impl(arena, input, args);
+std::string format(uint8_t *arena, const char *input, Arguments args, int *error = nullptr) {
+  FormatOutput<char> out;
+  format_impl(arena, input, args, out);
+  if (error) *error = out.error;
+  return std::move(out.buffer);
 }
 std::wstring wide_format(uint8_t *arena, const wchar_t *input, Arguments args) {
-  return format_impl(arena, input, args);
+  FormatOutput<wchar_t> out;
+  format_impl(arena, input, args, out);
+  return std::move(out.buffer);
 }
 int print(Call &call, FILE *stream, unsigned format_arg) {
-  auto out = format(call.arena, text(call.arena, call.word(format_arg)),
-                    {call.arena, call.stack + 4 * (format_arg + 2)});
-  return fwrite(out.data(), 1, out.size(), stream) == out.size() ? int(out.size()) : -1;
+  FormatOutput<char> out;
+  out.stream = stream;
+  format_impl(call.arena, text(call.arena, call.word(format_arg)),
+              {call.arena, call.stack + 4 * (format_arg + 2)}, out);
+  if (out.error) { errno = out.error; return -1; }
+  return int(out.count);
 }
 void parse_end(Call &call, const char *input, const char *end) {
   if (!call.word(1)) return;
@@ -1612,7 +1659,8 @@ void buffer_format(Call &call, bool bounded, bool va_list, bool fortified = fals
   if (fortified && bounded && call.word(1) > call.word(3))
     elfconv_runtime_error("Guest fortified formatting overflow.\n");
   uint32_t args = va_list ? call.word(format_arg + 1) : call.stack + 4 * (format_arg + 2);
-  auto out = format(call.arena, text(call.arena, call.word(format_arg)), {call.arena, args});
+  int format_error = 0;
+  auto out = format(call.arena, text(call.arena, call.word(format_arg)), {call.arena, args}, &format_error);
   uint32_t capacity = bounded ? call.word(1) : uint32_t(out.size() + 1);
   if (fortified && !bounded && capacity > call.word(2))
     elfconv_runtime_error("Guest fortified formatting overflow.\n");
@@ -1622,7 +1670,8 @@ void buffer_format(Call &call, bool bounded, bool va_list, bool fortified = fals
     memcpy(dst, out.data(), length);
     dst[length] = 0;
   }
-  call.result(out.size());
+  if (format_error) errno = format_error;
+  call.result(format_error ? -1 : int32_t(out.size()));
 }
 }
 IMPORT(floorf) { CALL; floating_result(state, floorf(call.real(0))); }
@@ -1687,7 +1736,9 @@ IMPORT(vasprintf) {
   const uint32_t output = call.word(0);
   const uint32_t null_pointer = 0;
   memcpy(guest(arena, output, 4), &null_pointer, 4);
-  auto result = format(arena, text(arena, call.word(1)), {arena, call.word(2)});
+  int format_error = 0;
+  auto result = format(arena, text(arena, call.word(1)), {arena, call.word(2)}, &format_error);
+  if (format_error) { errno = format_error; call.result(-1); return; }
   const uint32_t address = allocate(uint32_t(result.size() + 1));
   if (!address) { call.result(-1); return; }
   auto *buffer = static_cast<char *>(guest(arena, address, result.size() + 1));
@@ -1706,6 +1757,15 @@ IMPORT(open) {
   call.result(open(text(arena, call.word(0)), flags, needs_mode ? call.word(2) : 0));
 }
 IMPORT(open64) { __ecv_i386_open(arena, state, 0, runtime); }
+IMPORT(pipe) {
+  CALL;
+  const uint32_t address = call.word(0);
+  if (!address) { errno = EFAULT; call.result(-1); return; }
+  int descriptors[2];
+  const int result = pipe(descriptors);
+  if (!result) memcpy(guest(arena, address, sizeof(descriptors)), descriptors, sizeof(descriptors));
+  call.result(result);
+}
 IMPORT(close) { CALL; call.result(close(int32_t(call.word(0)))); }
 IMPORT(read) {
   CALL;
