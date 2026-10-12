@@ -117,10 +117,7 @@ struct GuestScanInput {
         consumed = -1;
         return 0;
       }
-      const unsigned bits = unsigned(output_size * 8);
-      const uint64_t positive_limit = output_size < 8
-          ? (uint64_t(1) << (bits - 1)) - 1
-          : uint64_t(LLONG_MAX);
+      const uint64_t positive_limit = uint64_t(LLONG_MAX);
       const uint64_t limit = negative ? positive_limit + 1 : positive_limit;
       unsigned base = automatic_base ? (c == '0' ? 8 : 10) : 10;
       uint64_t magnitude = uint64_t(c - '0');
