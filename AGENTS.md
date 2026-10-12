@@ -12,6 +12,7 @@
 - Establish shared ABI/helper contracts before dispatch: exact signatures, layouts, ownership, lifecycle, and existing helper locations.
 - Permit shared-file changes through explicit section ownership or isolated worktrees; main owns cross-slice integration.
 - Prefer one branch/worktree per cross-file slice; isolate generated files and build outputs too.
+- Agents working in isolated subtrees/worktrees may build, lint, test, format, and run verification gates using subtree-local build/output directories. Main still owns integrated verification.
 - Commit shared contracts before parallel work. Worktrees prevent edit collisions, not ABI or interface dependencies.
 - Agents deliver coherent implementation/caller/build/fixture patches; main reviews and merges in dependency order, then verifies end-to-end.
 - Subagents must run rigorous slice-local checks before submitting work to main: build, relevant behavior tests, and actual-path smoke checks. Report commands, results, and blockers; main still verifies the integrated result.
