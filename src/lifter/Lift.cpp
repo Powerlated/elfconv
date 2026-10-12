@@ -76,7 +76,7 @@ DEFINE_string(unit_id, "", "Stable suffix used for this incremental unit's metad
 DEFINE_uint64(max_ir_chunks_per_elf, 0, "Maximum linkable chunks per ELF; 1 skips partitioning.");
 DEFINE_string(lift_profile_out, "", "Write per-function lift timing and LLVM IR metrics as TSV.");
 DEFINE_bool(lift_progress, false, "Print live [lifted/known total] function counts.");
-DEFINE_string(ir_chunk_manifest_out, "", "Write chunk count and IR sizes for --max_ir_chunks_per_elf.");
+DEFINE_string(ir_chunk_manifest_out, "", "Write chunk count and indices for --max_ir_chunks_per_elf.");
 DEFINE_bool(analyze_only, false, "Print ELF section and function metrics without lifting.");
 DEFINE_bool(metadata_only, false, "Emit only process-wide ELF metadata.");
 DEFINE_string(
@@ -207,20 +207,6 @@ void StoreBitcode(llvm::Module &module, std::string_view path) {
                            FLAGS_lift_progress ? PrintBitcodeProgress : nullptr);
 }
 
-std::uint64_t ModuleIRDefinitionSize(const llvm::Module &module) {
-  PrintLiftingPhase("measuring IR size");
-  std::uint64_t size = 0;
-  for (const auto &global : module.global_values()) {
-    if (global.isDeclaration()) continue;
-    std::string text;
-    llvm::raw_string_ostream stream(text);
-    global.print(stream);
-    stream.flush();
-    size += text.size();
-  }
-  return size;
-}
-
 std::filesystem::path IRChunkPath(const std::filesystem::path &base,
                                   unsigned index) {
   return base.parent_path() /
@@ -343,7 +329,7 @@ void StoreIRChunks(llvm::Module &module) {
   manifest << FLAGS_max_ir_chunks_per_elf << '\t' << output_count << '\n';
   if (output_count == 1) {
     StoreBitcode(module, IRChunkPath(output_base, 0).string());
-    manifest << 0 << '\t' << ModuleIRDefinitionSize(module) << '\n';
+    manifest << 0 << '\n';
     return;
   }
   unsigned written = 0;
@@ -352,10 +338,7 @@ void StoreIRChunks(llvm::Module &module) {
       [&](std::unique_ptr<llvm::Module> chunk) {
         const auto chunk_path = IRChunkPath(output_base, written);
         StoreBitcode(*chunk, chunk_path.string());
-        const auto size = ModuleIRDefinitionSize(*chunk);
-        manifest << written << '\t' << size << '\n';
-        std::cout << "IR chunk " << written << ": " << size
-                  << " definition bytes\n";
+        manifest << written << '\n';
         PrintLiftingPhase("partitioning IR", ++written, output_count);
       }, false, true);
 }

@@ -356,7 +356,7 @@ class Driver:
 
         async def lift_owner(entry: tuple[str, Path, str, int, int],
                              count: int) -> list[dict[str, object]]:
-            owner, fingerprint_path, unit_id, _, code_size = entry
+            owner, fingerprint_path, unit_id, _, _ = entry
             base = self.cache / f"unit-{unit_id}.bc"
             lift_stamp = self.cache / f"unit-{unit_id}.lift.key"
             dependencies = [digest(fingerprint_path), lift_identity]
@@ -374,14 +374,14 @@ class Driver:
                      "--max_ir_chunks_per_elf", count, "--ir_chunk_manifest_out", chunk_manifest,
                      "--bc_out", base],
                     [chunk_manifest, *paths], dependencies, lift_stamp)
-                requested, bitcodes, sizes = self.read_ir_chunk_manifest(chunk_manifest, base)
+                requested, bitcodes = self.read_ir_chunk_manifest(chunk_manifest, base)
                 if requested != count or len(bitcodes) != count or any(not path.is_file() for path in bitcodes):
                     raise ValueError(f"{owner}: invalid chunk manifest for {count} chunks")
                 self.clean_ir_chunks(base, len(bitcodes))
                 return [
                     {"owner": owner, "unit_id": unit_id, "index": index,
                      "bitcode": bitcode, "object": self.cache / f"unit-{unit_id}-chunk-{index}.wasm.o",
-                     "lift_key": lift_key, "lift_changed": changed, "size": sizes[index],
+                     "lift_key": lift_key, "lift_changed": changed,
                      "count": count}
                     for index, bitcode in enumerate(bitcodes)]
             chunk_manifest = self.cache / f"unit-{unit_id}.ir-chunks.tsv"
@@ -393,7 +393,7 @@ class Driver:
                 [base], dependencies, lift_stamp)
             return [{"owner": owner, "unit_id": unit_id, "index": 0, "bitcode": base,
                      "object": self.cache / f"unit-{unit_id}-chunk-0.wasm.o",
-                     "lift_key": lift_key, "lift_changed": changed, "size": code_size,
+                     "lift_key": lift_key, "lift_changed": changed,
                      "count": 1}]
 
         completed = {owner: 0 for owner, _, _, _, _ in entries}
@@ -566,7 +566,7 @@ class Driver:
             if match and int(match[1]) >= count and path.is_file():
                 path.unlink()
 
-    def read_ir_chunk_manifest(self, manifest: Path, base: Path) -> tuple[int, list[Path], list[int]]:
+    def read_ir_chunk_manifest(self, manifest: Path, base: Path) -> tuple[int, list[Path]]:
         lines = manifest.read_text().splitlines()
         if not lines:
             raise ValueError(f"Empty IR chunk manifest: {manifest}")
@@ -575,16 +575,16 @@ class Driver:
             entries = []
             for line in lines[1:]:
                 entry = [int(value) for value in line.split("\t")]
-                if len(entry) != 2:
+                if len(entry) != 1:
                     raise ValueError
-                entries.append((entry[0], entry[1]))
+                entries.append(entry[0])
         except ValueError as error:
             raise ValueError(f"Malformed IR chunk manifest: {manifest}") from error
         if (len(header) != 2 or header[0] < 1 or header[1] < 1 or
                 len(entries) != header[1] or any(
-                    index != expected or size < 0 for expected, (index, size) in enumerate(entries))):
+                    index != expected for expected, index in enumerate(entries))):
             raise ValueError(f"Malformed IR chunk manifest: {manifest}")
-        return header[0], self.ir_chunk_paths(base, header[1]), [size for _, size in entries]
+        return header[0], self.ir_chunk_paths(base, header[1])
 
     async def chunked(self) -> None:
         a, name = self.a, self.a.elf_name
@@ -595,7 +595,7 @@ class Driver:
         if a.no_lifted:
             if not manifest.is_file():
                 raise ValueError(f"No IR chunk manifest for {name}; remove --no-lifted")
-            requested, chunks, ir_sizes = self.read_ir_chunk_manifest(manifest, base)
+            requested, chunks = self.read_ir_chunk_manifest(manifest, base)
             if requested != a.max_ir_chunks_per_elf or any(not path.is_file() for path in chunks):
                 raise ValueError(f"Existing IR chunks do not match --max-ir-chunks-per-elf {a.max_ir_chunks_per_elf}")
             lift_key = key(digest(manifest), [(digest(path)) for path in chunks])
@@ -605,7 +605,7 @@ class Driver:
             previous_chunks = []
             if manifest.is_file():
                 try:
-                    _, previous_chunks, _ = self.read_ir_chunk_manifest(manifest, base)
+                    _, previous_chunks = self.read_ir_chunk_manifest(manifest, base)
                     previous_outputs.extend(previous_chunks)
                 except ValueError:
                     lift_stamp.unlink(missing_ok=True)
@@ -621,7 +621,7 @@ class Driver:
                 [digest(a.input), [(str(path), digest(path)) for path in a.shared_library],
                  lift_identity], lift_stamp)
             self.display.update(name, "done" if lift_changed else "cached", "lifting")
-            requested, chunks, ir_sizes = self.read_ir_chunk_manifest(manifest, base)
+            requested, chunks = self.read_ir_chunk_manifest(manifest, base)
             if requested != a.max_ir_chunks_per_elf or any(not path.is_file() for path in chunks):
                 raise ValueError(f"Lifter produced invalid IR chunks for --max-ir-chunks-per-elf {a.max_ir_chunks_per_elf}")
         self.clean_ir_chunks(base, len(chunks))
@@ -700,8 +700,6 @@ class Driver:
             self.cache / f"{name}.ir-chunks.link.key")
         self.display.update("Final link", "done" if linked else "cached")
         self.html()
-        for index, size in enumerate(ir_sizes):
-            print(f"IR chunk {index}: {size} definition bytes")
 
 
     @staticmethod
