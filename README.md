@@ -190,22 +190,19 @@ After rebuilding `elflift`, rerun conversion. Incremental caches automatically
 invalidate when the lifter binary changes.
 Build with `-DCMAKE_BUILD_TYPE=Release` for optimized lifting.
 For `i386-wasm`, runtime sources compile as independent cached objects.
-`--ir-chunks N` targets the total chunks across bundled ELF owners (at least one
-per ELF). Counts are apportioned using code size, then refined using measured
-LLVM IR size. Each ELF is partitioned directly into final chunks; no intermediate
-split-and-merge pass. LLVM distributes functions while keeping dependent definitions
-together; chunk sizes can differ. Chunked conversion cannot use linker-map incremental
-units. `--lift-jobs N` bounds
+`--max-ir-chunks-per-elf N` caps chunks independently for each ELF.
+`N=1` writes the original module without partitioning or cloning; `N=0`
+disables chunk output (default). Larger limits are capped by function count.
+LLVM keeps dependent definitions together; chunk sizes can differ.
+Chunked conversion cannot use linker-map incremental units. `--lift-jobs N` bounds
 concurrent ELF lifts (default 2); `--compile-jobs N` bounds compiler jobs
 (default 8). Completed ELF chunks enter the compiler pool while other lifts
 continue; ready owners rotate through the pool. CMake uses `ELFCONV_LIFT_JOBS`
 (default 2) and `ELFCONV_COMPILE_JOBS` (default 2); target arguments:
 `LIFT_JOBS` and `COMPILE_JOBS`.
-Unchanged bundles reuse the scan and refined chunk allocation; warm conversion
-does not repeat the initial chunk allocation and relift.
 Progress rows show ELF, stage detail, counter, then stage time.
 
-Portal: `./lift_portal.sh` reuses the repository-root cache, with 96 chunks,
+Portal: `./lift_portal.sh` reuses the repository-root cache, with one chunk per ELF,
 12 lifting/compiler jobs, and `-O1`. Overrides: `ELFCONV_LIFT_JOBS`,
 `ELFCONV_COMPILE_JOBS`, `ELFCONV_WASM_OPT_LEVEL`; extra driver flags pass through.
 After lifter/runtime edits, run `ELFCONV_BUILD=1 ./lift_portal.sh` to rebuild first.

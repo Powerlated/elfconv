@@ -14,7 +14,7 @@ from unittest.mock import patch
 from rich.console import Console
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
-from convert_elf import Display, Driver, allocate_chunks, bounded_as_completed, digest, parser, tool
+from convert_elf import Display, Driver, bounded_as_completed, digest, parser, tool
 from pack_preload import pack_preload
 
 
@@ -90,15 +90,6 @@ async def cancellation(directory: Path) -> None:
 
 
 async def chunk_pool() -> None:
-    entries = [
-        ("large.so", Path("large.fingerprint"), "large", 30, 9000),
-        ("medium.so", Path("medium.fingerprint"), "medium", 20, 3000),
-        ("small.so", Path("small.fingerprint"), "small", 10, 500),
-    ]
-    counts = allocate_chunks(entries, 18)
-    assert sum(counts.values()) == 18
-    assert counts["large.so"] > counts["medium.so"] > counts["small.so"]
-    assert all(counts[entry[0]] <= entry[3] for entry in entries)
 
     active = 0
     maximum = 0

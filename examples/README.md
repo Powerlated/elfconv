@@ -314,9 +314,9 @@ Bundled i386 Wasm conversion lifts each ELF separately with bounded concurrent
 workers, then links one Wasm module with shared guest layout/loader metadata and
 import adapters. Portal uses this per-ELF path. Cache: output directory's
 `.elfconv-incremental/`.
-`--ir-chunks N` targets total chunks across ELF owners (minimum one per ELF);
-counts use code-size estimates then measured LLVM IR sizes, and chunks are
-balanced across the bundle. `--lift-jobs` bounds concurrent ELF lifts (default
+`--max-ir-chunks-per-elf N` caps chunks per ELF; `N=1` skips partitioning and
+cloning. `N=0` disables chunk output (default). No bundle-wide allocation or relift.
+`--lift-jobs` bounds concurrent ELF lifts (default
 2); completed ELF chunks enter the compiler pool while other lifts continue.
 `--compile-jobs` caps all compiler jobs (default 8); ready ELF owners rotate
 through the pool. CMake: `ELFCONV_LIFT_JOBS` and `ELFCONV_COMPILE_JOBS` (both

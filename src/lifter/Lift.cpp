@@ -73,10 +73,10 @@ DEFINE_string(unit_manifest_out, "", "Write unit owners and content fingerprints
 DEFINE_string(metadata_fingerprint_out, "", "Write the process-wide ELF metadata fingerprint.");
 DEFINE_string(unit_owner, "", "Lift only functions owned by this linker-map object.");
 DEFINE_string(unit_id, "", "Stable suffix used for this incremental unit's metadata symbols.");
-DEFINE_uint64(ir_chunks, 0, "Split lifted IR into approximately equal-size linkable chunks.");
+DEFINE_uint64(max_ir_chunks_per_elf, 0, "Maximum linkable chunks per ELF; 1 skips partitioning.");
 DEFINE_string(lift_profile_out, "", "Write per-function lift timing and LLVM IR metrics as TSV.");
 DEFINE_bool(lift_progress, false, "Print live [lifted/known total] function counts.");
-DEFINE_string(ir_chunk_manifest_out, "", "Write chunk count and IR sizes for --ir_chunks.");
+DEFINE_string(ir_chunk_manifest_out, "", "Write chunk count and IR sizes for --max_ir_chunks_per_elf.");
 DEFINE_bool(analyze_only, false, "Print ELF section and function metrics without lifting.");
 DEFINE_bool(metadata_only, false, "Emit only process-wide ELF metadata.");
 DEFINE_string(
@@ -307,7 +307,7 @@ void StoreIRChunks(llvm::Module &module) {
   }
 
   const auto output_count = static_cast<unsigned>(
-      std::min<std::uint64_t>(FLAGS_ir_chunks, function_count));
+      std::min<std::uint64_t>(FLAGS_max_ir_chunks_per_elf, function_count));
   // Split directly into final chunks. Intermediate partitions multiply
   // CloneModule's module-wide work and require another linking pass.
   const std::filesystem::path output_base(FLAGS_bc_out);
@@ -320,7 +320,13 @@ void StoreIRChunks(llvm::Module &module) {
     elfconv_runtime_error("Cannot write IR chunk manifest: %s\n",
                           FLAGS_ir_chunk_manifest_out.c_str());
   }
-  manifest << FLAGS_ir_chunks << '\t' << output_count << '\n';
+  manifest << FLAGS_max_ir_chunks_per_elf << '\t' << output_count << '\n';
+  if (output_count == 1) {
+    PrintLiftingPhase("writing bitcode");
+    remill::StoreModuleToFile(&module, IRChunkPath(output_base, 0).string());
+    manifest << 0 << '\t' << ModuleIRDefinitionSize(module) << '\n';
+    return;
+  }
   unsigned written = 0;
   PrintLiftingPhase("partitioning IR", 0, output_count);
   llvm::SplitModule(module, output_count,
@@ -362,20 +368,20 @@ int main(int argc, char *argv[]) {
       "Enabled by default; the last occurrence wins.");
   google::ParseCommandLineFlags(&argc, &argv, true);
   google::InitGoogleLogging(argv[0]);
-  if (FLAGS_ir_chunks) {
+  if (FLAGS_max_ir_chunks_per_elf) {
     const bool has_unit_args =
         !FLAGS_unit_owner.empty() && !FLAGS_unit_id.empty();
-    if (FLAGS_ir_chunks > std::numeric_limits<unsigned>::max() ||
+    if (FLAGS_max_ir_chunks_per_elf > std::numeric_limits<unsigned>::max() ||
         FLAGS_arch != "i386" || FLAGS_target_arch != "emscripten32" ||
         FLAGS_bc_out.empty() || FLAGS_ir_chunk_manifest_out.empty() ||
         (FLAGS_per_elf != has_unit_args) || !FLAGS_linker_map.empty() ||
         !FLAGS_unit_manifest_out.empty() || FLAGS_metadata_only) {
       elfconv_runtime_error(
-          "--ir_chunks requires an i386 Emscripten lift with --bc_out and "
+          "--max_ir_chunks_per_elf requires an i386 Emscripten lift with --bc_out and "
           "--ir_chunk_manifest_out, optionally for a --per_elf unit.\n");
     }
   } else if (!FLAGS_ir_chunk_manifest_out.empty()) {
-    elfconv_runtime_error("--ir_chunk_manifest_out requires --ir_chunks.\n");
+    elfconv_runtime_error("--ir_chunk_manifest_out requires --max_ir_chunks_per_elf.\n");
   }
 
   AArch64TraceManager manager(FLAGS_target_elf);
@@ -425,7 +431,7 @@ int main(int argc, char *argv[]) {
   if (FLAGS_analyze_only) {
     if (!FLAGS_unit_manifest_out.empty() || !FLAGS_unit_owner.empty() ||
         !FLAGS_unit_id.empty() || FLAGS_metadata_only || !FLAGS_bc_out.empty() ||
-        FLAGS_ir_chunks || !FLAGS_lift_profile_out.empty()) {
+        FLAGS_max_ir_chunks_per_elf || !FLAGS_lift_profile_out.empty()) {
       elfconv_runtime_error(
           "--analyze_only cannot be combined with lift, unit, or bitcode-output options.\n");
     }
@@ -674,7 +680,7 @@ int main(int argc, char *argv[]) {
     builder.registerModuleAnalyses(analyses);
     passes.run(*module, analyses);
   }
-  if (FLAGS_ir_chunks && unit_mode) {
+  if (FLAGS_max_ir_chunks_per_elf && unit_mode) {
     for (auto &global : module->global_values()) {
       if (global.isDeclaration()) continue;
       const auto name = global.getName();
@@ -692,7 +698,7 @@ int main(int argc, char *argv[]) {
     module->setDataLayout(
         "e-m:e-p:32:32-p10:8:8-p20:8:8-i64:64-i128:128-n32:64-S128-ni:1:10:20");
   }
-  if (FLAGS_ir_chunks) {
+  if (FLAGS_max_ir_chunks_per_elf) {
     StoreIRChunks(*module);
   } else {
     PrintLiftingPhase("writing bitcode");

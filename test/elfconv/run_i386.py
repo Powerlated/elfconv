@@ -44,8 +44,8 @@ def main():
                         help='Add one linker argument after standalone fixture sources (repeatable)')
     parser.add_argument('--wasm-opt-level', choices=list('0123sz'),
                         help='Set the Emscripten optimization level for the lifted test')
-    parser.add_argument('--ir-chunks', type=int,
-                        help='Partition an i386 ELF bundle into this many total chunks')
+    parser.add_argument('--max-ir-chunks-per-elf', type=int,
+                        help='Maximum linkable chunks per ELF; 1 skips partitioning')
     parser.add_argument('--lift-jobs', type=int,
                         help='Bound concurrent ELF lifting processes')
     parser.add_argument('--compile-jobs', type=int,
@@ -205,7 +205,8 @@ def main():
         *(['--wasm-opt-level', args.wasm_opt_level] if args.wasm_opt_level else []),
         *(['--lift-jobs', str(args.lift_jobs)] if args.lift_jobs else []),
         *(['--compile-jobs', str(args.compile_jobs)] if args.compile_jobs else []),
-        *(['--ir-chunks', str(args.ir_chunks)] if args.ir_chunks else []),
+        *(['--max-ir-chunks-per-elf', str(args.max_ir_chunks_per_elf)]
+          if args.max_ir_chunks_per_elf is not None else []),
         *[argument for library in libraries for argument in ('--shared-library', str(library))],
         *(['--pthreads'] if args.pthreads else []),
         *(['--no-asyncify'] if args.no_asyncify else []),

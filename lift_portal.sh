@@ -38,7 +38,7 @@ python3 scripts/convert_elf.py \
   --lifter "$PWD/build/llvm23/src/lifter/elflift" \
   --emcc "$HOME/emsdk-6/upstream/emscripten/em++" \
   --legacy-gl 0 \
-  --ir-chunks 96 \
+  --max-ir-chunks-per-elf 1 \
   --runtime-archive "$PWD/build/llvm23/src/lifter/libelfconv-runtime-i386-wasm-incremental.a" \
   --lift-jobs "${ELFCONV_LIFT_JOBS:-12}" \
   --compile-jobs "${ELFCONV_COMPILE_JOBS:-12}" \

@@ -61,22 +61,6 @@ async def bounded_as_completed(items: list[Item], semaphore: asyncio.Semaphore,
         await asyncio.gather(*tasks, return_exceptions=True)
 
 
-def allocate_chunks(entries: list[tuple[str, Path, str, int, int]],
-                    requested: int) -> dict[str, int]:
-    """Apportion a global chunk budget by ELF code size, with one per owner."""
-    functions = sum(entry[3] for entry in entries)
-    target = min(max(requested, len(entries)), functions)
-    chunks = {entry[0]: 1 for entry in entries}
-    weights = {entry[0]: max(entry[4], 1) for entry in entries}
-    for _ in range(target - len(entries)):
-        owner = max(
-            (entry[0] for entry in entries if chunks[entry[0]] < entry[3]),
-            key=lambda value: (weights[value] / chunks[value], value))
-        chunks[owner] += 1
-    return chunks
-
-
-
 
 def atomic_text(path: Path, text: str) -> None:
     temporary = path.with_name(path.name + ".tmp")
@@ -124,8 +108,8 @@ def parser() -> argparse.ArgumentParser:
                         help="Maximum concurrent ELF lifting processes")
     result.add_argument("--compile-jobs", type=int, default=8,
                         help="Maximum concurrent compiler jobs")
-    result.add_argument("--ir-chunks", type=int, default=0, metavar="N",
-                        help="Target total linkable i386 chunks, apportioned across ELF owners.")
+    result.add_argument("--max-ir-chunks-per-elf", type=int, default=0, metavar="N",
+                        help="Maximum linkable chunks per ELF; 1 skips partitioning, 0 disables chunk output.")
     result.add_argument("--debug-func-addr", default="0")
     for name in ("init-wasm", "debug", "float-status", "text-ir", "no-lifted",
                  "no-compiled", "ready-js", "incremental-units", "jspi", "pthreads"):
@@ -335,18 +319,9 @@ class Driver:
         lift_identity = key(digest(Path(a.lifter)), semantics)
         if not entries:
             raise ValueError("The ELF bundle produced no code units")
-        chunk_counts = allocate_chunks(entries, a.ir_chunks) if a.ir_chunks else {
-            entry[0]: 1 for entry in entries}
-        allocation_key = key(flags, lift_identity, a.ir_chunks,
-                             [(owner, digest(path)) for owner, path, _, _, _ in entries])
-        allocation_path = self.cache / "chunk-allocation.json"
-        if a.ir_chunks and allocation_path.is_file():
-            allocation = json.loads(allocation_path.read_text())
-            counts = allocation.get("counts", {})
-            if (allocation.get("key") == allocation_key and counts.keys() == chunk_counts.keys()
-                    and all(isinstance(count, int) and count > 0 for count in counts.values())
-                    and sum(counts.values()) == sum(chunk_counts.values())):
-                chunk_counts = counts
+        chunk_counts = {owner: min(a.max_ir_chunks_per_elf, functions)
+                        if a.max_ir_chunks_per_elf else 1
+                        for owner, _, _, functions, _ in entries}
         for owner, _, _, _, _ in entries:
             self.display.update(owner, "queued", f"{chunk_counts[owner]} chunk(s)")
         queued_runtime = [] if a.runtime_archive else [
@@ -380,7 +355,7 @@ class Driver:
             base = self.cache / f"unit-{unit_id}.bc"
             lift_stamp = self.cache / f"unit-{unit_id}.lift.key"
             dependencies = [digest(fingerprint_path), lift_identity]
-            if a.ir_chunks:
+            if a.max_ir_chunks_per_elf:
                 chunk_manifest = self.cache / f"unit-{unit_id}.ir-chunks.tsv"
                 if chunk_manifest.is_file():
                     try:
@@ -391,7 +366,7 @@ class Driver:
                 lift_key, changed = await self.stage(
                     owner, "lifting",
                     [a.lifter, *flags, "--unit_owner", owner, "--unit_id", unit_id,
-                     "--ir_chunks", count, "--ir_chunk_manifest_out", chunk_manifest,
+                     "--max_ir_chunks_per_elf", count, "--ir_chunk_manifest_out", chunk_manifest,
                      "--bc_out", base],
                     [chunk_manifest, *paths], dependencies, lift_stamp)
                 requested, bitcodes, sizes = self.read_ir_chunk_manifest(chunk_manifest, base)
@@ -551,29 +526,6 @@ class Driver:
                 runtime_tasks = [group.create_task(compile_runtime(source))
                                  for source in runtime_sources]
                 await lift_compile_pipeline(entries)
-                if a.ir_chunks:
-                    measured_entries = [
-                        (*entry[:4], sum(int(chunk["size"]) for chunk in lifted_chunks[entry[0]]))
-                        for entry in entries]
-                    refined_counts = allocate_chunks(measured_entries, a.ir_chunks)
-                    changed_entries = []
-                    for entry in entries:
-                        owner = entry[0]
-                        if refined_counts[owner] != chunk_counts[owner]:
-                            chunk_counts[owner] = refined_counts[owner]
-                            completed[owner] = 0
-                            changed_owners[owner] = False
-                            compiled_chunks[owner] = {}
-                            changed_entries.append(entry)
-                            self.display.update(owner, "queued",
-                                                f"{chunk_counts[owner]} rebalanced chunk(s)")
-                            self.display.update(
-                                f"{owner}::compile", "queued",
-                                "awaiting relift", parent=owner,
-                                counter=(0, chunk_counts[owner]))
-                    await lift_compile_pipeline(changed_entries)
-                    atomic_text(allocation_path, json.dumps(
-                        {"key": allocation_key, "counts": chunk_counts}, sort_keys=True))
             return (metadata_task.result(), registry_task.result(),
                     [task.result() for task in runtime_tasks])
 
@@ -639,8 +591,8 @@ class Driver:
             if not manifest.is_file():
                 raise ValueError(f"No IR chunk manifest for {name}; remove --no-lifted")
             requested, chunks, ir_sizes = self.read_ir_chunk_manifest(manifest, base)
-            if requested != a.ir_chunks or any(not path.is_file() for path in chunks):
-                raise ValueError(f"Existing IR chunks do not match --ir-chunks {a.ir_chunks}")
+            if requested != a.max_ir_chunks_per_elf or any(not path.is_file() for path in chunks):
+                raise ValueError(f"Existing IR chunks do not match --max-ir-chunks-per-elf {a.max_ir_chunks_per_elf}")
             lift_key = key(digest(manifest), [(digest(path)) for path in chunks])
             self.display.update(name, "cached", "lifting")
         else:
@@ -658,15 +610,15 @@ class Driver:
                 semantics = [(str(path), digest(path)) for path in paths]
             lift_identity = key(digest(Path(a.lifter)), semantics)
             lift_key, lift_changed = await self.stage(name, "lifting",
-                [a.lifter, *self.lift_flags(), "--ir_chunks", a.ir_chunks,
+                [a.lifter, *self.lift_flags(), "--max_ir_chunks_per_elf", a.max_ir_chunks_per_elf,
                  "--ir_chunk_manifest_out", manifest, "--bc_out", base],
                 [manifest, *previous_chunks],
                 [digest(a.input), [(str(path), digest(path)) for path in a.shared_library],
                  lift_identity], lift_stamp)
             self.display.update(name, "done" if lift_changed else "cached", "lifting")
             requested, chunks, ir_sizes = self.read_ir_chunk_manifest(manifest, base)
-            if requested != a.ir_chunks or any(not path.is_file() for path in chunks):
-                raise ValueError(f"Lifter produced invalid IR chunks for --ir-chunks {a.ir_chunks}")
+            if requested != a.max_ir_chunks_per_elf or any(not path.is_file() for path in chunks):
+                raise ValueError(f"Lifter produced invalid IR chunks for --max-ir-chunks-per-elf {a.max_ir_chunks_per_elf}")
         self.clean_ir_chunks(base, len(chunks))
 
         compiler_identity = self.compiler_identity[emcc]
@@ -910,13 +862,13 @@ def validate(a: argparse.Namespace) -> None:
         raise ValueError("--compile-jobs must be positive")
     if a.lift_jobs < 1:
         raise ValueError("--lift-jobs must be positive")
-    if a.ir_chunks < 0:
-        raise ValueError("--ir-chunks must be non-negative")
-    if a.ir_chunks and a.target != "i386-wasm":
-        raise ValueError("--ir-chunks requires i386-wasm")
-    if a.ir_chunks and (a.incremental_units or a.link_map or
-                        a.object_base or a.text_ir or a.ready_js):
-        raise ValueError("--ir-chunks cannot be combined with incremental units, linker maps, text IR, or --ready-js")
+    if a.max_ir_chunks_per_elf < 0:
+        raise ValueError("--max-ir-chunks-per-elf must be non-negative")
+    if a.max_ir_chunks_per_elf and a.target != "i386-wasm":
+        raise ValueError("--max-ir-chunks-per-elf requires i386-wasm")
+    if a.max_ir_chunks_per_elf and (a.incremental_units or a.link_map or
+                                    a.object_base or a.text_ir or a.ready_js):
+        raise ValueError("--max-ir-chunks-per-elf cannot be combined with incremental units, linker maps, text IR, or --ready-js")
     if a.pthreads and a.target != "i386-wasm":
         raise ValueError("--pthreads requires i386-wasm")
     if a.runtime_archive:
@@ -969,7 +921,7 @@ async def convert(a: argparse.Namespace, console: Console) -> None:
             driver.prepare_browser()
         elif a.shared_library and a.target == "i386-wasm":
             await driver.incremental()
-        elif a.ir_chunks:
+        elif a.max_ir_chunks_per_elf:
             await driver.chunked()
         elif a.incremental_units:
             await driver.incremental()
