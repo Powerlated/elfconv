@@ -942,6 +942,17 @@ def validate(a: argparse.Namespace) -> None:
 
 
 async def convert(a: argparse.Namespace, console: Console) -> None:
+    loop = asyncio.get_running_loop()
+    task = asyncio.current_task()
+    termination_requested = False
+
+    def terminate():
+        nonlocal termination_requested
+        if not termination_requested:
+            termination_requested = True
+            task.cancel()
+
+    loop.add_signal_handler(signal.SIGTERM, terminate)
     display = Display(a.elf_name, console)
     driver = Driver(a, display)
     refresh = asyncio.create_task(display.refresh())
@@ -959,6 +970,7 @@ async def convert(a: argparse.Namespace, console: Console) -> None:
         else:
             await driver.single()
     finally:
+        loop.remove_signal_handler(signal.SIGTERM)
         refresh.cancel()
         await asyncio.gather(refresh, return_exceptions=True)
         if console.is_terminal:
@@ -976,6 +988,9 @@ def main() -> int:
     except KeyboardInterrupt:
         console.print("Conversion cancelled; active subprocess groups stopped.", style="yellow")
         return 130
+    except asyncio.CancelledError:
+        console.print("Conversion terminated; active subprocess groups stopped.", style="yellow")
+        return 143
     except (OSError, ValueError, RuntimeError) as error:
         console.print(Text(str(error), style="red"), soft_wrap=True)
         return 1

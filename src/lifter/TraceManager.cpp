@@ -89,31 +89,67 @@ void AArch64TraceManager::LoadLinkerMap(const std::string &path,
   if (!input) elfconv_runtime_error("Cannot open SM64 linker map: %s\n", path.c_str());
 
   std::string line;
+  std::string pending_section;
+  bool discarded_sections = false;
   while (std::getline(input, line)) {
+    const auto trimmed_line = Trim(line);
+    if (trimmed_line == "Linker script and memory map") {
+      discarded_sections = false;
+      pending_section.clear();
+      continue;
+    }
+    if (trimmed_line == "Discarded input sections") {
+      discarded_sections = true;
+      pending_section.clear();
+      continue;
+    }
+    if (discarded_sections) continue;
     std::istringstream fields(line);
-    std::string first, second;
-    if (!(fields >> first >> second)) continue;
+    std::string first, second, third;
+    if (!(fields >> first)) {
+      pending_section.clear();
+      continue;
+    }
 
     std::string section;
     std::string address_text;
     std::string size_text;
     std::string owner;
-    if (!first.empty() && first.front() == '.') {
+    if (first.front() == '.') {
+      if (!(fields >> second)) {
+        pending_section = IsCodeMapSection(first) ? first : "";
+        continue;
+      }
+      if (!(fields >> third)) {
+        pending_section.clear();
+        continue;
+      }
       section = first;
       address_text = second;
-      if (!(fields >> size_text)) continue;
+      size_text = third;
       std::getline(fields, owner);
+      pending_section.clear();
     } else {
       address_text = first;
-      size_text = second;
+      if (!(fields >> size_text)) {
+        pending_section.clear();
+        continue;
+      }
       std::getline(fields, owner);
       const auto suffix = owner.find(":(");
-      if (suffix == std::string::npos) continue;
-      const auto section_begin = suffix + 2;
-      const auto section_end = owner.find(')', section_begin);
-      if (section_end == std::string::npos) continue;
-      section = owner.substr(section_begin, section_end - section_begin);
-      owner.resize(suffix);
+      if (suffix != std::string::npos) {
+        const auto section_begin = suffix + 2;
+        const auto section_end = owner.find(')', section_begin);
+        if (section_end == std::string::npos) {
+          pending_section.clear();
+          continue;
+        }
+        section = owner.substr(section_begin, section_end - section_begin);
+        owner.resize(suffix);
+      } else {
+        section = pending_section;
+        pending_section.clear();
+      }
     }
     if (!IsCodeMapSection(section)) continue;
 
