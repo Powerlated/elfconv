@@ -1446,6 +1446,7 @@ IMPORT(freopen) {
   files[handle] = file;
   call.result(handle);
 }
+IMPORT(freopen64) { __ecv_i386_freopen(arena, state, 0, runtime); }
 IMPORT(fclose) {
   CALL;
   const uint32_t handle = call.word(0);
