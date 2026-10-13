@@ -36,6 +36,16 @@
 - ELF conversion targets from i386 to Wasm MUST use `<name>-i386-to-wasm`.
 - Keep these suffixes distinct; update all callers and documentation when renaming.
 
+## Token-efficient iteration
+
+- Keep `.elfconv-logs/portal-checkpoint.json`: current failure, artifact hashes, proven facts, unresolved question, exact next query. Read it on resume; revalidate changed identities instead of retracing unchanged evidence.
+- Save full stacks, assembly, and headless logs under `.elfconv-logs/`; return only evidence answering the current question, with saved-file paths.
+- Use `scripts/guest_trace.py stack` to deduplicate Wasm guest frames and map them from current metadata. Supply a verified Ghidra base explicitly; never infer it.
+- Use `scripts/guest_trace.py asm` only for already-identified operands/calls or unreliable decompilation. Its bounded excerpts prevent whole-function dumps.
+- State one unknown and its decisive observation before each diagnostic run. Stop tracing when proven; implement and exercise that path.
+- Reuse local reference clones and saved Ghidra projects. Never repeat inventories or equivalent queries unless artifacts changed or evidence was incomplete.
+- Use `--browser-only` for browser templates and `--relink-only` for runtime/pre-JS/link changes. Normal conversion is for changed guest code, lifter, semantics, or compilation configuration.
+
 ## Binary analysis
 
 - User observations are ground truth. Name exact unknown and required evidence before tracing.
