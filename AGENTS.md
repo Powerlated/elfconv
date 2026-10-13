@@ -57,7 +57,8 @@
 - Use Ghidra for retail ABI/offset analysis. If unavailable, download official release into `.tools/`. Reuse saved analyzed projects; keep projects outside dot-prefixed directories.
 - Preserve analysis and verified symbol names. Label only evidence-backed discoveries; distinguish candidates from proven facts.
 - Batch independent queries per module. Read narrow excerpts; assembly only for specific operands, indirect calls, patch targets, or unreliable decompilation.
-- GPT-6-Luna MUST consult authoritative online documentation for instruction behavior; prefer vendor ISA manuals, and cite the specific source used in analysis.
+- Before any instruction-semantics implementation or instruction-related bug fix, consult the official Intel SDM or AMD APM entry for the exact opcode and target mode. Verify its operation, operand/encoding rules, flags, architectural state changes, and exceptions against the proposed change; do not rely on third-party opcode summaries, source comments, or mnemonic similarity as the ISA authority.
+- In the analysis and change record, cite the vendor, manual title, revision, volume, instruction section/page, and direct URL. If the vendor manuals differ, name the difference and implement only behavior supported by the intended guest CPU contract. If the applicable rule cannot be verified, stop before changing instruction semantics and report the missing source.
 - Empty search: change evidence source/query. Bad recovery: repair reusable analysis tooling, not recurring throwaway scripts.
 - Extend reusable helpers for repeated queries. Keep compact verified facts near affected code: binary/hash, module-relative address, signature/layout, ownership/order, evidence.
 - Stop tracing when required behavior is proven. Implement and exercise affected path; no unrelated binary inventory.
