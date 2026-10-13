@@ -1807,26 +1807,13 @@ DEF_SEM(DoMASKMOVQ_MMXq_MMXq, V64 src1, V64 src2) {
 }
 
 DEF_SEM(DoEMMS) {
-  state.mmx.elems[0].val.qwords.elems[0] = __remill_undefined_64();
-  state.mmx.elems[1].val.qwords.elems[0] = __remill_undefined_64();
-  state.mmx.elems[2].val.qwords.elems[0] = __remill_undefined_64();
-  state.mmx.elems[3].val.qwords.elems[0] = __remill_undefined_64();
-  state.mmx.elems[4].val.qwords.elems[0] = __remill_undefined_64();
-  state.mmx.elems[5].val.qwords.elems[0] = __remill_undefined_64();
-  state.mmx.elems[6].val.qwords.elems[0] = __remill_undefined_64();
-  state.mmx.elems[7].val.qwords.elems[0] = __remill_undefined_64();
-
-  // state.st.elems[0].val = __remill_undefined_f80();
-  // state.st.elems[1].val = __remill_undefined_f80();
-  // state.st.elems[2].val = __remill_undefined_f80();
-  // state.st.elems[3].val = __remill_undefined_f80();
-  // state.st.elems[4].val = __remill_undefined_f80();
-  // state.st.elems[5].val = __remill_undefined_f80();
-  // state.st.elems[6].val = __remill_undefined_f80();
-  // state.st.elems[7].val = __remill_undefined_f80();
-
-  // TODO(pag): Add FPU tag word stuff to the `State` structure, and reset
-  //            it here.
+  // Intel SDM, Order 253666-060US (Sep. 2016), Vol. 2A, EMMS, p. 3-303:
+  // empty every x87 tag; leave MMX register data unchanged.
+  // AMD64 APM, Order 26569 Rev. 3.16 (Nov. 2021), Vol. 5, FEMMS, p. 21:
+  // same empty-tag transition; its register data is architecturally undefined.
+  // https://www.intel.com/content/dam/www/public/us/en/documents/manuals/64-ia-32-architectures-software-developer-vol-2a-manual.pdf
+  // https://docs.amd.com/v/u/en-US/26569_3.16
+  state.x87.fxsave32.ftw.flat = 0;
 }
 }  // namespace
 

@@ -13,7 +13,7 @@ endif()
 add_subdirectory("${CMAKE_SOURCE_DIR}/test/vendored"
   "${CMAKE_CURRENT_BINARY_DIR}/vendored")
 
-foreach(profile IN ITEMS dead-eflags shift-defined double-shift-defined rotate-defined bit-count-defined x87-sm64-defined fxsave-defined fadd-memory-defined x87-environment-defined rdrand-defined rsqrt-defined crypto-defined packed-sse-defined segment-push-defined cpu-defined weak-imports init-array-sentinel pie shared dynamic dynamic-startup dynamic-single-chunk dynamic-chunked rtti libc-adapters math-adapters dirent-adapters time-adapters stat-adapters parse-adapters wide-adapters environment-adapters tls tls-startup tls-gnu2 tls-initial-exec tls-local-dynamic)
+foreach(profile IN ITEMS dead-eflags shift-defined double-shift-defined rotate-defined bit-count-defined x87-sm64-defined fxsave-defined fadd-memory-defined x87-environment-defined rdrand-defined rsqrt-defined crypto-defined mmx-emms-defined packed-sse-defined segment-push-defined cpu-defined weak-imports init-array-sentinel pie shared dynamic dynamic-startup dynamic-single-chunk dynamic-chunked rtti libc-adapters math-adapters dirent-adapters time-adapters stat-adapters parse-adapters wide-adapters environment-adapters tls tls-startup tls-gnu2 tls-initial-exec tls-local-dynamic)
   if(profile MATCHES "^dynamic")
     set(fixture_args --source "${CMAKE_CURRENT_SOURCE_DIR}/dynamic-main.c" --dynamic)
     if(profile STREQUAL "dynamic-startup")
@@ -27,6 +27,8 @@ foreach(profile IN ITEMS dead-eflags shift-defined double-shift-defined rotate-d
     set(fixture_args --source "${CMAKE_CURRENT_SOURCE_DIR}/rtti-main.cpp" --rtti)
   elseif(profile MATCHES "-adapters$")
     set(fixture_args --source "${CMAKE_CURRENT_SOURCE_DIR}/${profile}.c" --no-builtin)
+  elseif(profile STREQUAL "mmx-emms-defined")
+    set(fixture_args --source "${CMAKE_CURRENT_SOURCE_DIR}/${profile}.c" --compile-flag=-mmmx)
   elseif(profile MATCHES "^tls")
     set(fixture_args --source "${CMAKE_CURRENT_SOURCE_DIR}/tls-main.c" --dynamic --tls)
     if(profile STREQUAL "tls-startup")
