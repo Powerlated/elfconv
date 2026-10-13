@@ -49,6 +49,7 @@
 
 extern "C" const uint32_t _ecv_i386_initializers[];
 extern "C" const uint32_t _ecv_i386_finalizers[];
+extern "C" const uint32_t _ecv_i386_libc_data[];
 extern "C" void __ecv_i386_drain_guest_atexit(uint8_t *, State *, RuntimeManager *);
 
 namespace {
@@ -58,6 +59,8 @@ constexpr uint32_t string_base = 0x20000;
 constexpr size_t string_capacity = 4096;
 SDL_Window *windows[16] = {};
 SDL_GLContext contexts[16] = {};
+void reset_guest_renderers();
+void destroy_guest_renderers_for_window(uint32_t handle);
 #ifdef __EMSCRIPTEN__
 GLint pack_alignment = 4, pack_row_length = 0, pack_skip_rows = 0, pack_skip_pixels = 0;
 GLenum guest_gl_error = GL_NO_ERROR;
@@ -1412,12 +1415,31 @@ IMPORT(dlerror) {
   call.result(error);
 }
 
+static void initialize_libc_data(uint8_t *arena, uint32_t argc, uint32_t argv,
+                                 uint32_t envp) {
+  uint32_t name = 0, basename = 0;
+  if (argc) {
+    memcpy(&name, guest(arena, argv, 4), 4);
+    if (name) {
+      const char *value = text(arena, name);
+      const char *slash = strrchr(value, '/');
+      basename = name + (slash ? uint32_t(slash + 1 - value) : 0);
+    }
+  }
+  for (auto *entry = _ecv_i386_libc_data; *entry; entry += 2) {
+    const uint32_t value = entry[1] == 1 ? name :
+        entry[1] == 2 ? basename : entry[1] == 3 ? envp : 0;
+    memcpy(guest(arena, entry[0], 4), &value, 4);
+  }
+}
+
 extern "C" int __ecv_i386_run_function_entry(uint8_t *arena, State *state,
                                            uint32_t entry, RuntimeManager *runtime) {
   uint32_t argc;
   const uint32_t argv = state->gpr.rsp.dword + 4;
   memcpy(&argc, guest(arena, state->gpr.rsp.dword, 4), 4);
   const uint32_t args[] = {argc, argv, argv + 4 * (argc + 1)};
+  initialize_libc_data(arena, argc, argv, args[2]);
   start_library_dependencies(arena, state, runtime, args);
   for (auto *p = _ecv_i386_initializers; *p; ++p)
     invoke(arena, state, runtime, *p, args, 3);
@@ -1434,6 +1456,7 @@ IMPORT(__libc_start_main) {
   CALL;
   uint32_t main = call.word(0), argc = call.word(1), argv = call.word(2);
   uint32_t args[] = {argc, argv, argv + 4 * (argc + 1)};
+  initialize_libc_data(arena, argc, argv, args[2]);
   start_library_dependencies(arena, state, runtime, args);
   if (call.word(3)) invoke(arena, state, runtime, call.word(3), args, 3);
   else for (auto *p = _ecv_i386_initializers; *p; ++p) invoke(arena, state, runtime, *p, args, 3);
@@ -2655,6 +2678,12 @@ IMPORT(stat64) {
   if (!result) result = store_stat64(arena, call.word(1), host);
   call.result(result);
 }
+IMPORT(lstat64) {
+  CALL; struct stat host;
+  int result = lstat(text(arena, call.word(0)), &host);
+  if (!result) result = store_stat64(arena, call.word(1), host);
+  call.result(result);
+}
 namespace {
 struct Directory { DIR *host; uint32_t entry; };
 std::map<uint32_t, Directory> directories;
@@ -2669,6 +2698,21 @@ IMPORT(opendir) {
   uint32_t handle = next_directory++;
   directories.emplace(handle, Directory{dir, entry});
   call.result(handle);
+}
+IMPORT(fdopendir) {
+  CALL; DIR *dir = fdopendir(int32_t(call.word(0)));
+  if (!dir) { call.result(0); return; }
+  uint32_t entry = allocate(276);
+  if (!entry) { closedir(dir); call.result(0); return; }
+  uint32_t handle = next_directory++;
+  directories.emplace(handle, Directory{dir, entry});
+  call.result(handle);
+}
+IMPORT(dirfd) {
+  CALL;
+  auto found = directories.find(call.word(0));
+  if (found == directories.end()) elfconv_runtime_error("Invalid guest DIR handle.\n");
+  call.result(dirfd(found->second.host));
 }
 IMPORT(readdir) {
   CALL;
@@ -2740,6 +2784,32 @@ IMPORT(qsort) {
   for (uint32_t i = count / 2; i; --i) sift(i - 1, count);
   for (uint32_t end = count - 1; end; --end) { swap(0, end); sift(0, end); }
 }
+IMPORT(qsort_r) {
+  CALL;
+  const uint32_t base = call.word(0), count = call.word(1), size = call.word(2);
+  const uint32_t comparator = call.word(3), context = call.word(4);
+  if (count < 2 || !size) return;
+  guest(arena, base, uint64_t(count) * size);
+  auto less = [&](uint32_t a, uint32_t b) {
+    uint32_t args[] = {base + a * size, base + b * size, context};
+    invoke(arena, state, runtime, comparator, args, 3);
+    return int32_t(state->gpr.rax.dword) < 0;
+  };
+  auto swap = [&](uint32_t a, uint32_t b) {
+    for (uint32_t i = 0; i < size; ++i)
+      std::swap(arena[base + a * size + i], arena[base + b * size + i]);
+  };
+  auto sift = [&](uint32_t root, uint32_t end) {
+    while (uint64_t(root) * 2 + 1 < end) {
+      uint32_t child = root * 2 + 1;
+      if (child + 1 < end && less(child, child + 1)) ++child;
+      if (!less(root, child)) break;
+      swap(root, child); root = child;
+    }
+  };
+  for (uint32_t i = count / 2; i; --i) sift(i - 1, count);
+  for (uint32_t end = count - 1; end; --end) { swap(0, end); sift(0, end); }
+}
 
 IMPORT(__isoc99_sscanf) {
   CALL;
@@ -2792,6 +2862,7 @@ IMPORT(isalnum) { CALL; call.result(isalnum(int32_t(call.word(0))) ? 8 : 0); }
 IMPORT(SDL_Init) { CALL; call.result(SDL_Init(call.word(0))); }
 IMPORT(SDL_Quit) {
   CALL;
+  reset_guest_renderers();
   SDL_Quit();
   std::fill(std::begin(windows), std::end(windows), nullptr);
   std::fill(std::begin(contexts), std::end(contexts), nullptr);
@@ -2810,7 +2881,11 @@ IMPORT(SDL_CreateWindow) {
 }
 IMPORT(SDL_DestroyWindow) {
   CALL;
-  if (call.word(0)) { SDL_DestroyWindow(window(call.word(0))); windows[call.word(0) - 0x100] = nullptr; }
+  if (call.word(0)) {
+    destroy_guest_renderers_for_window(call.word(0));
+    SDL_DestroyWindow(window(call.word(0)));
+    windows[call.word(0) - 0x100] = nullptr;
+  }
 }
 IMPORT(SDL_GL_CreateContext) {
   CALL;

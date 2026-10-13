@@ -1,142 +1,73 @@
 # Examples for conversion
 
-Each project-owned example uses its directory's `CMakeLists.txt`. Configure
-from the repository root and build into `build/`.
+Project-owned examples are configured from their directory or from the repository
+root. Each SDL example exposes the same three target suffixes:
 
-## SDL / OpenGL 2 triangle
+| Suffix | Build |
+|---|---|
+| `-i386` | Native Linux i386 SDL/OpenGL executable. |
+| `-wasm` | Application sources compiled directly to browser Wasm. |
+| `-i386-to-wasm` | Convert the i386 ELF through lifting, compiling, and linking. |
 
-`sdl_triangle` builds a dynamically linked, non-PIE i386 ELF executable. It
-requests an OpenGL 2.0 context and draws an RGB triangle using compatibility
-calls. Building the ELF requires an i386 C toolchain and i386 SDL2/OpenGL
-development libraries.
+The nine primary targets are:
 
-```bash
-cmake -S examples/sdl_triangle -B build/sdl_triangle
-cmake --build build/sdl_triangle --target triangle-i386
-cmake --build build/sdl_triangle --target triangle-smoke
-```
+- `sdl_triangle-i386`, `sdl_triangle-wasm`, `sdl_triangle-i386-to-wasm`.
+- `sdl_cube-i386`, `sdl_cube-wasm`, `sdl_cube-i386-to-wasm`.
+- `sdl_cube_pthread-i386`, `sdl_cube_pthread-wasm`,
+  `sdl_cube_pthread-i386-to-wasm`.
 
-Escape or closing the window exits interactive mode. `triangle-smoke` renders
-three frames and checks that the triangle's center is colored and the background
-is black. The target keeps `-m32 -fno-pie -no-pie` for conversion.
+## Build
 
-### Build choices
+Native targets require an i386 C/C++ toolchain and i386 SDL2/OpenGL development
+libraries. Direct Wasm targets require Emscripten 6.0.12; conversions also
+require the repository's `elflift`.
 
-Build each requested variant by listing its target; one invocation can select any
-combination:
+The examples use native SDL/OpenGL on Linux and WebGL for browser rendering.
+They do not include or select a software OpenGL renderer. Native drivers and
+browsers may still provide their own software fallback.
+
+Configure standalone or common-root targets:
 
 ```bash
 cmake -S examples/sdl_triangle -B build/sdl_triangle \
   -DELFCONV_LIFTER="$PWD/build/src/lifter/elflift" \
   -DELFCONV_EMCC="$HOME/emsdk-6/upstream/emscripten/em++"
-cmake --build build/sdl_triangle --target triangle-i386 triangle-wasm triangle-i386-to-wasm
-```
+cmake --build build/sdl_triangle --target \
+  sdl_triangle-i386 sdl_triangle-wasm sdl_triangle-i386-to-wasm
 
-`triangle-i386` builds the native i386 ELF. `triangle-wasm` compiles
-`triangle.c` directly to Wasm; `triangle-i386-to-wasm` converts the i386 ELF.
-The direct target emits `triangle-wasm.html`, `.js`, and `.wasm`; the converted
-target emits `triangle.html`, `.js`, and `.wasm`. Only native and converted
-builds need the x86 lifter; both Wasm builds need Emscripten.
-
-Serve the converted HTML for interactive rendering. It supports `?frames=3` for
-framebuffer checks and an exit status.
-The converted path adapts i386 stack arguments, SDL handles, returned strings,
-varargs, and WebGL RGBA readback to desktop RGB/pack layout. It uses Emscripten's
-SDL2 bridge and legacy OpenGL emulation; Asyncify yields at buffer swaps.
-
-Unsupported relocations, unknown host imports, unsupported pointer-bearing SDL
-events, and raw Linux i386 syscalls fail explicitly. The printf adapters accept
-scalar `%s`, `%d`, `%u`, `%c`, `%x`, `%X`, and `%%`; floating-point and
-length-modified varargs are unsupported.
-
-For a separate i386 sysroot, configure the native compiler and pkg-config
-environment as shown below, then select `triangle-i386` and/or `triangle-i386-to-wasm`.
-
-```bash
-SYSROOT=/path/to/i386-sysroot
-LLVM_ROOT=/path/to/llvm
-export PKG_CONFIG_SYSROOT_DIR="$SYSROOT"
-export PKG_CONFIG_LIBDIR="$SYSROOT/usr/lib/i386-linux-gnu/pkgconfig:$SYSROOT/usr/share/pkgconfig"
-cmake -S examples/sdl_triangle -B build/sdl_triangle \
-  -DCMAKE_C_COMPILER="$LLVM_ROOT/bin/clang" \
-  -DCMAKE_C_FLAGS="--sysroot=$SYSROOT -I$SYSROOT/usr/include/i386-linux-gnu -B$SYSROOT/usr/lib/i386-linux-gnu" \
-  -DCMAKE_EXE_LINKER_FLAGS="-L$SYSROOT/usr/lib/gcc/i686-linux-gnu/15" \
-  -DELFCONV_LIFTER="$PWD/build/src/lifter/elflift" \
+cmake -S . -B build -DELFCONV_ARCH=x86 \
   -DELFCONV_EMCC="$HOME/emsdk-6/upstream/emscripten/em++"
-cmake --build build/sdl_triangle --target triangle-i386 triangle-i386-to-wasm
+cmake --build build --target sdl_cube-i386-to-wasm
 ```
 
-The converted browser smoke has passed with center RGB `63,64,128`, a black
-background, exit status 0, and interactive Escape handling. SDL2 is supplied
-by Emscripten; legacy OpenGL calls use its immediate-mode emulation. The runtime
-adapts i386 stack arguments, opaque SDL handles, returned strings, varargs,
-WebGL RGBA readback into desktop RGB/pack layout, and Asyncify yields at buffer
-swaps so rendering and input remain responsive.
+Cube conversions retain their linker maps and incremental caches. The common
+build exposes all three example families through the same declarations.
 
-This path handles the triangle's imported functions and relocations, not
-arbitrary Linux shared libraries or retail Portal. Unsupported relocations,
-unknown host imports, unsupported pointer-bearing SDL events, and raw Linux
-i386 syscalls fail explicitly. The printf adapters accept scalar `%s`, `%d`,
-`%u`, `%c`, `%x`, `%X`, and `%%` conversions; floating-point/length-modified
-varargs are not implemented. Guest readback supports RGB/RGBA unsigned bytes.
-The SDL cube also resolves fortified printf, C23 `strtoul`, and stack-protector
-imports.
+## Outputs and browser serving
 
-## SDL / OpenGL cube
+Artifacts are isolated below each example's CMake binary directory:
+`artifacts/<name>/{i386,wasm,i386-to-wasm}/`. Each Wasm directory contains its
+matching `.html`, `.js`, and `.wasm`; cube conversion caches and maps stay with
+their matching variant.
 
-`sdl_cube` uses the same i386 SDL2/OpenGL requirements. Its executable is split
-across `cube.c`, `cube_geometry.c`, `cube_shader.c`, and `cube_render.c`.
-
-Choose native i386, direct source-to-Wasm, converted i386-to-Wasm, or any
-combination by selecting targets:
-
-```bash
-cmake -S examples/sdl_cube -B build/sdl_cube \
-  -DELFCONV_LIFTER="$PWD/build/src/lifter/elflift" \
-  -DELFCONV_EMCC="$HOME/emsdk-6/upstream/emscripten/em++"
-cmake --build build/sdl_cube --target cube-i386 cube-wasm cube-i386-to-wasm
-```
-
-`cube-i386` is the native i386 executable. `cube-wasm` compiles the C sources
-directly; `cube-i386-to-wasm` lifts and converts the linked i386 executable,
-using per-object incremental lifting and compilation. Open `cube-wasm.html` for
-the direct build or `index.html` for the converted build. The converted cube
-passed a Chromium 90-frame smoke: readbacks passed, the center pixel changed
-between frames 1 and 90, the corner stayed black, and the guest exited cleanly.
-Both Wasm builds use shader/VBO OpenGL without legacy GL emulation.
-
-
-### pthread cube
-
-`sdl_cube_pthread` runs rotation on a second lifted i386 thread. Configure as
-above using `examples/sdl_cube_pthread` and `build/sdl_cube_pthread`.
-Its `cube-i386-to-wasm` target enables pthreads, JSPI, and worker-owned OffscreenCanvas.
-Serve with COOP/COEP headers:
+Serve the generated HTML over HTTP. Pthread-cube Wasm requires COOP/COEP headers:
 
 ```sh
-TEST_PORT=8000 SERVE_DIR="$PWD/build/sdl_cube_pthread" \
-  TEST_HTML="$PWD/build/sdl_cube_pthread/index.html" node test/browser/test-server.js
+OUT="$PWD/build/sdl_cube_pthread/artifacts/sdl_cube_pthread/wasm"
+TEST_PORT=8000 SERVE_DIR="$OUT" TEST_HTML="$OUT/sdl_cube_pthread-wasm.html" \
+  node test/browser/test-server.js
 ```
 
-Open `/cube.html`, click Start; Escape exits. Chromium smoke: 90 frames,
-native-matching framebuffer samples at frames 1 and 90, distinct worker identity,
-mutex/condition handshakes, join result 90, exit 0, no browser errors.
+The repository server sets `Cross-Origin-Opener-Policy: same-origin` and
+`Cross-Origin-Embedder-Policy: credentialless`. Converted pthread builds retain
+the cube's second application thread, synchronization, and join behavior.
 
-Supported: create with default attributes, self/equal/join, normal/recursive/
-error-check mutexes, condition wait/signal/broadcast. Nondefault thread attributes,
-robust/process-shared synchronization, cancellation, and a complete glibc pthread
-descriptor are unsupported.
-
-The cube target emits a GNU linker map, then partitions the final relocated ELF
-by input-object code ranges. It caches each object's lifted bitcode and
-independently optimized Wasm object under
-`build/sdl_cube/.elfconv-incremental/`; shared ELF metadata and runtime objects
-have separate cache entries. A no-op rebuild skips lifting, compilation, and
-linking. Changing one source object rebuilds its unit, plus any units whose
-VMAs move because of link layout changes. This uses final linked code rather
-than raw relocatable `.o` files, preserving linker-applied relocations. The
-final Wasm link remains whole-program and does not perform cross-unit LTO.
-
+The SDL examples use ordinary SDL GL context and procedure APIs. Converted
+builds resolve their graphics imports to browser WebGL adapters; context
+creation failure is reported rather than replaced with a project software
+renderer. This does not establish compatibility with arbitrary Linux binaries.
+Unsupported relocations, imports, pointer-bearing SDL events, and raw i386
+syscalls fail.
 
 [`examples-repos`](https://github.com/yomaytk/elfconv/tree/main/examples/examples-repos) has patch or config files that can be used to convert the third-party programs. You can convert those Linux/ELF binaries following the steps below.
 ## [mnist-neural-network-plain-c](https://github.com/AndrewCarterUK/mnist-neural-network-plain-c)

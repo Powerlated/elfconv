@@ -1,26 +1,25 @@
 <!doctype html>
 <html lang="en">
 <meta charset="utf-8">
-<title>Converted i386 spinning shader cube</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>@ELFCONV_SDL_TARGET@</title>
 <style>
   body { background: #202020; color: #eee; font: 16px monospace; margin: 24px; }
-  canvas { display: block; border: 1px solid #666; }
+  canvas { display: block; max-width: 100%; outline: 1px solid #666; }
   pre { white-space: pre-wrap; }
 </style>
-<h1>Converted i386 spinning shader cube</h1>
-<p>Lifted i386 code animates an indexed VBO cube with GLSL lighting and depth testing. No immediate mode or legacy GL emulation. Press Escape to exit.</p>
+<h1>@ELFCONV_SDL_TARGET@</h1>
 <canvas id="canvas" width="640" height="480" tabindex="0"></canvas>
 <p id="status">Loading Wasm…</p>
 <pre id="output"></pre>
 <script>
   var Module = {
     canvas: document.getElementById('canvas'),
-    arguments: new URLSearchParams(location.search).has('frames')
-      ? ['--frames', new URLSearchParams(location.search).get('frames')] : [],
+    arguments: new URLSearchParams(location.search).getAll('arg'),
     print: function (line) { document.getElementById('output').textContent += line + '\n'; },
     printErr: function (line) { document.getElementById('output').textContent += line + '\n'; },
     onRuntimeInitialized: function () {
-      document.getElementById('status').textContent = 'Running lifted i386 code';
+      document.getElementById('status').textContent = 'Running';
       Module.canvas.focus();
     },
     onExit: function (code) {
@@ -32,6 +31,7 @@
       document.body.dataset.abort = String(reason);
     }
   };
+  Module.canvas.addEventListener('click', function () { Module.canvas.focus(); });
 </script>
-<script src="cube.js"></script>
+{{{ SCRIPT }}}
 </html>

@@ -540,6 +540,7 @@ int main(int argc, char *argv[]) {
     };
     emit_functions("_ecv_i386_initializers", manager.elf_obj.i386_initializers);
     emit_functions("_ecv_i386_finalizers", manager.elf_obj.i386_finalizers);
+    emit_functions("_ecv_i386_libc_data", manager.elf_obj.i386_libc_data);
   }
 
   std::unordered_map<uint64_t, const char *> addr_fun_name_map;

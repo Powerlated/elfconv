@@ -1,6 +1,9 @@
 #include <array>
+#include <chrono>
+#include <condition_variable>
 #include <sched.h>
 #include <signal.h>
+#include <thread>
 constexpr unsigned pthread_destructor_iterations = 4;
 // Included by I386Imports.cpp: uses its guest ABI, heap, and callback helpers.
 namespace {
@@ -17,6 +20,7 @@ struct GuestPthread {
   uint32_t entry = 0, argument = 0, result = 0;
   bool owns_stack = false, joining = false, detached = false, finished = false;
 };
+struct GuestPthreadExit { uint32_t result; };
 struct GuestPthreadStart {
   std::shared_ptr<GuestPthread> thread;
 };
@@ -51,9 +55,12 @@ void *run_guest_pthread(void *argument) {
   const auto thread = start->thread;
   current_pthread_id = thread->id;
   CPUState = &thread->cpu;
-  __ecv_i386_initialize_thread_tls(thread->arena, &thread->cpu, thread->runtime);
-  invoke(thread->arena, &thread->cpu, thread->runtime, thread->entry, &thread->argument, 1);
-  thread->result = thread->cpu.gpr.rax.dword;
+  try {
+    invoke(thread->arena, &thread->cpu, thread->runtime, thread->entry, &thread->argument, 1);
+    thread->result = thread->cpu.gpr.rax.dword;
+  } catch (const GuestPthreadExit &exit) {
+    thread->result = exit.result;
+  }
   drain_tls_destructors(thread->arena, &thread->cpu, thread->runtime);
   drain_pthread_key_destructors(*thread);
   __ecv_i386_finalize_thread_tls(thread->arena, &thread->cpu, thread->runtime);
@@ -192,6 +199,14 @@ struct GuestCondition {
   bool initialized = false;
   ~GuestCondition() { if (initialized) pthread_cond_destroy(&host); }
 };
+struct GuestBarrier {
+  std::mutex mutex;
+  std::condition_variable condition;
+  unsigned threshold = 0, arrived = 0, generation = 0;
+};
+struct GuestOnce { std::once_flag flag; };
+std::map<uint32_t, std::shared_ptr<GuestBarrier>> guest_barriers;
+std::map<std::pair<RuntimeManager *, uint32_t>, std::shared_ptr<GuestOnce>> guest_once;
 std::mutex synchronization_registry_mutex;
 std::map<uint32_t, std::shared_ptr<GuestMutex>> guest_mutexes;
 std::map<uint32_t, std::shared_ptr<GuestCondition>> guest_conditions;
@@ -767,3 +782,144 @@ IMPORT(name) { \
 CONDITION_OPERATION(pthread_cond_signal)
 CONDITION_OPERATION(pthread_cond_broadcast)
 #undef CONDITION_OPERATION
+IMPORT(pthread_barrier_init) {
+  PthreadCall call(arena, state, runtime);
+  const uint32_t address = call.word(0), count = call.word(2);
+  if (!count) { call.result(host_errno_to_i386(EINVAL)); return; }
+  if (call.word(1)) {
+    uint32_t flags;
+    memcpy(&flags, guest(arena, call.word(1), 4), 4);
+    if (flags) { call.result(host_errno_to_i386(ENOTSUP)); return; }
+  }
+  std::lock_guard<std::mutex> lock(synchronization_registry_mutex);
+  if (guest_barriers.count(address)) { call.result(host_errno_to_i386(EBUSY)); return; }
+  guest_barriers.emplace(address, std::make_shared<GuestBarrier>());
+  guest_barriers[address]->threshold = count;
+  memset(guest(arena, address, 20), 0, 20);
+  call.result(0);
+}
+IMPORT(pthread_barrier_wait) {
+  PthreadCall call(arena, state, runtime);
+  std::shared_ptr<GuestBarrier> barrier;
+  {
+    std::lock_guard<std::mutex> lock(synchronization_registry_mutex);
+    auto found = guest_barriers.find(call.word(0));
+    if (found == guest_barriers.end()) { call.result(host_errno_to_i386(EINVAL)); return; }
+    barrier = found->second;
+  }
+  std::unique_lock<std::mutex> lock(barrier->mutex);
+  const unsigned generation = barrier->generation;
+  if (++barrier->arrived == barrier->threshold) {
+    barrier->arrived = 0;
+    ++barrier->generation;
+    lock.unlock();
+    barrier->condition.notify_all();
+    call.result(uint32_t(PTHREAD_BARRIER_SERIAL_THREAD));
+    return;
+  }
+  barrier->condition.wait(lock, [&] { return barrier->generation != generation; });
+  call.result(0);
+}
+IMPORT(pthread_barrier_destroy) {
+  PthreadCall call(arena, state, runtime);
+  std::lock_guard<std::mutex> lock(synchronization_registry_mutex);
+  auto found = guest_barriers.find(call.word(0));
+  if (found == guest_barriers.end()) { call.result(host_errno_to_i386(EINVAL)); return; }
+  {
+    std::lock_guard<std::mutex> barrier_lock(found->second->mutex);
+    if (found->second->arrived) { call.result(host_errno_to_i386(EBUSY)); return; }
+  }
+  guest_barriers.erase(found);
+  memset(guest(arena, call.word(0), 20), 0xff, 20);
+  call.result(0);
+}
+IMPORT(pthread_once) {
+  PthreadCall call(arena, state, runtime);
+  const uint32_t address = call.word(0), initializer = call.word(1);
+  std::shared_ptr<GuestOnce> once;
+  {
+    std::lock_guard<std::mutex> lock(pthread_registry_mutex);
+    auto &slot = guest_once[{runtime, address}];
+    if (!slot) slot = std::make_shared<GuestOnce>();
+    once = slot;
+  }
+  std::call_once(once->flag, [&] {
+    invoke(arena, state, runtime, initializer, nullptr, 0);
+    const uint32_t complete = 1;
+    memcpy(guest(arena, address, 4), &complete, 4);
+  });
+  call.result(0);
+}
+IMPORT(pthread_sigmask) {
+  PthreadCall call(arena, state, runtime);
+  sigset_t set, previous;
+  sigset_t *set_pointer = nullptr, *previous_pointer = nullptr;
+  if (call.word(1)) {
+    memset(&set, 0, sizeof(set));
+    memcpy(&set, guest(arena, call.word(1), std::min(sizeof(set), size_t(128))), sizeof(set));
+    set_pointer = &set;
+  }
+  if (call.word(2)) previous_pointer = &previous;
+  const int error = pthread_sigmask(int32_t(call.word(0)), set_pointer, previous_pointer);
+  if (!error && previous_pointer) {
+    uint8_t guest_set[128] = {};
+    memcpy(guest_set, &previous, sizeof(previous));
+    memcpy(guest(arena, call.word(2), sizeof(guest_set)), guest_set, sizeof(guest_set));
+  }
+  call.result(host_errno_to_i386(error));
+}
+IMPORT(pthread_getcpuclockid) {
+  PthreadCall call(arena, state, runtime);
+#ifdef __EMSCRIPTEN__
+  call.result(host_errno_to_i386(ENOTSUP));
+#else
+  pthread_t thread{};
+  std::shared_ptr<GuestPthread> keep_alive;
+  int error = find_host_pthread(call.word(0), thread, keep_alive);
+  clockid_t clock;
+  if (!error) error = pthread_getcpuclockid(thread, &clock);
+  if (!error && call.word(1)) {
+    const int32_t guest_clock = static_cast<int32_t>(clock);
+    memcpy(guest(arena, call.word(1), sizeof(guest_clock)), &guest_clock, sizeof(guest_clock));
+  }
+  call.result(host_errno_to_i386(error));
+#endif
+}
+IMPORT(pthread_exit) {
+  PthreadCall call(arena, state, runtime);
+  if (current_pthread_id == 1)
+    elfconv_runtime_error("pthread_exit from the primary converted thread is unsupported.\n");
+  throw GuestPthreadExit{call.word(0)};
+}
+IMPORT(pthread_mutex_timedlock) {
+  PthreadCall call(arena, state, runtime);
+  int error = 0;
+  auto mutex = find_mutex(arena, call.word(0), error);
+  if (!error) {
+    int32_t time[2];
+    memcpy(time, guest(arena, call.word(1), sizeof(time)), sizeof(time));
+    if (time[1] < 0 || time[1] >= 1000000000) error = EINVAL;
+    else {
+      const auto deadline = std::chrono::system_clock::time_point(
+          std::chrono::duration_cast<std::chrono::system_clock::duration>(
+              std::chrono::seconds(time[0]) + std::chrono::nanoseconds(time[1])));
+      do {
+        error = pthread_mutex_trylock(&mutex->host);
+        if (error != EBUSY) break;
+        if (std::chrono::system_clock::now() >= deadline) {
+          error = ETIMEDOUT; break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      } while (true);
+    }
+  }
+  call.result(host_errno_to_i386(error));
+}
+IMPORT(pthread_getaffinity_np) {
+  PthreadCall call(arena, state, runtime);
+  errno = ENOSYS; call.result(host_errno_to_i386(ENOSYS));
+}
+IMPORT(pthread_setaffinity_np) {
+  PthreadCall call(arena, state, runtime);
+  errno = ENOSYS; call.result(host_errno_to_i386(ENOSYS));
+}

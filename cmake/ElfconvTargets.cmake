@@ -21,9 +21,9 @@ endif()
 set(ELFCONV_JOBS 2 CACHE STRING "Concurrent lifting and compiling jobs combined")
 
 function(elfconv_add_conversion_target name)
-  set(options INIT_WASM DEBUG FLOAT_STATUS TEXT_IR NO_LIFTED NO_COMPILED READY_JS INCREMENTAL_UNITS JSPI PTHREADS)
-  set(one_value_args INPUT TARGET OUTPUT_DIR ELF_NAME ENTRY_SYMBOL LIFTER EMCC LEGACY_GL DEBUG_FUNC_ADDR BITCODE_PATH WASI_SDK WASMEDGE NATIVE_CXX LLVM_DIS OUTPUT_EXECUTABLE LINK_MAP OBJECT_BASE WASM_OPT_LEVEL JOBS)
-  set(multi_value_args DEPENDS MOUNT_SETTINGS SHARED_LIBRARIES)
+  set(options INIT_WASM DEBUG FLOAT_STATUS TEXT_IR NO_LIFTED NO_COMPILED READY_JS INCREMENTAL_UNITS JSPI PTHREADS NO_OFFSCREEN_CANVAS)
+  set(one_value_args INPUT TARGET OUTPUT_DIR ELF_NAME ENTRY_SYMBOL LIFTER EMCC LEGACY_GL DEBUG_FUNC_ADDR BITCODE_PATH WASI_SDK WASMEDGE NATIVE_CXX LLVM_DIS OUTPUT_EXECUTABLE LINK_MAP OBJECT_BASE WASM_OPT_LEVEL JOBS PTHREAD_POOL_SIZE)
+  set(multi_value_args SHARED_LIBRARIES MOUNT_SETTINGS DEPENDS BYPRODUCTS OUTPUTS)
   cmake_parse_arguments(PARSE_ARGV 1 ECV "${options}" "${one_value_args}" "${multi_value_args}")
   if(ECV_UNPARSED_ARGUMENTS)
     message(FATAL_ERROR "Unknown arguments for ${name}: ${ECV_UNPARSED_ARGUMENTS}")
@@ -79,12 +79,20 @@ function(elfconv_add_conversion_target name)
       list(APPEND file_dependencies "${dependency}")
     endif()
   endforeach()
-  add_custom_target("${name}"
-    COMMAND "${Python3_EXECUTABLE}" "${ELFCONV_ROOT}/scripts/convert_elf.py" ${converter_args}
-    DEPENDS ${file_dependencies}
-    USES_TERMINAL
-    VERBATIM
-  )
+  if(ECV_OUTPUTS)
+    add_custom_command(OUTPUT ${ECV_OUTPUTS}
+      COMMAND "${Python3_EXECUTABLE}" "${ELFCONV_ROOT}/scripts/convert_elf.py" ${converter_args}
+      BYPRODUCTS ${ECV_BYPRODUCTS}
+      DEPENDS "${ECV_INPUT}" "${ECV_LIFTER}" ${file_dependencies}
+      USES_TERMINAL VERBATIM)
+    add_custom_target("${name}" DEPENDS ${ECV_OUTPUTS})
+  else()
+    add_custom_target("${name}"
+      COMMAND "${Python3_EXECUTABLE}" "${ELFCONV_ROOT}/scripts/convert_elf.py" ${converter_args}
+      BYPRODUCTS ${ECV_BYPRODUCTS}
+      DEPENDS ${file_dependencies}
+      USES_TERMINAL VERBATIM)
+  endif()
   if(target_dependencies)
     add_dependencies("${name}" ${target_dependencies})
   endif()

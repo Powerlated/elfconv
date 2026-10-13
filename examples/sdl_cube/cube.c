@@ -26,11 +26,12 @@ int main(int argc, char **argv) {
   SDL_Window *window = SDL_CreateWindow("Lifted i386 VBO / shader spinning cube",
       SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 640, 480, SDL_WINDOW_OPENGL);
   SDL_GLContext context = window ? SDL_GL_CreateContext(window) : NULL;
+  int context_ok = context != NULL;
   int result = 1;
   GLuint vertex_shader = 0, fragment_shader = 0, program = 0, buffers[2] = {0, 0};
   GLint model_location = -1, projection_location = -1;
-  if (!context) {
-    fprintf(stderr, "GL context: %s\n", SDL_GetError());
+  if (!context_ok) {
+    fprintf(stderr, "OpenGL context: %s\n", SDL_GetError());
     goto done;
   }
   printf("OpenGL: %s; renderer: %s\n", glGetString(GL_VERSION), glGetString(GL_RENDERER));

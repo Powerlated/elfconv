@@ -1,9 +1,52 @@
 #!/usr/bin/env node
 // Node 24+: node scripts/serve_game_files.ts ROOT [PORT]
 import { createServer } from 'node:http';
-import { open, realpath } from 'node:fs/promises';
+import { open, readdir, realpath, stat } from 'node:fs/promises';
 import { resolve, relative, isAbsolute, sep } from 'node:path';
 import { pipeline } from 'node:stream/promises';
+
+type AssetMetadata = {
+  version: 1;
+  files: { path: string; size: number }[];
+  directories: string[];
+};
+
+async function getAssetMetadata(): Promise<AssetMetadata> {
+  const files: AssetMetadata['files'] = [];
+  const directories: string[] = [];
+
+  async function walk(directory: string, assetPath: string, ancestors: Set<string>): Promise<void> {
+    const canonicalDirectory = await realpath(directory);
+    if (!contained(canonicalDirectory) || ancestors.has(canonicalDirectory)) return;
+    const nextAncestors = new Set(ancestors);
+    nextAncestors.add(canonicalDirectory);
+    for (const entry of await readdir(directory, { withFileTypes: true })) {
+      const entryPath = resolve(directory, entry.name);
+      const entryAssetPath = `${assetPath}/${entry.name}`;
+      let canonical: string;
+      try {
+        canonical = await realpath(entryPath);
+        if (!contained(canonical)) continue;
+        const info = await stat(canonical);
+        if (info.isDirectory()) {
+          directories.push(entryAssetPath);
+          await walk(canonical, entryAssetPath, nextAncestors);
+        } else if (info.isFile()) {
+          files.push({ path: entryAssetPath, size: info.size });
+        }
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (['ENOENT', 'ENOTDIR', 'EACCES', 'ELOOP'].includes(code ?? '')) continue;
+        throw error;
+      }
+    }
+  }
+
+  await walk(root, '', new Set());
+  files.sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
+  directories.sort();
+  return { version: 1, files, directories };
+}
 
 const rootArg = process.argv[2];
 const port = Number(process.argv[3] ?? 8081);
@@ -37,6 +80,15 @@ const server = createServer(async (req, res) => {
     catch { res.writeHead(400); res.end(); return; }
     if (path.includes('\0') || path.includes('\\')) {
       res.writeHead(400); res.end(); return;
+    }
+    if (path === '/__elfconv_assets.json') {
+      const body = Buffer.from(JSON.stringify(await getAssetMetadata()));
+      res.setHeader('Content-Type', 'application/json; charset=utf-8');
+      res.setHeader('Cache-Control', 'no-cache');
+      res.setHeader('Content-Length', body.length);
+      res.writeHead(200);
+      res.end(req.method === 'HEAD' ? undefined : body);
+      return;
     }
     const candidate = resolve(root, `.${path}`);
     if (!contained(candidate)) { res.writeHead(403); res.end(); return; }

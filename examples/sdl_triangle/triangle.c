@@ -57,19 +57,27 @@ int main(int argc, char **argv) {
     glColor3f(0, 0, 1); glVertex2f(0, 0.8f);
     glEnd();
     if (frames && rendered == 0) {
-      unsigned char center[3], corner[3];
+      unsigned char center[4], corner[4], top[4], bottom_left[4], bottom_right[4];
       glPixelStorei(GL_PACK_ALIGNMENT, 1);
-      glReadPixels(width / 2, height / 2, 1, 1, GL_RGB, GL_UNSIGNED_BYTE, center);
-      glReadPixels(1, 1, 1, 1, GL_RGB, GL_UNSIGNED_BYTE, corner);
+      glReadPixels(width / 2, height / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, center);
+      glReadPixels(1, 1, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, corner);
+      glReadPixels(width / 2, 3 * height / 4, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, top);
+      glReadPixels(width / 5, height / 5, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, bottom_left);
+      glReadPixels(4 * width / 5, height / 5, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, bottom_right);
       GLenum error = glGetError();
       if (error != GL_NO_ERROR || center[0] < 20 || center[1] < 20 || center[2] < 20 ||
-          corner[0] != 0 || corner[1] != 0 || corner[2] != 0) {
-        fprintf(stderr, "Triangle readback failed: GL=%u center=%u,%u,%u corner=%u,%u,%u\n",
-            error, center[0], center[1], center[2], corner[0], corner[1], corner[2]);
+          corner[0] || corner[1] || corner[2] || corner[3] != 255 ||
+          top[2] <= top[0] || top[2] <= top[1] ||
+          bottom_left[0] <= bottom_left[1] || bottom_right[1] <= bottom_right[0] ||
+          top[3] != 255 || bottom_left[3] != 255 || bottom_right[3] != 255) {
+        fprintf(stderr, "Triangle readback failed: GL=%u center=%u,%u,%u,%u corner=%u,%u,%u,%u top=%u,%u,%u,%u lower-left=%u,%u,%u,%u lower-right=%u,%u,%u,%u\n",
+            error, center[0], center[1], center[2], center[3], corner[0], corner[1], corner[2], corner[3],
+            top[0], top[1], top[2], top[3], bottom_left[0], bottom_left[1], bottom_left[2], bottom_left[3],
+            bottom_right[0], bottom_right[1], bottom_right[2], bottom_right[3]);
         result = 1;
         break;
       }
-      printf("Triangle readback passed: center=%u,%u,%u; corner=0,0,0\n",
+      printf("Triangle readback passed: center=%u,%u,%u; top=blue; lower-left=red; lower-right=green; alpha=255; corner=0,0,0\n",
           center[0], center[1], center[2]);
     }
     SDL_GL_SwapWindow(window);

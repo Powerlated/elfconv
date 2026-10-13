@@ -3,29 +3,33 @@
 #include <stdio.h>
 
 int cube_check_frame(int width, int height, unsigned frame) {
-  unsigned char center[3], left[3], top[3], corner[3];
+  unsigned char center[4], left[4], top[4], corner[4];
   glPixelStorei(GL_PACK_ALIGNMENT, 1);
-  glReadPixels(width/2, height/2, 1, 1, GL_RGB, GL_UNSIGNED_BYTE, center);
-  glReadPixels(width/2-width/12, height/2, 1, 1, GL_RGB, GL_UNSIGNED_BYTE, left);
-  glReadPixels(width/2, height/2+height/8, 1, 1, GL_RGB, GL_UNSIGNED_BYTE, top);
-  glReadPixels(1, 1, 1, 1, GL_RGB, GL_UNSIGNED_BYTE, corner);
+  glReadPixels(width/2, height/2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, center);
+  glReadPixels(width/2-width/12, height/2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, left);
+  glReadPixels(width/2, height/2+height/8, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, top);
+  glReadPixels(1, 1, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, corner);
   GLenum error = glGetError();
   if (error != GL_NO_ERROR || (center[0] + center[1] + center[2]) < 40 ||
       (left[0] + left[1] + left[2]) < 40 || (top[0] + top[1] + top[2]) < 40 ||
-      corner[0] || corner[1] || corner[2]) {
-    fprintf(stderr, "Cube readback failed: frame=%u GL=%u center=%u,%u,%u left=%u,%u,%u top=%u,%u,%u\n",
-        frame, error, center[0], center[1], center[2], left[0], left[1], left[2], top[0], top[1], top[2]);
+      corner[0] || corner[1] || corner[2] || corner[3] != 255 ||
+      center[3] != 255 || left[3] != 255 || top[3] != 255
+      ) {
+    fprintf(stderr, "Cube readback failed: frame=%u GL=%u center=%u,%u,%u,%u left=%u,%u,%u,%u top=%u,%u,%u,%u\n",
+        frame, error, center[0], center[1], center[2], center[3],
+        left[0], left[1], left[2], left[3], top[0], top[1], top[2], top[3]);
     return 1;
   }
   if (frame == 1 && !(left[0] > left[1] && left[0] > left[2] &&
                       top[1] > top[0] && top[1] > top[2] &&
                       center[2] > center[0] && center[2] > center[1])) {
-    fprintf(stderr, "Cube face/depth check failed: center=%u,%u,%u left=%u,%u,%u top=%u,%u,%u\n",
+    fprintf(stderr, "Cube face/depth ordering check failed: center=%u,%u,%u left=%u,%u,%u top=%u,%u,%u\n",
         center[0], center[1], center[2], left[0], left[1], left[2], top[0], top[1], top[2]);
     return 1;
   }
-  printf("Cube readback passed: frame=%u center=%u,%u,%u left=%u,%u,%u top=%u,%u,%u; corner=0,0,0\n",
-      frame, center[0], center[1], center[2], left[0], left[1], left[2], top[0], top[1], top[2]);
+  printf("Cube readback passed: frame=%u center=%u,%u,%u left=%u,%u,%u top=%u,%u,%u; alpha=255; corner=0,0,0\n",
+      frame, center[0], center[1], center[2], left[0], left[1], left[2],
+      top[0], top[1], top[2]);
   return 0;
 }
 

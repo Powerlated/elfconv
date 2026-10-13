@@ -2,6 +2,10 @@
 #include <SDL2/SDL_syswm.h>
 
 namespace {
+struct GuestRenderer { SDL_Renderer *host; uint32_t window; };
+struct GuestTexture { SDL_Texture *host; uint32_t renderer; int width, height; };
+GuestRenderer guest_renderers[16] = {};
+GuestTexture guest_textures[64] = {};
 struct GuestSurface { SDL_Surface *host; uint32_t surface, format, pixels, palette, colors; };
 struct GuestCursor { SDL_Cursor *host; bool owned; };
 GuestSurface guest_surfaces[32] = {};
@@ -176,6 +180,38 @@ void sync_surface(uint8_t *arena, GuestSurface &s) {
     SDL_SetPaletteColors(host->format->palette, host->format->palette->colors, 0, host->format->palette->ncolors);
   }
 }
+SDL_Renderer *guest_renderer(uint32_t handle) {
+  if (handle < 0x700 || handle >= 0x710 || !guest_renderers[handle - 0x700].host)
+    elfconv_runtime_error("Invalid guest SDL renderer handle 0x%x.\n", handle);
+  return guest_renderers[handle - 0x700].host;
+}
+GuestTexture *guest_texture(uint32_t handle) {
+  if (handle < 0x800 || handle >= 0x840 || !guest_textures[handle - 0x800].host)
+    elfconv_runtime_error("Invalid guest SDL texture handle 0x%x.\n", handle);
+  return &guest_textures[handle - 0x800];
+}
+bool guest_rect(uint8_t *arena, uint32_t address, SDL_Rect &rect) {
+  static_assert(sizeof(SDL_Rect) == 16);
+  if (!address) return true;
+  memcpy(&rect, guest(arena, address, sizeof(rect)), sizeof(rect));
+  return rect.w >= 0 && rect.h >= 0;
+}
+void destroy_renderer_slot(unsigned slot) {
+  const uint32_t handle = 0x700 + slot;
+  for (auto &entry : guest_textures)
+    if (entry.host && entry.renderer == handle) entry = {};
+  if (guest_renderers[slot].host) SDL_DestroyRenderer(guest_renderers[slot].host);
+  guest_renderers[slot] = {};
+}
+void reset_guest_renderers() {
+  for (unsigned i = 0; i < 16; ++i) destroy_renderer_slot(i);
+  for (auto &entry : guest_textures) entry = {};
+}
+void destroy_guest_renderers_for_window(uint32_t handle) {
+  for (unsigned i = 0; i < 16; ++i)
+    if (guest_renderers[i].host && guest_renderers[i].window == handle)
+      destroy_renderer_slot(i);
+}
 }
 IMPORT(SDL_FreeSurface) {
   CALL; const uint32_t handle = call.word(0); GuestSurface *s = surface_for(handle);
@@ -340,3 +376,95 @@ IMPORT(SDL_ShowMessageBox) {
 IMPORT(SDL_ShowWindow) { CALL; SDL_ShowWindow(window(call.word(0))); }
 IMPORT(SDL_WaitEventTimeout) { CALL; SDL_Event e; int found = SDL_WaitEventTimeout(call.word(0) ? &e : nullptr, int(call.word(1))); if (found && call.word(0) && !write_event(arena, call.word(0), e)) found = 0; call.result(found); }
 IMPORT(SDL_WarpMouseInWindow) { CALL; SDL_WarpMouseInWindow(call.word(0) ? window(call.word(0)) : nullptr, int(call.word(1)), int(call.word(2))); }
+IMPORT(SDL_CreateRenderer) {
+  CALL; const uint32_t window_handle = call.word(0);
+  unsigned slot = 0; while (slot < 16 && guest_renderers[slot].host) ++slot;
+  if (slot == 16) {
+    SDL_SetError("Guest SDL renderer handle table exhausted");
+    call.result(0); return;
+  }
+  SDL_Renderer *host = SDL_CreateRenderer(window(window_handle),
+      int(call.word(1)), call.word(2));
+  if (!host) { call.result(0); return; }
+  guest_renderers[slot] = {host, window_handle};
+  call.result(0x700 + slot);
+}
+IMPORT(SDL_DestroyRenderer) {
+  CALL; const uint32_t handle = call.word(0);
+  if (!handle) return;
+  SDL_Renderer *host = guest_renderer(handle);
+  for (auto &entry : guest_textures)
+    if (entry.host && entry.renderer == handle) entry = {};
+  SDL_DestroyRenderer(host);
+  guest_renderers[handle - 0x700] = {};
+}
+IMPORT(SDL_CreateTexture) {
+  CALL; const uint32_t renderer_handle = call.word(0);
+  const int width = int(call.word(3)), height = int(call.word(4));
+  if (call.word(1) != SDL_PIXELFORMAT_RGBA32 || width <= 0 ||
+      width > INT_MAX / 4 || height <= 0) {
+    SDL_SetError("SDL presentation supports positive RGBA32 textures only");
+    call.result(0); return;
+  }
+  unsigned slot = 0; while (slot < 64 && guest_textures[slot].host) ++slot;
+  if (slot == 64) {
+    SDL_SetError("Guest SDL texture handle table exhausted");
+    call.result(0); return;
+  }
+  SDL_Texture *host = SDL_CreateTexture(guest_renderer(renderer_handle),
+      SDL_PIXELFORMAT_RGBA32, int(call.word(2)), width, height);
+  if (!host) { call.result(0); return; }
+  guest_textures[slot] = {host, renderer_handle, width, height};
+  call.result(0x800 + slot);
+}
+IMPORT(SDL_DestroyTexture) {
+  CALL; const uint32_t handle = call.word(0);
+  if (!handle) return;
+  GuestTexture *entry = guest_texture(handle);
+  SDL_DestroyTexture(entry->host);
+  *entry = {};
+}
+IMPORT(SDL_UpdateTexture) {
+  CALL; GuestTexture *entry = guest_texture(call.word(0));
+  SDL_Rect rect = {}; SDL_Rect *rect_ptr = nullptr;
+  if (call.word(1)) {
+    if (!guest_rect(arena, call.word(1), rect) || rect.x < 0 || rect.y < 0 ||
+        int64_t(rect.x) + rect.w > entry->width ||
+        int64_t(rect.y) + rect.h > entry->height) {
+      call.result(SDL_SetError("Invalid guest SDL texture update rectangle")); return;
+    }
+    rect_ptr = &rect;
+  }
+  const int rows = rect_ptr ? rect.h : entry->height;
+  const int row_bytes = (rect_ptr ? rect.w : entry->width) * 4;
+  const int pitch = int(call.word(3));
+  if (!call.word(2) || pitch < row_bytes || rows <= 0) {
+    call.result(SDL_SetError("Invalid guest SDL texture pixels or pitch")); return;
+  }
+  const uint64_t bytes = uint64_t(rows - 1) * uint32_t(pitch) + uint32_t(row_bytes);
+  if (bytes > UINT32_MAX) {
+    call.result(SDL_SetError("Guest SDL texture update is too large")); return;
+  }
+  call.result(SDL_UpdateTexture(entry->host, rect_ptr,
+      guest(arena, call.word(2), size_t(bytes)), pitch));
+}
+IMPORT(SDL_RenderClear) {
+  CALL; call.result(SDL_RenderClear(guest_renderer(call.word(0))));
+}
+IMPORT(SDL_RenderCopy) {
+  CALL; const uint32_t renderer_handle = call.word(0);
+  GuestTexture *entry = guest_texture(call.word(1));
+  if (entry->renderer != renderer_handle) {
+    call.result(SDL_SetError("SDL texture belongs to a different renderer")); return;
+  }
+  SDL_Rect source = {}, destination = {};
+  if (!guest_rect(arena, call.word(2), source) ||
+      !guest_rect(arena, call.word(3), destination)) {
+    call.result(SDL_SetError("Invalid guest SDL render rectangle")); return;
+  }
+  call.result(SDL_RenderCopy(guest_renderer(renderer_handle), entry->host,
+      call.word(2) ? &source : nullptr, call.word(3) ? &destination : nullptr));
+}
+IMPORT(SDL_RenderPresent) {
+  CALL; SDL_RenderPresent(guest_renderer(call.word(0)));
+}

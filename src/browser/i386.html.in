@@ -20,49 +20,94 @@
     document.getElementById('frametime').textContent = 'Frame work: — ms';
   }
   document.addEventListener('visibilitychange', resetFrameTiming);
-  var Module = {
-    canvas: document.getElementById('canvas'),
-    arguments: new URLSearchParams(location.search).getAll('arg'),
-    onFrame: function (milliseconds) {
-      if (!document.hidden) {
-        document.getElementById('frametime').textContent =
-            'Frame work: ' + milliseconds.toFixed(2) + ' ms';
-      }
-    },
-    print: function (line) { document.getElementById('output').textContent += line + '\n'; },
-    printErr: function (line) { document.getElementById('output').textContent += line + '\n'; },
-    onRuntimeInitialized: function () {
-      document.getElementById('status').textContent = 'Running lifted i386 code';
-      Module.canvas.focus();
-    },
-    onExit: function (code) {
-      resetFrameTiming();
-      document.getElementById('status').textContent = 'Exited with status ' + code;
-      document.body.dataset.exitCode = String(code);
-    },
-    onAbort: function (reason) {
-      resetFrameTiming();
-      document.getElementById('status').textContent = 'Aborted: ' + reason;
-      document.body.dataset.abort = String(reason);
-    }
-  };
+  const query = new URLSearchParams(location.search);
   document.getElementById('start').addEventListener('click', function () {
     this.disabled = true;
     if (@ELFCONV_BROWSER_JSPI@ && (typeof WebAssembly.Suspending !== 'function' ||
-                                 typeof WebAssembly.promising !== 'function')) {
-      Module.onAbort('This build requires a browser with WebAssembly JSPI support');
+                                  typeof WebAssembly.promising !== 'function')) {
+      document.getElementById('status').textContent =
+          'This build requires a browser with WebAssembly JSPI support';
       return;
     }
-    document.getElementById('status').textContent = 'Loading Wasm…';
-    var script = document.createElement('script');
-    script.src = '@ELFCONV_NAME@.js';
-    script.onerror = function () { Module.onAbort('Unable to load runtime'); };
-    document.body.appendChild(script);
+    const assetRoot = query.get('assetRoot');
+    if (!assetRoot) {
+      const canvas = document.getElementById('canvas');
+      window.Module = {
+        canvas,
+        arguments: query.getAll('arg'),
+        onFrame: function (milliseconds) {
+          if (!document.hidden) {
+            document.getElementById('frametime').textContent =
+                'Frame work: ' + milliseconds.toFixed(2) + ' ms';
+          }
+        },
+        print: line => { document.getElementById('output').textContent += line + '\n'; },
+        printErr: line => { document.getElementById('output').textContent += line + '\n'; },
+        onRuntimeInitialized: function () {
+          document.getElementById('status').textContent = 'Running lifted i386 code';
+          canvas.focus();
+        },
+        onExit: function (code) {
+          resetFrameTiming();
+          document.getElementById('status').textContent = 'Exited with status ' + code;
+          document.body.dataset.exitCode = String(code);
+        },
+        onAbort: function (reason) {
+          resetFrameTiming();
+          document.getElementById('status').textContent = 'Aborted: ' + reason;
+          document.body.dataset.abort = String(reason);
+        }
+      };
+      document.getElementById('status').textContent = 'Loading Wasm…';
+      const script = document.createElement('script');
+      script.src = '@ELFCONV_NAME@.js';
+      script.onerror = () => { document.getElementById('status').textContent = 'Unable to load runtime'; };
+      document.body.appendChild(script);
+      return;
+    }
+    if (typeof OffscreenCanvas === 'undefined') {
+      document.getElementById('status').textContent =
+          'This build requires OffscreenCanvas for HTTP-backed game files';
+      return;
+    }
+    document.getElementById('status').textContent = 'Starting worker…';
+    const worker = new Worker('@ELFCONV_NAME@.worker.js');
+    worker.onmessage = function (event) {
+      const message = event.data;
+      if (message.type === 'output') {
+        document.getElementById('output').textContent += message.line + '\n';
+      } else if (message.type === 'frame') {
+        if (!document.hidden) {
+          document.getElementById('frametime').textContent =
+              'Frame work: ' + message.milliseconds.toFixed(2) + ' ms';
+        }
+      } else if (message.type === 'running') {
+        document.getElementById('status').textContent = 'Running lifted i386 code';
+      } else if (message.type === 'exit') {
+        document.getElementById('status').textContent = 'Exited with status ' + message.code;
+        document.body.dataset.exitCode = String(message.code);
+      } else if (message.type === 'abort') {
+        document.getElementById('status').textContent = 'Aborted: ' + message.reason;
+        document.body.dataset.abort = String(message.reason);
+      }
+    };
+    worker.onerror = function (event) {
+      document.getElementById('status').textContent = 'Worker error: ' + event.message;
+    };
+    const canvas = document.getElementById('canvas');
+    const offscreen = canvas.transferControlToOffscreen();
+    worker.postMessage({
+      canvas: offscreen,
+      arguments: query.getAll('arg'),
+      assetRoot,
+      runtimeScript: new URL('@ELFCONV_NAME@.js', location.href).href
+    }, [offscreen]);
+    canvas.focus();
   }, { once: true });
   document.getElementById('fullscreen').addEventListener('click', function () {
-    Module.canvas.requestFullscreen().catch(function (error) { Module.printErr(error.message); });
-    Module.canvas.focus();
+    document.getElementById('canvas').requestFullscreen().catch(function (error) {
+      document.getElementById('output').textContent += error.message + '\n';
+    });
   });
-  Module.canvas.addEventListener('click', function () { Module.canvas.focus(); });
 </script>
 </html>

@@ -162,6 +162,8 @@ class ELFObject {
   std::map<uint64_t, std::string> i386_imports;
   std::vector<uint32_t> i386_initializers;
   std::vector<uint32_t> i386_finalizers;
+  // Address/kind pairs: libc program name (1), basename (2), environment (3).
+  std::vector<uint32_t> i386_libc_data;
   unsigned long symbol_table_size;
 
   uint64_t e_phent;

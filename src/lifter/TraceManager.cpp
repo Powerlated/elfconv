@@ -364,6 +364,9 @@ void AArch64TraceManager::WriteIncrementalManifest(
   const uint64_t finalizer_count = elf_obj.i386_finalizers.size();
   WriteScalar(metadata, finalizer_count);
   for (const auto address : elf_obj.i386_finalizers) WriteScalar(metadata, address);
+  const uint64_t libc_data_count = elf_obj.i386_libc_data.size();
+  WriteScalar(metadata, libc_data_count);
+  for (const auto value : elf_obj.i386_libc_data) WriteScalar(metadata, value);
   const uint64_t import_count = elf_obj.i386_imports.size();
   WriteScalar(metadata, import_count);
   for (const auto &[address, name] : elf_obj.i386_imports) {
@@ -490,6 +493,8 @@ bool AArch64TraceManager::isFunctionEntry(uint64_t addr) {
 }
 
 std::string AArch64TraceManager::GetUniqueLiftedFuncName(std::string func_name, uint64_t vma_s) {
+  // Wasm assemblers treat names beginning with `.L` as temporary labels.
+  if (func_name.starts_with(".L")) func_name.insert(0, "_ecv_local");
   std::stringstream lifted_fn_name;
   lifted_fn_name << func_name << "_____" << std::hex << vma_s;
   return lifted_fn_name.str();

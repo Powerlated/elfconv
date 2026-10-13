@@ -3,8 +3,9 @@
 - GPT-6-Luna MUST NOT spawn subagents; work directly.
 - Main agent owns integration and verification.
 - Commit early and commit often. Prefer small, coherent commits; verify significant behavioral changes before committing them.
-- Commit messages: one line; no body. Keep unrelated user changes out of commits.
-- After requested changes pass verification, create a focused commit before reporting completion. Stage only files or hunks belonging to the current task and inspect the staged diff first. Never include unrelated user changes, generated outputs, or secrets. If task changes cannot be safely isolated, do not commit; explain the blocker.
+- Commit messages: one line; no body.
+- Never use interactive hunk staging (`git add -p`). When committing, include unrelated existing source edits instead of splitting hunks. Exclude generated outputs and secrets; inspect the full staged diff first.
+- After requested changes pass verification, create a commit before reporting completion.
 
 ## Delegation
 
@@ -82,7 +83,7 @@
 
 ## Environment safety
 
-- If a required i386 compiler, sysroot, or development library is unavailable, acquire a pinned toolchain/sysroot under `~/.local/opt/` instead of requiring host-wide package installation. Record its source and version; never overwrite an existing user toolchain.
+- If a required toolchain, sysroot, or development library is unavailable, acquire a pinned distribution under `~/.local/opt/` instead of requiring host-wide package installation. Record its source and version; never overwrite an existing user toolchain.
 - Steam: non-root user; writable runtime directories. Never store credentials in tracked files or chat.
 - Use `~/emsdk-6` (Emscripten 6.0.12, LLVM 24) for compiling and linking Wasm from LLVM 23 bitcode. Source `~/emsdk-6/emsdk_env.sh`; its `emcc` and `em++` are under `~/emsdk-6/upstream/emscripten`.
 - Do not use `~/emsdk` (Emscripten 4.0.9, LLVM 21) with LLVM 23 bitcode; its reader rejects LLVM 23 attributes.

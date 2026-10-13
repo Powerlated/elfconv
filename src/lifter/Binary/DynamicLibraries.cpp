@@ -158,6 +158,8 @@ void ELFObject::LoadI386Libraries() {
     }
     func_symbols.insert(func_symbols.end(), object.func_symbols.begin(), object.func_symbols.end());
     i386_imports.insert(object.i386_imports.begin(), object.i386_imports.end());
+    i386_libc_data.insert(i386_libc_data.end(), object.i386_libc_data.begin(),
+                         object.i386_libc_data.end());
   }
   std::sort(func_symbols.begin(), func_symbols.end(),
             [](const auto &a, const auto &b) { return a.addr < b.addr; });

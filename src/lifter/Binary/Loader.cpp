@@ -418,12 +418,12 @@ void ELFObject::ResolveI386Imports() {
     imported_data_vma = std::max(imported_data_vma, section.vma + section.size);
   }
   imported_data_vma = (imported_data_vma + 3) & ~uint64_t(3);
-  if (imported_data_vma > UINT32_MAX - 12) elfconv_runtime_error("No guest address space for i386 stdio imports.\n");
-  auto *stdio_bytes = static_cast<uint8_t *>(malloc(12));
-  const uint32_t stdio_handles[] = {1, 2, 3};
+  if (imported_data_vma > UINT32_MAX - 28) elfconv_runtime_error("No guest address space for i386 libc imports.\n");
+  auto *stdio_bytes = static_cast<uint8_t *>(malloc(28));
+  const uint32_t stdio_handles[] = {1, 2, 3, 0, 0, 0, 0};
   memcpy(stdio_bytes, stdio_handles, sizeof(stdio_handles));
-  sections.emplace_back(this, ELFSection::SEC_TYPE_DATA, ".elfconv.stdio",
-                        imported_data_vma, 12, stdio_bytes);
+  sections.emplace_back(this, ELFSection::SEC_TYPE_DATA, ".elfconv.libc",
+                        imported_data_vma, 28, stdio_bytes);
   bool entry_found = entry_symbol.empty();
   std::unordered_set<uint64_t> function_addresses;
   for (const auto &function : func_symbols) function_addresses.insert(function.addr);
@@ -488,7 +488,7 @@ void ELFObject::ResolveI386Imports() {
     elfconv_runtime_error("Unmapped i386 relocation addend.\n");
     return uint32_t(0);
   };
-  uint64_t next_import_vma = imported_data_vma + 12;
+  uint64_t next_import_vma = imported_data_vma + 28;
   std::map<std::string, uint32_t> import_thunks;
   auto import_thunk = [&](const std::string &name) {
     auto existing = import_thunks.find(name);
@@ -530,6 +530,11 @@ void ELFObject::ResolveI386Imports() {
       const char *name = elf_strptr(elf, sym_header.sh_link, sym.st_name);
       if (!name) elfconv_runtime_error("Invalid i386 import name.\n");
       unsigned type = GELF_R_TYPE(rel.r_info);
+      const unsigned libc_data_kind =
+          !strcmp(name, "program_invocation_name") || !strcmp(name, "__progname_full") ? 1 :
+          !strcmp(name, "program_invocation_short_name") || !strcmp(name, "__progname") ? 2 :
+          !strcmp(name, "environ") || !strcmp(name, "__environ") ? 3 :
+          !strcmp(name, "__libc_single_threaded") ? 4 : 0;
       if (type == R_386_NONE) continue;
       if (analyze_only && type != R_386_RELATIVE && type != R_386_JMP_SLOT) continue;
       rel.r_offset += load_bias;
@@ -600,6 +605,18 @@ void ELFObject::ResolveI386Imports() {
           if (type == R_386_PC32) value -= rel.r_offset;
         }
         patch(rel.r_offset, value);
+      } else if ((type == R_386_GLOB_DAT || type == R_386_32 || type == R_386_PC32) &&
+                 libc_data_kind) {
+        const uint32_t address = imported_data_vma + 8 + 4 * libc_data_kind;
+        uint32_t value = address;
+        if (type == R_386_32 || type == R_386_PC32) {
+          value += read_word(rel.r_offset);
+          if (type == R_386_PC32) value -= rel.r_offset;
+        }
+        patch(rel.r_offset, value);
+        i386_libc_data.insert(i386_libc_data.end(), {address, libc_data_kind});
+      } else if (type == R_386_COPY && sym.st_size == 4 && libc_data_kind) {
+        i386_libc_data.insert(i386_libc_data.end(), {static_cast<uint32_t>(rel.r_offset), libc_data_kind});
       } else if (type == R_386_COPY && sym.st_size == 4 &&
                  (std::string(name) == "stdout" || std::string(name) == "stderr" ||
                   std::string(name) == "stdin")) {

@@ -247,11 +247,16 @@ Serve game assets separately (Node 24+):
 
 ```bash
 node scripts/serve_game_files.ts /absolute/path/to/Portal 8081
+python3 -m http.server 8080 --bind 127.0.0.1 --directory .
 ```
 
-Loopback-only, read-only GET/HEAD, single byte ranges, cross-origin reads.
-`/bin/filesystem_stdio.so` maps to `Portal/bin/filesystem_stdio.so`.
-No directory listing. Guest HTTP filesystem integration is separate.
+For an i386 browser build, open
+`http://127.0.0.1:8080/hl2_linux.html?assetRoot=http://127.0.0.1:8081/`.
+The guest mounts the read-only HTTP tree at `/`; Emscripten fetches files on
+demand from a dedicated worker. The asset server is loopback-only and supports
+GET/HEAD and byte ranges.
+This exposes files only; guest shared libraries must still be lifted and listed
+in the conversion's library bundle.
 
 ### WASI Runtime
 

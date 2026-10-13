@@ -106,11 +106,14 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--legacy-gl", choices=("0", "1"), default="1")
     result.add_argument("--jobs", type=int, default=2,
                         help="Maximum concurrent lifting and compiling jobs combined")
+    result.add_argument("--pthread-pool-size", type=int, default=2,
+                        help="Preallocated workers for pthread-enabled browser Wasm")
     result.add_argument("--max-ir-chunks-per-elf", type=int, default=0, metavar="N",
                         help="Maximum linkable chunks per ELF; 1 skips partitioning, 0 disables chunk output.")
     result.add_argument("--debug-func-addr", default="0")
     for name in ("init-wasm", "debug", "float-status", "text-ir", "no-lifted",
-                 "no-compiled", "ready-js", "incremental-units", "jspi", "pthreads"):
+                 "no-compiled", "ready-js", "incremental-units", "jspi", "pthreads",
+                 "no-offscreen-canvas"):
         result.add_argument(f"--{name}", action="store_true")
     return result
 
@@ -135,9 +138,14 @@ class Driver:
             self.definitions += ["-DELFC_RUNTIME_SYSCALL_DEBUG=1", "-DELFC_RUNTIME_MULSECTIONS_WARNING=1"]
         self.thread_compile = ["-pthread"] if args.pthreads else []
         self.exception_flags = ["-fwasm-exceptions"] if args.target == "i386-wasm" else []
-        self.thread_link = self.thread_compile + (["-sPROXY_TO_PTHREAD=1", "-sPTHREAD_POOL_SIZE=2",
-            "-sDEFAULT_PTHREAD_STACK_SIZE=2097152", "-sOFFSCREENCANVAS_SUPPORT=1",
-            "-sOFFSCREENCANVASES_TO_PTHREAD=#canvas"] if args.pthreads else [])
+        self.thread_link = self.thread_compile
+        if args.pthreads:
+            self.thread_link = [*self.thread_compile, "-sPROXY_TO_PTHREAD=1",
+                f"-sPTHREAD_POOL_SIZE={args.pthread_pool_size}",
+                "-sDEFAULT_PTHREAD_STACK_SIZE=2097152"]
+            if not args.no_offscreen_canvas:
+                self.thread_link += ["-sOFFSCREENCANVAS_SUPPORT=1",
+                    "-sOFFSCREENCANVASES_TO_PTHREAD=#canvas"]
         self.compiler_identity: dict[str, str] = {}
         self.script_hash = digest(Path(__file__))
 
@@ -278,17 +286,22 @@ class Driver:
         source = source.replace("@ELFCONV_NAME@", self.a.elf_name).replace(
             "@ELFCONV_BROWSER_JSPI@", str(self.a.jspi or self.a.pthreads).lower())
         atomic_text(self.output / f"{self.a.elf_name}.html", source)
+        worker = (ROOT / "src/browser/i386.worker.js.in").read_text()
+        worker = worker.replace("@ELFCONV_NAME@", self.a.elf_name)
+        atomic_text(self.output / f"{self.a.elf_name}.worker.js", worker)
 
     def browser_link_flags(self, incremental: bool) -> list[str]:
         flags = [f"-O{self.a.wasm_opt_level}", *self.thread_link, *self.exception_flags,
                  *(["-g2"] if self.a.wasm_opt_level == "0" else []), *self.includes,
                  "-std=c++17", *self.definitions, "-DELF_IS_I386", "-DADDRESS_SIZE_BITS=32",
-                 "-sUSE_SDL=2", f"-sLEGACY_GL_EMULATION={self.a.legacy_gl}",
+                 "-sUSE_SDL=2", "-sFORCE_FILESYSTEM=1", "-sENVIRONMENT=web,worker",
+                 f"-sLEGACY_GL_EMULATION={self.a.legacy_gl}",
                  "-sMIN_WEBGL_VERSION=2", "-sMAX_WEBGL_VERSION=2", f"-DECV_LEGACY_GL={self.a.legacy_gl}",
                  "-sJSPI=1" if self.a.jspi or self.a.pthreads else
                  "-sASYNCIFY=0" if self.a.no_asyncify else "-sASYNCIFY=1",
                  "-sALLOW_MEMORY_GROWTH=1", "-sINITIAL_MEMORY=335544320",
-                 "-sSTACK_SIZE=1048576", "-sEXIT_RUNTIME=1"]
+                 "-sSTACK_SIZE=1048576", "-sEXIT_RUNTIME=1",
+                 "--pre-js", str(ROOT / "src/browser/i386-assets.js")]
         if incremental:
             flags += ["-DELFCONV_INCREMENTAL_UNITS=1"]
         return flags
@@ -893,6 +906,10 @@ def validate(a: argparse.Namespace) -> None:
         raise ValueError("--elf-name must be a filename, not a path")
     if a.jobs < 1:
         raise ValueError("--jobs must be positive")
+    if a.pthread_pool_size < 1:
+        raise ValueError("--pthread-pool-size must be positive")
+    if a.no_offscreen_canvas and not a.pthreads:
+        raise ValueError("--no-offscreen-canvas requires --pthreads")
     if a.max_ir_chunks_per_elf < 0:
         raise ValueError("--max-ir-chunks-per-elf must be non-negative")
     if a.max_ir_chunks_per_elf and a.target != "i386-wasm":
