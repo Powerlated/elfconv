@@ -41,6 +41,7 @@
 #include <llvm/Passes/PassBuilder.h>
 #include <llvm/Transforms/IPO/Internalize.h>
 #include <llvm/Transforms/IPO/GlobalDCE.h>
+#include <llvm/Transforms/Utils/Mem2Reg.h>
 #include <llvm/Transforms/Utils/ModuleUtils.h>
 #include <llvm/Support/raw_ostream.h>
 #include <llvm/Transforms/Utils/SplitModule.h>
@@ -682,6 +683,10 @@ int main(int argc, char *argv[]) {
       return global.getName().starts_with("_ecv_") || unit_exports.contains(global.getName().str());
     }));
     passes.addPass(llvm::GlobalDCEPass());
+    // Lifted functions keep NEXT_PC and similar locals in allocas; promoting
+    // them to SSA registers shrinks the serialized bitcode without changing
+    // observable behavior.
+    passes.addPass(llvm::createModuleToFunctionPassAdaptor(llvm::PromotePass()));
     llvm::PassBuilder builder;
     llvm::ModuleAnalysisManager analyses;
     builder.registerModuleAnalyses(analyses);
