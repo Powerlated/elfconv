@@ -180,7 +180,7 @@ cmake -S . -B build -G Ninja \
   -DCMAKE_INSTALL_PREFIX="$PWD/build/install" \
   -DCMAKE_C_COMPILER="$LLVM_ROOT/bin/clang" \
   -DCMAKE_CXX_COMPILER="$LLVM_ROOT/bin/clang++"
-cmake --build build --target elflift
+cmake --build build
 cmake --install build
 ```
 
@@ -207,6 +207,19 @@ Portal: `./lift_portal.sh` reuses the repository-root cache, uses a shared
 lifting/compiling pool with `-O1`, and enables JSPI. Overrides: `ELFCONV_JOBS`,
 `ELFCONV_WASM_OPT_LEVEL`; extra driver flags pass through.
 After lifter/runtime edits, run `ELFCONV_BUILD=1 ./lift_portal.sh` to rebuild first.
+
+Fast Portal iteration:
+```bash
+./lift_portal.sh --browser-only             # HTML/bootstrap; no conversion
+./lift_portal.sh --relink-only              # Asset pre-JS/link flags; reuse guest objects
+ELFCONV_BUILD=1 ./lift_portal.sh --relink-only # Runtime edits; rebuild matching archive
+./lift_portal.sh --relink-only --wasm-debug-symbols --wasm-assertions
+```
+Normal bundle conversion records the relink plan. Relinking rejects changed
+guest binaries, lifter/semantics, compilation flags, compiler, or cached objects.
+Driver edits no longer invalidate every stage. Runtime archives use per-object
+header dependencies; Portal builds only its incremental pthread variant.
+
 Lifting shows `[completed/known total]`; the total grows as callees are discovered.
 After function translation, the display names IR finalization, partitioning,
 bitcode writing, and cleanup instead of retaining a completed function counter.

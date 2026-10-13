@@ -111,6 +111,15 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--max-ir-chunks-per-elf", type=int, default=0, metavar="N",
                         help="Maximum linkable chunks per ELF; 1 skips partitioning, 0 disables chunk output.")
     result.add_argument("--debug-func-addr", default="0")
+    fast = result.add_mutually_exclusive_group()
+    fast.add_argument("--browser-only", action="store_true",
+                      help="Refresh browser HTML/bootstrap without conversion")
+    fast.add_argument("--relink-only", action="store_true",
+                      help="Relink a recorded bundle without lifting or compiling")
+    result.add_argument("--wasm-debug-symbols", action="store_true",
+                        help="Keep Wasm function names for browser stack traces (link-only)")
+    result.add_argument("--wasm-assertions", action="store_true",
+                        help="Enable Emscripten runtime diagnostics (link-only)")
     for name in ("init-wasm", "debug", "float-status", "text-ir", "no-lifted",
                  "no-compiled", "ready-js", "incremental-units", "jspi", "pthreads",
                  "no-offscreen-canvas"):
@@ -147,7 +156,8 @@ class Driver:
                 self.thread_link += ["-sOFFSCREENCANVAS_SUPPORT=1",
                     "-sOFFSCREENCANVASES_TO_PTHREAD=#canvas"]
         self.compiler_identity: dict[str, str] = {}
-        self.script_hash = digest(Path(__file__))
+        # Bump only for driver changes that alter artifacts without changing commands/dependencies.
+        self.cache_version = "elfconv-stage-cache-v1"
 
     async def run(self, name: str, phase: str, command: list[object], *,
                   chunk_ready: Callable[[int, int], None] | None = None) -> Path:
@@ -236,7 +246,7 @@ class Driver:
     async def stage(self, name: str, phase: str, command: list[object], outputs: list[Path],
                     dependencies: object, stamp: Path, *, force: bool = False,
                     chunk_ready: Callable[[int, int, str], None] | None = None) -> tuple[str, bool]:
-        stage_key = key(self.script_hash, command, dependencies)
+        stage_key = key(self.cache_version, command, dependencies)
         if not force and all(path.is_file() for path in outputs) and stamp.is_file() and stamp.read_text() == stage_key:
             self.display.update(name, "cached", phase)
             return stage_key, False
@@ -288,11 +298,53 @@ class Driver:
         atomic_text(self.output / f"{self.a.elf_name}.html", source)
         worker = (ROOT / "src/browser/i386.worker.js.in").read_text()
         worker = worker.replace("@ELFCONV_NAME@", self.a.elf_name)
-        atomic_text(self.output / f"{self.a.elf_name}.worker.js", worker)
+        atomic_text(self.output / f"{self.a.elf_name}.assets-worker.js", worker)
+        shutil.copyfile(ROOT / "src/browser/coi-serviceworker.js", self.output / "coi-serviceworker.js")
+
+    def link_plan(self, objects: list[Path], incremental: bool) -> dict:
+        semantics = []
+        if self.a.bitcode_path:
+            paths = (sorted(self.a.bitcode_path.rglob("*.bc"))
+                     if self.a.bitcode_path.is_dir() else [self.a.bitcode_path])
+            semantics = [(str(path), digest(path)) for path in paths]
+        return {
+            "version": 1,
+            "inputs": {str(path): digest(path) for path in [self.a.input, *self.a.shared_library]},
+            "configuration": [self.a.target, self.a.elf_name, self.a.wasm_opt_level,
+                              self.a.pthreads, self.a.float_status, self.a.entry_symbol,
+                              self.a.max_ir_chunks_per_elf, list(map(str, self.lift_flags()))],
+            "semantics": semantics,
+            "compiler": self.compiler_identity[self.a.emcc],
+            "lifter": digest(Path(self.a.lifter)),
+            "incremental": incremental,
+            "objects": [{"path": str(path), "size": path.stat().st_size,
+                         "mtime_ns": path.stat().st_mtime_ns} for path in objects],
+        }
+
+    async def relink(self) -> None:
+        plan_path = self.cache / "browser-link-plan.json"
+        if not plan_path.is_file():
+            raise ValueError("No recorded link plan; run normal conversion once")
+        plan = json.loads(plan_path.read_text())
+        emcc = await self.compiler()
+        objects = [Path(item["path"]) for item in plan["objects"]]
+        if plan != self.link_plan(objects, plan["incremental"]):
+            raise ValueError("Guest inputs, compilation configuration, or cached objects changed; run normal conversion")
+        runtime = [self.a.runtime_archive] if self.a.runtime_archive else []
+        if not runtime:
+            raise ValueError("--relink-only requires --runtime-archive")
+        # A fast link deliberately replaces the normal link result: invalidate its stamp.
+        (self.cache / "link.key").unlink(missing_ok=True)
+        await self.run("Final link", "linking",
+                       [emcc, *self.browser_link_flags(plan["incremental"]), *objects,
+                        *runtime, "-o", self.output / f"{self.a.elf_name}.js"])
+        self.display.update("Final link", "done", "linking")
+        self.html()
 
     def browser_link_flags(self, incremental: bool) -> list[str]:
         flags = [f"-O{self.a.wasm_opt_level}", *self.thread_link, *self.exception_flags,
-                 *(["-g2"] if self.a.wasm_opt_level == "0" else []), *self.includes,
+                 *(["-g2"] if self.a.wasm_opt_level == "0" or self.a.wasm_debug_symbols else []),
+                 *(["-sASSERTIONS=1"] if self.a.wasm_assertions else []), *self.includes,
                  "-std=c++17", *self.definitions, "-DELF_IS_I386", "-DADDRESS_SIZE_BITS=32",
                  "-sUSE_SDL=2", "-sFORCE_FILESYSTEM=1", "-sENVIRONMENT=web,worker",
                  f"-sLEGACY_GL_EMULATION={self.a.legacy_gl}",
@@ -577,10 +629,15 @@ class Driver:
                  for owner, _, _, _, _ in entries
                  for index in sorted(compiled_chunks[owner])]
         js, wasm = self.output / f"{a.elf_name}.js", self.output / f"{a.elf_name}.wasm"
+        if a.runtime_archive:
+            atomic_text(self.cache / "browser-link-plan.json",
+                        json.dumps(self.link_plan([*[obj for obj, _ in units],
+                                                  metadata_object, registry_object], True)))
         _, linked = await self.stage("Final link", "linking",
             [emcc, *self.browser_link_flags(True), *[obj for obj, _ in units], metadata_object,
              registry_object, *runtime_objects, "-o", js], [js, wasm],
-            [metadata_compile_key, registry_key, [stamp for _, stamp in units], runtime_keys, compiler_identity],
+            [metadata_compile_key, registry_key, [stamp for _, stamp in units], runtime_keys,
+             compiler_identity, digest(ROOT / "src/browser/i386-assets.js")],
             self.cache / "link.key")
         self.display.update("Final link", "done" if linked else "cached", "linking")
         self.html()
@@ -739,7 +796,8 @@ class Driver:
         js, wasm = self.output / f"{name}.js", self.output / f"{name}.wasm"
         _, linked = await self.stage("Final link", "linking",
             [emcc, *self.browser_link_flags(False), *chunk_objects, *runtime_objects, "-o", js],
-            [js, wasm], [lift_key, chunk_keys, runtime_keys, compiler_identity],
+            [js, wasm], [lift_key, chunk_keys, runtime_keys, compiler_identity,
+                         digest(ROOT / "src/browser/i386-assets.js")],
             self.cache / f"{name}.ir-chunks.link.key")
         self.display.update("Final link", "done" if linked else "cached")
         self.html()
@@ -904,6 +962,8 @@ def validate(a: argparse.Namespace) -> None:
     a.elf_name = a.elf_name or a.input.name
     if Path(a.elf_name).name != a.elf_name or a.elf_name in (".", ".."):
         raise ValueError("--elf-name must be a filename, not a path")
+    if (a.relink_only or a.browser_only) and a.target != "i386-wasm":
+        raise ValueError("Fast browser iteration requires i386-wasm")
     if a.jobs < 1:
         raise ValueError("--jobs must be positive")
     if a.pthread_pool_size < 1:
@@ -976,7 +1036,13 @@ async def convert(a: argparse.Namespace, console: Console) -> None:
     try:
         if console.is_terminal:
             display.live.start()
-        if a.ready_js:
+        if a.browser_only:
+            if a.target != "i386-wasm":
+                raise ValueError("--browser-only requires i386-wasm")
+            driver.html()
+        elif a.relink_only:
+            await driver.relink()
+        elif a.ready_js:
             driver.prepare_browser()
         elif a.shared_library and a.target == "i386-wasm":
             await driver.incremental()

@@ -87,16 +87,6 @@ if(CMAKE_ELFCONV_X86_BUILD)
       "${ELFCONV_ROOT}/src/utils/Util.cpp"
       "${ELFCONV_ROOT}/src/utils/elfconv.cpp"
       "${ELFCONV_ROOT}/src/runtime/I386Imports.cpp")
-    file(GLOB_RECURSE elfconv_runtime_headers CONFIGURE_DEPENDS
-      "${ELFCONV_ROOT}/src/runtime/*.h"
-      "${ELFCONV_ROOT}/src/runtime/*.hpp"
-      "${ELFCONV_ROOT}/src/runtime/*.inc"
-      "${ELFCONV_ROOT}/src/utils/*.h"
-      "${ELFCONV_ROOT}/src/utils/*.hpp"
-      "${ELFCONV_ROOT}/src/utils/*.inc"
-      "${ELFCONV_ROOT}/backend/remill/include/*.h"
-      "${ELFCONV_ROOT}/backend/remill/include/*.hpp"
-      "${ELFCONV_ROOT}/backend/remill/include/*.inc")
 
     function(elfconv_add_runtime_archive suffix thread_flag incremental)
       set(runtime_objects)
@@ -114,8 +104,10 @@ if(CMAKE_ELFCONV_X86_BUILD)
             "-I${ELFCONV_ROOT}/backend/remill/include"
             "-I${ELFCONV_ROOT}" "-I${ELFCONV_ROOT}/src"
             -std=c++17 -DELF_IS_I386 -DADDRESS_SIZE_BITS=32 -DECV_LEGACY_GL=0
-            ${runtime_mode_flags} -sUSE_SDL=2 -c "${source}" -o "${object}"
-          DEPENDS "${source}" ${elfconv_runtime_headers}
+            ${runtime_mode_flags} -sUSE_SDL=2 -MMD -MF "${object}.d"
+            -c "${source}" -o "${object}"
+          DEPENDS "${source}"
+          DEPFILE "${object}.d"
           VERBATIM)
         list(APPEND runtime_objects "${object}")
       endforeach()
@@ -124,6 +116,7 @@ if(CMAKE_ELFCONV_X86_BUILD)
         COMMAND "${ELFCONV_EMAR}" rcs "${archive}" ${runtime_objects}
         DEPENDS ${runtime_objects}
         VERBATIM)
+      add_custom_target(elfconv-runtime-i386-wasm${suffix} DEPENDS "${archive}")
       set(elfconv_runtime_archives ${elfconv_runtime_archives} "${archive}" PARENT_SCOPE)
     endfunction()
 
@@ -132,7 +125,6 @@ if(CMAKE_ELFCONV_X86_BUILD)
     elfconv_add_runtime_archive("-incremental" "" ON)
     elfconv_add_runtime_archive("-incremental-pthreads" "-pthread" ON)
     add_custom_target(elfconv_i386_wasm_runtime ALL DEPENDS ${elfconv_runtime_archives})
-    add_dependencies(elflift elfconv_i386_wasm_runtime)
     install(FILES ${elfconv_runtime_archives} DESTINATION "${CMAKE_INSTALL_BINDIR}")
   elseif(ELFCONV_I386_TESTS)
     message(FATAL_ERROR "ELFCONV_I386_TESTS requires Emscripten to build the i386 Wasm runtime archives")

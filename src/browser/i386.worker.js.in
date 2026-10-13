@@ -1,24 +1,32 @@
 self.onmessage = async function (event) {
   const { canvas, arguments: args, assetRoot, runtimeScript } = event.data;
   try {
-    let assets = null;
-    if (assetRoot) {
-      const root = new URL(assetRoot);
-      if (!['http:', 'https:'].includes(root.protocol) || root.username || root.password) {
-        throw new Error('assetRoot must be an HTTP(S) URL without credentials');
-      }
-      if (!root.pathname.endsWith('/')) root.pathname += '/';
-      const response = await fetch(new URL('__elfconv_assets.json', root));
-      if (!response.ok) throw new Error('Asset manifest request failed: HTTP ' + response.status);
-      const manifest = await response.json();
-      if (manifest.version !== 1 || !Array.isArray(manifest.files) || !Array.isArray(manifest.directories)) {
-        throw new Error('Unsupported game asset manifest');
-      }
-      assets = { root: root.href, manifest };
+    const root = new URL(assetRoot);
+    if (!['http:', 'https:'].includes(root.protocol) || root.username || root.password) {
+      throw new Error('assetRoot must be an HTTP(S) URL without credentials');
     }
+    if (!root.pathname.endsWith('/')) root.pathname += '/';
+    const response = await fetch(new URL('__elfconv_assets.json', root));
+    if (!response.ok) throw new Error('Asset manifest request failed: HTTP ' + response.status);
+    const manifest = await response.json();
+    if (manifest.version !== 1 || !Array.isArray(manifest.files) || !Array.isArray(manifest.directories)) {
+      throw new Error('Unsupported game asset manifest');
+    }
+    const NativeWorker = self.Worker;
+    self.Worker = class extends NativeWorker {
+      constructor(url, options = {}) {
+        super(options.name?.startsWith('em-pthread') ? runtimeScript : url, options);
+      }
+    };
     self.Module = {
-      canvas,
+      canvas: {
+        id: 'canvas',
+        width: canvas.width,
+        height: canvas.height,
+        transferControlToOffscreen: () => canvas
+      },
       arguments: args,
+      elfconvAssets: { root: root.href, manifest },
       locateFile: path => new URL(path, runtimeScript).href,
       print: line => self.postMessage({ type: 'output', line: String(line) }),
       printErr: line => self.postMessage({ type: 'output', line: String(line) }),

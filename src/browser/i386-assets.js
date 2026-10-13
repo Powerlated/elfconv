@@ -1,7 +1,14 @@
-// This pre-js runs inside the Emscripten worker, where createLazyFile's
-// synchronous ranged XHR is permitted.
+// This pre-js mounts remote game files before Emscripten initializes the filesystem.
 Module["preInit"] = Module["preInit"] || [];
 Module["preInit"].push(function () {
+  // Match __ecv_i386_cpuid and __ecv_i386_read_tsc: one virtual CPU,
+  // invariant nanosecond counter (1 GHz), never the host CPU's frequency.
+  FS.createPath("/", "proc", true, true);
+  FS.createDataFile("/proc", "cpuinfo",
+      "processor\t: 0\nvendor_id\t: GenuineIntel\n" +
+      "model name\t: elfconv virtual i386 CPU, 1 GHz TSC\n" +
+      "cpu MHz\t\t: 1000.000\nphysical id\t: 0\ncore id\t\t: 0\n",
+      true, false);
   const config = Module["elfconvAssets"];
   if (!config) return;
   const root = new URL(config.root);

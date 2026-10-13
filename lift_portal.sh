@@ -4,7 +4,7 @@ ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT"
 
 if [[ "${ELFCONV_BUILD:-0}" == 1 ]]; then
-  cmake --build "$ROOT/build/" --target elflift \
+  cmake --build "$ROOT/build/" --target elflift elfconv-runtime-i386-wasm-incremental-pthreads \
     --parallel "${ELFCONV_BUILD_JOBS:-4}"
 fi
 
@@ -38,10 +38,12 @@ python3 scripts/convert_elf.py \
   "${ARGS[@]}" \
   --lifter "$PWD/build/src/lifter/elflift" \
   --emcc "$HOME/emsdk-6/upstream/emscripten/em++" \
+  --pthreads \
+  --pthread-pool-size 8 \
   --legacy-gl 0 \
   --jspi \
   --max-ir-chunks-per-elf 100 \
-  --runtime-archive "$PWD/build/src/lifter/libelfconv-runtime-i386-wasm-incremental.a" \
+  --runtime-archive "$PWD/build/src/lifter/libelfconv-runtime-i386-wasm-incremental-pthreads.a" \
   --jobs "${ELFCONV_JOBS:-16}" \
   "$@"
 

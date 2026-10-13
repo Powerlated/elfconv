@@ -15,6 +15,7 @@
 <p id="status">Ready. Start enables browser audio.</p>
 <p id="frametime" title="Frame work from input processing through rendering and audio, excluding frame-pacing waits; not a GPU timer">Frame work: — ms</p>
 <pre id="output"></pre>
+<script src="coi-serviceworker.js"></script>
 <script>
   function resetFrameTiming() {
     document.getElementById('frametime').textContent = 'Frame work: — ms';
@@ -71,7 +72,7 @@
       return;
     }
     document.getElementById('status').textContent = 'Starting worker…';
-    const worker = new Worker('@ELFCONV_NAME@.worker.js');
+    const worker = new Worker('@ELFCONV_NAME@.assets-worker.js');
     worker.onmessage = function (event) {
       const message = event.data;
       if (message.type === 'output') {
