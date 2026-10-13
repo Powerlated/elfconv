@@ -192,13 +192,14 @@ def main():
     runtime_archive = Path(args.lifter).resolve().with_name(
         'libelfconv-runtime-i386-wasm' + runtime_suffix + '.a')
     if not runtime_archive.is_file():
-        print(f'Missing prebuilt Wasm runtime archive: {runtime_archive}; build elflift first')
+        print(f'Missing prebuilt Wasm runtime archive: {runtime_archive}; build elfconv-runtime-i386-wasm{runtime_suffix}')
         return 1
     converted = run('convert', [sys.executable, str(root / 'scripts/convert_elf.py'),
         '--input', str(binary), '--target', 'i386-wasm',
         '--output-dir', str(output / 'wasm'),
         '--lifter', args.lifter, '--emcc', args.emcc,
         '--runtime-archive', str(runtime_archive),
+        '--wasm-environment', 'web,worker' if args.browser else 'node',
         *(['--entry-symbol', 'main'] if args.shared else []),
         *(['--wasm-opt-level', args.wasm_opt_level] if args.wasm_opt_level else []),
         *(['--jobs', str(args.jobs)] if args.jobs is not None else []),
@@ -206,6 +207,7 @@ def main():
           if args.max_ir_chunks_per_elf is not None else []),
         *[argument for library in libraries for argument in ('--shared-library', str(library))],
         *(['--pthreads'] if args.pthreads else []),
+        *(['--no-offscreen-canvas'] if args.pthreads and not args.browser else []),
         *(['--no-asyncify'] if args.no_asyncify else []),
         '--legacy-gl', '0'], 600)
     if converted is None or converted.returncode:

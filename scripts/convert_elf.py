@@ -101,6 +101,8 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--link-map", type=Path)
     result.add_argument("--object-base", type=Path)
     result.add_argument("--wasm-opt-level", choices=list("0123sz"), default="3")
+    result.add_argument("--wasm-environment", choices=("web,worker", "node", "web", "worker"),
+                        default="web,worker", help="Emscripten execution environments (link-only)")
     result.add_argument("--no-asyncify", action="store_true",
                         help="Do not instrument browser Wasm with Asyncify.")
     result.add_argument("--legacy-gl", choices=("0", "1"), default="1")
@@ -346,7 +348,7 @@ class Driver:
                  *(["-g2"] if self.a.wasm_opt_level == "0" or self.a.wasm_debug_symbols else []),
                  *(["-sASSERTIONS=1"] if self.a.wasm_assertions else []), *self.includes,
                  "-std=c++17", *self.definitions, "-DELF_IS_I386", "-DADDRESS_SIZE_BITS=32",
-                 "-sUSE_SDL=2", "-sFORCE_FILESYSTEM=1", "-sENVIRONMENT=web,worker",
+                 "-sUSE_SDL=2", "-sFORCE_FILESYSTEM=1", f"-sENVIRONMENT={self.a.wasm_environment}",
                  f"-sLEGACY_GL_EMULATION={self.a.legacy_gl}",
                  "-sMIN_WEBGL_VERSION=2", "-sMAX_WEBGL_VERSION=2", f"-DECV_LEGACY_GL={self.a.legacy_gl}",
                  "-sJSPI=1" if self.a.jspi or self.a.pthreads else

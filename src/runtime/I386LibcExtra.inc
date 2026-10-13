@@ -320,20 +320,6 @@ IMPORT(vprintf) {
   CALL;
   call.result(print_va(call, stdout, 0, 1));
 }
-namespace {
-std::mutex guest_locale_mutex;
-std::map<uint32_t, locale_t> guest_locales;
-uint32_t next_guest_locale = 0x900;
-
-locale_t host_locale(uint32_t handle) {
-  if (handle == UINT32_MAX) return LC_GLOBAL_LOCALE;
-  std::lock_guard<std::mutex> lock(guest_locale_mutex);
-  auto found = guest_locales.find(handle);
-  if (found == guest_locales.end())
-    elfconv_runtime_error("Invalid guest locale handle 0x%x.\n", handle);
-  return found->second;
-}
-}
 IMPORT(fmax) { CALL; floating_result(state, fmax(call.real64(0), call.real64(2))); }
 IMPORT(fmin) { CALL; floating_result(state, fmin(call.real64(0), call.real64(2))); }
 IMPORT(fma) { CALL; floating_result(state, fma(call.real64(0), call.real64(2), call.real64(4))); }
@@ -350,37 +336,16 @@ IMPORT(log2) { CALL; floating_result(state, log2(call.real64(0))); }
 IMPORT(log2f) { CALL; floating_result(state, log2f(call.real(0))); }
 IMPORT(llround) { CALL; call.result64(uint64_t(llround(call.real64(0)))); }
 IMPORT(llroundf) { CALL; call.result64(uint64_t(llroundf(call.real(0)))); }
-IMPORT(newlocale) {
-  CALL;
-  const uint32_t base = call.word(2);
-  locale_t locale = newlocale(int32_t(call.word(0)), text(arena, call.word(1)),
-                              base ? host_locale(base) : locale_t(0));
-  if (!locale) { call.result(0); return; }
-  std::lock_guard<std::mutex> lock(guest_locale_mutex);
-  while (!next_guest_locale || next_guest_locale == UINT32_MAX ||
-         guest_locales.count(next_guest_locale)) ++next_guest_locale;
-  const uint32_t handle = next_guest_locale++;
-  guest_locales.emplace(handle, locale);
-  call.result(handle);
-}
-IMPORT(freelocale) {
-  CALL; const uint32_t handle = call.word(0);
-  if (handle != UINT32_MAX) {
-    std::lock_guard<std::mutex> lock(guest_locale_mutex);
-    auto found = guest_locales.find(handle);
-    if (found == guest_locales.end()) elfconv_runtime_error("Invalid guest locale handle 0x%x.\n", handle);
-    freelocale(found->second);
-    guest_locales.erase(found);
-  }
-}
+IMPORT(newlocale) { __ecv_i386___newlocale(arena, state, 0, runtime); }
+IMPORT(freelocale) { __ecv_i386___freelocale(arena, state, 0, runtime); }
 IMPORT(strtod_l) {
   CALL; const char *input = text(arena, call.word(0)); char *end = nullptr;
-  const double result = strtod_l(input, &end, host_locale(call.word(2)));
+  const double result = strtod_l(input, &end, guest_locale(call.word(2)));
   parse_end(call, input, end); floating_result(state, result);
 }
 IMPORT(strtof_l) {
   CALL; const char *input = text(arena, call.word(0)); char *end = nullptr;
-  const float result = strtof_l(input, &end, host_locale(call.word(2)));
+  const float result = strtof_l(input, &end, guest_locale(call.word(2)));
   parse_end(call, input, end); floating_result(state, result);
 }
 IMPORT(strndup) {

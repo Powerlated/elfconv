@@ -1,5 +1,6 @@
 self.onmessage = async function (event) {
   const { canvas, arguments: args, assetRoot, runtimeScript } = event.data;
+  if (!self.screen) self.screen = { width: canvas.width, height: canvas.height };
   try {
     const root = new URL(assetRoot);
     if (!['http:', 'https:'].includes(root.protocol) || root.username || root.password) {

@@ -1,0 +1,9 @@
+Upstream: https://github.com/bminor/glibc
+Revision: 3d1aed874918c466a4477af1da35983ab036690e (glibc-2.40)
+Source: localedata/tst-xlocale1.c; unchanged, original ISO-8859-1 bytes.
+Exercises: newlocale(1 << LC_ALL, "C", NULL), strcasecmp_l.
+Not registered: requires de_DE.ISO-8859-1 and de_DE.UTF-8 locale data;
+Emscripten has no equivalent locale database. Do not adapt or weaken it.
+Actual-path coverage: Portal filesystem_stdio.so's static C++ locale
+initializer calls __newlocale with this mask. Glibc locale/newlocale.c
+normalizes it to LC_ALL_MASK before validation.

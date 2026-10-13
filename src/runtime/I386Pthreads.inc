@@ -413,8 +413,17 @@ IMPORT(pthread_join) {
     }
     thread->joining = true;
   }
-  // Never hold the registry lock while waiting for a guest callback to finish.
+#if defined(__EMSCRIPTEN__)
+  EM_ASM({ Module.printErr('guest pthread_join enter worker=' +
+      (typeof workerID === 'number' ? workerID : -1) + ' id=' + $0 + ' current=' + $1); },
+      id, current_pthread_id);
+#endif
   const int error = pthread_join(thread->host, nullptr);
+#if defined(__EMSCRIPTEN__)
+  EM_ASM({ Module.printErr('guest pthread_join exit worker=' +
+      (typeof workerID === 'number' ? workerID : -1) + ' id=' + $0 + ' error=' + $1); },
+      id, error);
+#endif
   uint32_t stack_to_release = 0;
   {
     std::lock_guard<std::mutex> lock(pthread_registry_mutex);

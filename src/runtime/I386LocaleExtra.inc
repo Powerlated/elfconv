@@ -58,6 +58,8 @@ int host_locale_category(int guest_category) {
 int host_locale_mask(uint32_t guest_mask) {
   constexpr uint32_t guest_all_mask = 0x1fbf;  // glibc excludes the LC_ALL category bit.
   constexpr uint32_t guest_core_mask = 0x003f;
+  // glibc/locale/newlocale.c accepts the LC_ALL category bit alone too.
+  if (guest_mask == (1u << 6)) guest_mask = guest_all_mask;
   if (guest_mask & ~guest_core_mask) {
     if (guest_mask != guest_all_mask) { errno = EINVAL; return -1; }
     guest_mask = guest_core_mask;

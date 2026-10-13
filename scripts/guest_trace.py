@@ -81,11 +81,13 @@ def stack(args: argparse.Namespace) -> None:
         raise ValueError('Specify each Ghidra module base only once')
     text = sys.stdin.read() if args.stack == '-' else Path(args.stack).read_text()
     frames = {}
-    for match in re.finditer(r'([^\s(]+)_____([0-9a-fA-F]+)\b', text):
-        address = int(match[2], 16)
-        frames.setdefault(address, match[1].rsplit('.wasm.', 1)[-1])
+    pattern = r'([^\s(]+)_____([0-9a-fA-F]+)\b|\bEIP:\s*0x([0-9a-fA-F]+)\b'
+    for match in re.finditer(pattern, text):
+        address = int(match[2] or match[3], 16)
+        symbol = match[1].rsplit('.wasm.', 1)[-1] if match[1] else '[register EIP]'
+        frames.setdefault(address, symbol)
     if not frames:
-        raise ValueError('No guest-address-tagged Wasm frames in stack')
+        raise ValueError('No guest-address-tagged Wasm frames or register EIP in trace')
     print(f'metadata={args.metadata} sha256={sha256(args.metadata)}')
     matched = set()
     print('guest\tmodule+RVA\t' + ('ghidra\t' if ghidra_bases else '') + 'symbol')

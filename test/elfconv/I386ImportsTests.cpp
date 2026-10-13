@@ -122,6 +122,23 @@ TEST(I386LibcImports, GlibcCtypeFlagsSupportEofAndSignedIndexing) {
   EXPECT_EQ(h.state.gpr.rsp.dword, kStack + 4);
 }
 
+TEST(I386LocaleImports, LCAllCategoryBitCreatesSharedGuestLocaleHandle) {
+  ImportHarness h;
+  h.string(kString, "C");
+  h.string(kData, "0");
+  h.call(__ecv_i386_newlocale, 1u << LC_ALL, kString, 0u);
+  const uint32_t locale = h.state.gpr.rax.dword;
+  ASSERT_NE(locale, 0u);
+  EXPECT_NE(locale, UINT32_MAX);
+
+  h.call(__ecv_i386_strtod_l, kData, kOutput, locale);
+  EXPECT_EQ(h.at<uint32_t>(kOutput), kData + 1);
+
+  h.call(__ecv_i386___freelocale, locale);
+  errno = 0;
+  h.call(__ecv_i386_freelocale, locale);
+  EXPECT_EQ(errno, EINVAL);
+}
 TEST(I386LibcImports, I386StatLayoutIsGuestVisible) {
   ImportHarness h;
   char path[] = "/tmp/elfconv-i386-import-XXXXXX";

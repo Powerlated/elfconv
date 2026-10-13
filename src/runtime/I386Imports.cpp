@@ -11,6 +11,9 @@
 #include <SDL2/SDL.h>
 #define GL_GLEXT_PROTOTYPES 1
 #include <SDL2/SDL_opengl.h>
+#if defined(__EMSCRIPTEN__)
+#include <emscripten/html5.h>
+#endif
 #include <algorithm>
 #include <exception>
 #include <type_traits>
@@ -27,6 +30,7 @@
 #include <dirent.h>
 #include <sys/stat.h>
 #include <sys/socket.h>
+#include <sys/resource.h>
 #include <sys/time.h>
 #include <time.h>
 #include <wchar.h>
@@ -128,6 +132,55 @@ struct Call {
       errno = i386_errno_to_host(initial_guest_errno);
     }
     initial_host_errno = errno;
+#if defined(__EMSCRIPTEN__)
+    uint32_t return_pc = 0;
+    uint32_t frame_chain[8] = {};
+    uint32_t mutex_address = 0;
+    if (state->gpr.rip.dword == 0x1228de0 || state->gpr.rip.dword == 0x1228a60)
+      memcpy(&mutex_address, guest(arena, stack + sizeof(return_pc), sizeof(mutex_address)),
+             sizeof(mutex_address));
+    memcpy(&return_pc, guest(arena, stack, sizeof(return_pc)), sizeof(return_pc));
+    uint32_t frame = state->gpr.rbp.dword;
+    for (unsigned i = 0; i < 4 && frame >= NULL_GUARD_SIZE &&
+                            frame <= MEMORY_ARENA_SIZE - sizeof(frame_chain[i * 2]); ++i) {
+      memcpy(frame_chain + i * 2, guest(arena, frame, sizeof(uint32_t) * 2),
+             sizeof(uint32_t) * 2);
+      const uint32_t previous = frame_chain[i * 2];
+      if (previous <= frame || previous > MEMORY_ARENA_SIZE - sizeof(frame_chain[i * 2]))
+        break;
+      frame = previous;
+    }
+    EM_ASM({
+      var sequence = (Module.__elfconvDebugImportCount || 0) + 1;
+      Module.__elfconvDebugImportCount = sequence;
+      Module.__elfconvDebugLastPc = $0;
+      Module.__elfconvDebugLastSp = $1;
+      Module.__elfconvDebugLastReturnPc = $2;
+      var worker = typeof workerID === 'number' ? workerID : -1;
+      if (sequence <= 120 ||
+          (worker === 8 && sequence >= 3600 && sequence <= 3900)) {
+        Module.printErr('guest-import #' + sequence + ' worker=' + worker +
+                        ' pc=0x' + $0.toString(16) + ' ret=0x' + $2.toString(16) +
+                        ' sp=0x' + $1.toString(16));
+      }
+      if (($0 === 0x1228de0 && (Module.__elfconvDebugMutexCount || 0) < 10) ||
+          $2 === 0x1233790) {
+        Module.__elfconvDebugMutexCount = (Module.__elfconvDebugMutexCount || 0) + 1;
+        var frames = [];
+        for (var i = 0; i < 8; i += 2) {
+          var previous = HEAPU32[($3 >> 2) + i];
+          var ret = HEAPU32[($3 >> 2) + i + 1];
+          if (!ret) break;
+          frames.push('0x' + ret.toString(16));
+        }
+        Module.printErr('mutex-lock worker=' + worker + ' address=0x' + $4.toString(16) +
+                        ' frames=' + frames.join(' <- '));
+      }
+      if ($4 === 0xac1d1f4 && ($0 === 0x1228de0 || $0 === 0x1228a60))
+        Module.printErr('tracked-mutex ' + ($0 === 0x1228de0 ? 'lock' : 'unlock') +
+                        ' worker=' + worker + ' ret=0x' + $2.toString(16));
+    }, state->gpr.rip.dword, stack, return_pc, frame_chain, mutex_address);
+#endif
   }
   uint32_t word(unsigned index) const {
     uint32_t value;
@@ -2859,7 +2912,16 @@ IMPORT(toupper) { CALL; call.result(toupper(int32_t(call.word(0)))); }
 IMPORT(isspace) { CALL; call.result(isspace(int32_t(call.word(0))) ? 0x2000 : 0); }
 IMPORT(isalnum) { CALL; call.result(isalnum(int32_t(call.word(0))) ? 8 : 0); }
 
-IMPORT(SDL_Init) { CALL; call.result(SDL_Init(call.word(0))); }
+IMPORT(SDL_Init) {
+  CALL;
+  EM_ASM({ Module.printErr('SDL_Init enter worker=' + (typeof workerID === 'number' ? workerID : -1) +
+                           ' guest=' + $0 + ' flags=' + $1); },
+         current_pthread_id, call.word(0));
+  const int result = SDL_Init(call.word(0));
+  EM_ASM({ Module.printErr('SDL_Init exit worker=' + (typeof workerID === 'number' ? workerID : -1) +
+                           ' result=' + $0); }, result);
+  call.result(result);
+}
 IMPORT(SDL_Quit) {
   CALL;
   reset_guest_renderers();
@@ -2874,9 +2936,23 @@ IMPORT(SDL_CreateWindow) {
   unsigned slot = 0;
   while (slot < 16 && windows[slot]) ++slot;
   if (slot == 16) elfconv_runtime_error("Guest SDL window handle table exhausted.\n");
-  fprintf(stderr, "Window diagnostic: guest size %u x %u\n", call.word(3), call.word(4));
+  double css_width = 0, css_height = 0;
+  EM_ASM({ Module.printErr('CSS size probe enter worker=' +
+      (typeof workerID === 'number' ? workerID : -1)); });
+  const int css_result =
+      emscripten_get_element_css_size("#canvas", &css_width, &css_height);
+  EM_ASM({ Module.printErr('CSS size probe exit worker=' +
+      (typeof workerID === 'number' ? workerID : -1) + ' result=' + $0 +
+      ' size=' + $1 + 'x' + $2); }, css_result, css_width, css_height);
+  EM_ASM({ Module.printErr('guest window flags=' + $0 + ' x=' + $1 + ' y=' + $2 +
+      ' w=' + $3 + ' h=' + $4); },
+      call.word(5), call.word(1), call.word(2), call.word(3), call.word(4));
   windows[slot] = SDL_CreateWindow(text(arena, call.word(0)), call.word(1), call.word(2),
                                   call.word(3), call.word(4), call.word(5));
+  EM_ASM({ Module.printErr('SDL_CreateWindow exit worker=' +
+      (typeof workerID === 'number' ? workerID : -1) + ' ok=' + $0 +
+      ' sdl=' + (UTF8ToString($1) || '(none)')); },
+      windows[slot] ? 1 : 0, SDL_GetError());
   call.result(windows[slot] ? 0x100 + slot : 0);
 }
 IMPORT(SDL_DestroyWindow) {

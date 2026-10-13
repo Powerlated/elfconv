@@ -1,6 +1,6 @@
-// This pre-js mounts remote game files before Emscripten initializes the filesystem.
-Module["preInit"] = Module["preInit"] || [];
-Module["preInit"].push(function () {
+// Mount remote game files after Wasm memory exists, before guest startup.
+Module["preRun"] = Module["preRun"] || [];
+Module["preRun"].push(function () {
   // Match __ecv_i386_cpuid and __ecv_i386_read_tsc: one virtual CPU,
   // invariant nanosecond counter (1 GHz), never the host CPU's frequency.
   FS.createPath("/", "proc", true, true);
