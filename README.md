@@ -243,6 +243,16 @@ Open `http://127.0.0.1:8080/main.html`. The lifter must be built for the
 input ELF architecture (`ELFCONV_ARCH=x86` or `aarch64`). Additional input
 files can be mounted with `-DELFCONV_MOUNT_SETTINGS=/host/path@/mount/path`.
 
+Serve game assets separately (Node 24+):
+
+```bash
+node scripts/serve_game_files.ts /absolute/path/to/Portal 8081
+```
+
+Loopback-only, read-only GET/HEAD, single byte ranges, cross-origin reads.
+`/bin/filesystem_stdio.so` maps to `Portal/bin/filesystem_stdio.so`.
+No directory listing. Guest HTTP filesystem integration is separate.
+
 ### WASI Runtime
 
 Configure `ELFCONV_CONVERT_TARGET=aarch64-wasi32` and set
