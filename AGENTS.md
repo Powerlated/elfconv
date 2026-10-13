@@ -41,6 +41,8 @@
 - User observations are ground truth. Name exact unknown and required evidence before tracing.
 - Read existing audited code/comments and available source implementations first. Source explains semantics; the installed binary proves ABI, offsets, and exact behavior.
 - Portal references: Valve's `source-sdk-2013`; `SonicEraZoR/Portal-Base` for Portal-specific behavioral leads. Neither proves retail ABI or offsets.
+- Trace Portal errors in online Source SDK/reference source first: exact message, emitting function, failure condition, and callers. Cite repository/path; reference source does not prove retail behavior.
+- Clone reference repositories locally when repeated searches or cross-file tracing are needed. Reuse existing clones; use official upstream when available, record URL and checked-out revision, and keep reference clones outside this repository. Never add reference source as a project dependency or modify it without need.
 - Never guess offsets, transplant offsets between builds, or treat PIC/string matches as proof. Validate binary identity and relevant instructions, call targets, or vtable slots.
 - Use Ghidra for retail ABI/offset analysis. If unavailable, download official release into `.tools/`. Reuse saved analyzed projects; keep projects outside dot-prefixed directories.
 - Preserve analysis and verified symbol names. Label only evidence-backed discoveries; distinguish candidates from proven facts.
