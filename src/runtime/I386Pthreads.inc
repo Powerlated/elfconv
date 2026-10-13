@@ -414,15 +414,18 @@ IMPORT(pthread_join) {
     thread->joining = true;
   }
 #if defined(__EMSCRIPTEN__)
-  EM_ASM({ Module.printErr('guest pthread_join enter worker=' +
-      (typeof workerID === 'number' ? workerID : -1) + ' id=' + $0 + ' current=' + $1); },
-      id, current_pthread_id);
+  EM_ASM({ if (Module.__elfconvTraceEvent($0))
+    Module.printErr('pthread_join enter worker='+(typeof workerID==='number'?workerID:-1)+
+      ' pc=0x'+$0.toString(16)+' id='+$1+' current='+$2); },
+    call.state->gpr.rip.dword, id, current_pthread_id);
 #endif
+  // Never hold the registry lock while waiting for the guest thread.
   const int error = pthread_join(thread->host, nullptr);
 #if defined(__EMSCRIPTEN__)
-  EM_ASM({ Module.printErr('guest pthread_join exit worker=' +
-      (typeof workerID === 'number' ? workerID : -1) + ' id=' + $0 + ' error=' + $1); },
-      id, error);
+  EM_ASM({ if (Module.__elfconvTraceEvent($0))
+    Module.printErr('pthread_join exit worker='+(typeof workerID==='number'?workerID:-1)+
+      ' pc=0x'+$0.toString(16)+' id='+$1+' error='+$2); },
+    call.state->gpr.rip.dword, id, error);
 #endif
   uint32_t stack_to_release = 0;
   {

@@ -9,6 +9,8 @@
 
 ## Delegation
 
+- Spawn subagents with reasoning effort `xhigh` minimum; do not use lower-effort configurations.
+- Main may spawn at most one subagent; do not fan out to multiple subagents.
 - Delegate behavior slices, not symbol lists or single files: implementation, callers, build integration, and regression fixtures.
 - Establish shared ABI/helper contracts before dispatch: exact signatures, layouts, ownership, lifecycle, and existing helper locations.
 - Permit shared-file changes through explicit section ownership or isolated worktrees; main owns cross-slice integration.
@@ -40,6 +42,9 @@
 
 - Keep `.elfconv-logs/portal-checkpoint.json`: current failure, artifact hashes, proven facts, unresolved question, exact next query. Read it on resume; revalidate changed identities instead of retracing unchanged evidence.
 - Save full stacks, assembly, and headless logs under `.elfconv-logs/`; return only evidence answering the current question, with saved-file paths.
+- Use `scripts/portal_worker_debug.js` from browser `tab.run`: `captureWorkers(page, {workerIndex: 8, outputPath})`, `extractEvidence(text, {outputPath})`. Return bounded summaries, not complete captures. The helper owns debugger cleanup.
+- Use that helper's `updateCheckpoint(path, update, artifacts)` and `validateCheckpoint(path)` to record SHA-256/size identities and detect stale evidence. Checkpoints must describe the latest observed failure, not superseded startup symptoms.
+- Runtime tracing is off by default. Enable `trace=1`, narrow `traceWorker`/`tracePc`, and set `traceLimit`; do not enable broad import logging for an SDL-only question.
 - Use `scripts/guest_trace.py stack` to deduplicate Wasm guest frames and map them from current metadata. Supply a verified Ghidra base explicitly; never infer it.
 - Use `scripts/guest_trace.py asm` only for already-identified operands/calls or unreliable decompilation. Its bounded excerpts prevent whole-function dumps.
 - State one unknown and its decisive observation before each diagnostic run. Stop tracing when proven; implement and exercise that path.

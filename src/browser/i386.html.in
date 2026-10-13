@@ -22,6 +22,15 @@
   }
   document.addEventListener('visibilitychange', resetFrameTiming);
   const query = new URLSearchParams(location.search);
+  const elfconvTrace = query.get('trace') === '1' ? {} : undefined;
+  if (elfconvTrace) {
+    for (const field of ['worker', 'pc', 'limit']) {
+      const value = query.get('trace' + field[0].toUpperCase() + field.slice(1));
+      if (value !== null && Number.isSafeInteger(Number(value)) && Number(value) >= 0)
+        elfconvTrace[field] = Number(value);
+    }
+    if (elfconvTrace.limit === undefined) elfconvTrace.limit = 100;
+  }
   document.getElementById('start').addEventListener('click', function () {
     this.disabled = true;
     if (@ELFCONV_BROWSER_JSPI@ && (typeof WebAssembly.Suspending !== 'function' ||
@@ -35,6 +44,7 @@
       const canvas = document.getElementById('canvas');
       window.Module = {
         canvas,
+        elfconvTrace,
         arguments: query.getAll('arg'),
         onFrame: function (milliseconds) {
           if (!document.hidden) {
@@ -77,6 +87,8 @@
       const message = event.data;
       if (message.type === 'output') {
         document.getElementById('output').textContent += message.line + '\n';
+      } else if (message.type === 'cursor') {
+        document.getElementById('canvas').style.cursor = message.value;
       } else if (message.type === 'frame') {
         if (!document.hidden) {
           document.getElementById('frametime').textContent =
@@ -97,11 +109,16 @@
     };
     const canvas = document.getElementById('canvas');
     const offscreen = canvas.transferControlToOffscreen();
+    const runtimeScript = new URL('@ELFCONV_NAME@.js', location.href);
+    for (const key of ['trace', 'traceWorker', 'tracePc', 'traceLimit']) {
+      if (query.has(key)) runtimeScript.searchParams.set(key, query.get(key));
+    }
     worker.postMessage({
       canvas: offscreen,
       arguments: query.getAll('arg'),
       assetRoot,
-      runtimeScript: new URL('@ELFCONV_NAME@.js', location.href).href
+      runtimeScript: runtimeScript.href,
+      elfconvTrace
     }, [offscreen]);
     canvas.focus();
   }, { once: true });

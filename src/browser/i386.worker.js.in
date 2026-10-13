@@ -1,5 +1,5 @@
 self.onmessage = async function (event) {
-  const { canvas, arguments: args, assetRoot, runtimeScript } = event.data;
+  const { canvas, arguments: args, assetRoot, runtimeScript, elfconvTrace } = event.data;
   if (!self.screen) self.screen = { width: canvas.width, height: canvas.height };
   try {
     const root = new URL(assetRoot);
@@ -19,14 +19,23 @@ self.onmessage = async function (event) {
         super(options.name?.startsWith('em-pthread') ? runtimeScript : url, options);
       }
     };
+    let cursor = 'auto';
     self.Module = {
       canvas: {
         id: 'canvas',
         width: canvas.width,
         height: canvas.height,
+        style: {
+          get cursor() { return cursor; },
+          set cursor(value) {
+            cursor = String(value);
+            self.postMessage({ type: 'cursor', value: cursor });
+          }
+        },
         transferControlToOffscreen: () => canvas
       },
       arguments: args,
+      elfconvTrace,
       elfconvAssets: { root: root.href, manifest },
       locateFile: path => new URL(path, runtimeScript).href,
       print: line => self.postMessage({ type: 'output', line: String(line) }),

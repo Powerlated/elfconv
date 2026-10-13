@@ -74,6 +74,8 @@ An ahead-of-time binary translator that converts Linux applications to WebAssemb
     variables on Emscripten workers; requires JSPI and cross-origin isolation.
     See [bundled-library usage](examples/README.md#bundled-dynamic-libraries).
     Raw i386 syscalls are rejected explicitly by the runtime.
+- For targeted browser runtime diagnostics, add `?trace=1&traceWorker=8&tracePc=0x1234&traceLimit=100` to the page URL. `traceWorker`, `tracePc`, and `traceLimit` are optional; the PC is the guest import PC, and the limit caps emitted events. The same query is forwarded to pthread workers.
+
 - **System Calls**: Partial Linux syscall implementation
   - See [`src/runtime/syscalls/`](https://github.com/yomaytk/elfconv/blob/main/src/runtime/syscalls) for currently supported syscalls
 
