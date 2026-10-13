@@ -1,0 +1,11 @@
+glibc math oracle
+
+Source pin: glibc b72fcafcc9d307790bd24ebba65f52994ca5598e
+https://sourceware.org/git/glibc.git
+License: LGPL-2.1-or-later; source unchanged.
+
+Coverage: libm-test-acos.inc, libm-test-asin.inc, libm-test-atan2.inc,
+libm-test-exp2.inc, libm-test-log.inc, and libm-test-pow.inc from upstream
+math/. These includes require glibc's libm-test-driver.c harness for
+floating-point exception and errno checks; the repository runner does not
+provide it. They are not registered.

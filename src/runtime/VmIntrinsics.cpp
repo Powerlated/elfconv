@@ -286,6 +286,12 @@ void __ecv_warning(uint8_t *, State &, addr_t addr, RuntimeManager *) {
 void __remill_function_call(uint8_t *arena_ptr, State &state, addr_t t_fun_vma,
                             RuntimeManager *rt_m) {
 #if defined(ELF_IS_I386)
+  const uint32_t caller_pc = state.gpr.rip.dword;
+  uint32_t return_pc = 0;
+  if (uint64_t(state.gpr.rsp.dword) + sizeof(return_pc) <= MEMORY_ARENA_SIZE)
+    memcpy(&return_pc, arena_ptr + state.gpr.rsp.dword, sizeof(return_pc));
+#endif
+#if defined(ELF_IS_I386)
   PCREG = t_fun_vma;
   __ecv_i386_dispatch_pending_signals(arena_ptr, &state, rt_m);
   if (auto adapter = rt_m->FindGuestAdapter(t_fun_vma)) {
@@ -303,10 +309,26 @@ void __remill_function_call(uint8_t *arena_ptr, State &state, addr_t t_fun_vma,
     PCREG = t_fun_vma;
     jmp_fun_it->second(arena_ptr, &state, t_fun_vma, rt_m);
   } else {
+#if defined(ELF_IS_I386)
+    const uint32_t eax = state.gpr.rax.dword;
+    const uint32_t edx = state.gpr.rdx.dword;
+    uint32_t slot0 = 0, slot1 = 0;
+    if (uint64_t(eax) + 0x1fc <= MEMORY_ARENA_SIZE) {
+      memcpy(&slot0, arena_ptr + eax + 0x1f4, sizeof(slot0));
+      memcpy(&slot1, arena_ptr + eax + 0x1f8, sizeof(slot1));
+    }
+    elfconv_runtime_error(
+        "[ERROR] indirect call from 0x%x returning to 0x%x targeted vma 0x%llx, "
+        "not in function table; lower_bound=0x%llx eax=0x%x edx=0x%x "
+        "slot+0x1f4=0x%x slot+0x1f8=0x%x\n",
+        caller_pc, return_pc, static_cast<unsigned long long>(t_fun_vma),
+        static_cast<unsigned long long>(jmp_fun_it->first), eax, edx, slot0, slot1);
+#else
     elfconv_runtime_error(
         "[ERROR] vma 0x%llx is not included in the lifted function pointer table at `__remill_jump`."
         "found vma on lower_bound: 0x%lx\n",
         t_fun_vma, jmp_fun_it->first);
+#endif
   }
 }
 

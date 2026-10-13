@@ -1,0 +1,10 @@
+glibc string oracle
+
+Source pin: glibc b72fcafcc9d307790bd24ebba65f52994ca5598e
+https://sourceware.org/git/glibc.git
+License: LGPL-2.1-or-later; source unchanged.
+
+Coverage: test-strspn.c, upstream string/test-strspn.c. The test requires
+upstream test-string.h, implementation enumeration, and support/test-driver.c;
+these are unavailable in run_i386.py. It tests internal libc implementations,
+not the elfconv import adapter, so it is not registered.

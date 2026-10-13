@@ -1,0 +1,12 @@
+Source pin: glibc b72fcafcc9d307790bd24ebba65f52994ca5598e
+Upstream: https://sourceware.org/git/glibc.git
+Source: stdlib/tst-random.c; unchanged.
+Coverage: random() plus srandom(), initstate(), and setstate().
+Not registered: the test requires the latter state-control imports, which the
+runtime does not implement, and glibc's support test driver is not wired into
+run_i386.py.
+
+mkstemp64: no direct test was found in the pinned stdlib/Makefile or io/Makefile.
+vendored stdio-common/bug7.c uses mkstemp only to prepare unrelated fseek and
+freopen checks; it is not an adapter oracle and is not registered for this
+coverage. The adapter shares the mkstemp template/fd ABI.

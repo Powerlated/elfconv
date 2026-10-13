@@ -1,0 +1,10 @@
+glibc ctype oracle
+
+Source pin: glibc b72fcafcc9d307790bd24ebba65f52994ca5598e
+https://sourceware.org/git/glibc.git
+License: LGPL-2.1-or-later; source unchanged.
+
+Coverage: test_ctype.c, upstream ctype/test_ctype.c, includes isgraph across
+all unsigned-char values. The ctype header expands isgraph as a table lookup,
+so it does not call elfconv's imported isgraph adapter. Not registered with
+CTest/run_i386.py because this source cannot validate that adapter.

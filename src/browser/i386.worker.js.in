@@ -1,5 +1,253 @@
+const domListeners = new Map();
+let nextDomRequestId = 1;
+let canvasProxy;
+let documentProxy;
+let windowProxy;
+const domState = {
+  pointerLockActive: false,
+  fullscreenActive: false,
+  visibilityState: 'visible',
+  width: 640,
+  height: 480,
+  cssWidth: 640,
+  cssHeight: 480,
+  left: 0,
+  top: 0,
+  innerWidth: 640,
+  innerHeight: 480,
+  outerWidth: 640,
+  outerHeight: 480
+};
+
+function requestDomOperation(operation) {
+  const requestId = nextDomRequestId++;
+  const result = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT));
+  self.postMessage({ ...operation, requestId, response: result.buffer });
+  if (Atomics.wait(result, 0, 0, 5000) === 'timed-out') {
+    throw new Error('Timed out waiting for browser DOM operation: ' + operation.type);
+  }
+  if (Atomics.load(result, 0) !== 1) {
+    throw new Error('Browser DOM operation failed: ' + operation.type);
+  }
+}
+
+function createDomTarget(name, nodeName, offscreen) {
+  const registrations = [];
+  const target = {
+    id: name === 'canvas' ? 'canvas' : '',
+    nodeName,
+    addEventListener(type, listener, options) {
+      const capture = typeof options === 'boolean' ? options : Boolean(options?.capture);
+      if (registrations.some(item => item.type === type &&
+          item.listener === listener && item.capture === capture)) return;
+      const registrationId = nextDomRequestId++;
+      const registration = { id: registrationId, type, listener, capture };
+      registrations.push(registration);
+      domListeners.set(registrationId, { ...registration, target, targetName: name });
+      try {
+        requestDomOperation({
+          type: 'dom-register',
+          registrationId,
+          target: name,
+          eventType: type,
+          capture
+        });
+      } catch (error) {
+        domListeners.delete(registrationId);
+        registrations.pop();
+        throw error;
+      }
+    },
+    removeEventListener(type, listener, options) {
+      const capture = typeof options === 'boolean' ? options : Boolean(options?.capture);
+      const index = registrations.findIndex(item => item.type === type &&
+          item.listener === listener && item.capture === capture);
+      if (index < 0) return;
+      const [registration] = registrations.splice(index, 1);
+      domListeners.delete(registration.id);
+      requestDomOperation({ type: 'dom-unregister', registrationId: registration.id });
+    },
+    dispatchEvent() {
+      throw new Error('Synthetic DOM event dispatch is not supported in the asset worker');
+    }
+  };
+  if (name === 'canvas') {
+    Object.defineProperties(target, {
+      width: {
+        get: () => domState.width,
+        set: value => {
+          domState.width = Number(value);
+          domState.cssWidth = domState.width;
+          offscreen.width = domState.width;
+          self.postMessage({ type: 'canvas-size', width: domState.width, height: domState.height });
+        }
+      },
+      height: {
+        get: () => domState.height,
+        set: value => {
+          domState.height = Number(value);
+          domState.cssHeight = domState.height;
+          offscreen.height = domState.height;
+          self.postMessage({ type: 'canvas-size', width: domState.width, height: domState.height });
+        }
+      },
+    });
+    target.getBoundingClientRect = () => ({
+      x: domState.left,
+      y: domState.top,
+      left: domState.left,
+      top: domState.top,
+      right: domState.left + domState.cssWidth,
+      bottom: domState.top + domState.cssHeight,
+      width: domState.cssWidth,
+      height: domState.cssHeight,
+      toJSON() { return this; }
+    });
+    target.getContext = (...args) => offscreen.getContext(...args);
+    target.transferControlToOffscreen = () => offscreen;
+    target.focus = () => requestDomOperation({ type: 'dom-action', action: 'focus' });
+    target.blur = () => requestDomOperation({ type: 'dom-action', action: 'blur' });
+    target.requestFullscreen = () => requestDomOperation({ type: 'dom-action', action: 'fullscreen' });
+    target.requestPointerLock = () => requestDomOperation({ type: 'dom-action', action: 'pointerlock' });
+    target.style = {
+      get cursor() { return domState.cursor || 'auto'; },
+      set cursor(value) {
+        domState.cursor = String(value);
+        self.postMessage({ type: 'cursor', value: domState.cursor });
+      }
+    };
+  }
+  return target;
+}
+
+function createDomFacade(canvas, capabilities, rect, viewport) {
+  domState.width = canvas.width;
+  domState.height = canvas.height;
+  domState.cssWidth = rect.width;
+  domState.cssHeight = rect.height;
+  domState.left = rect.left;
+  domState.top = rect.top;
+  domState.innerWidth = viewport.innerWidth;
+  domState.innerHeight = viewport.innerHeight;
+  domState.outerWidth = viewport.outerWidth;
+  domState.outerHeight = viewport.outerHeight;
+  canvasProxy = createDomTarget('canvas', 'CANVAS', canvas);
+  documentProxy = createDomTarget('document', '#document');
+  windowProxy = createDomTarget('window', '#window');
+  documentProxy.querySelector = selector =>
+    selector === 'canvas' || selector === '#canvas' ? canvasProxy : null;
+  documentProxy.getElementById = id => id === 'canvas' ? canvasProxy : null;
+  documentProxy.body = {
+    nodeName: 'BODY',
+    get clientWidth() { return domState.innerWidth; },
+    get clientHeight() { return domState.innerHeight; },
+    style: {},
+    ...(capabilities.pointerLock ? {
+      requestPointerLock: () => requestDomOperation({ type: 'dom-action', action: 'pointerlock' })
+    } : {})
+  };
+  documentProxy.documentElement = { style: {} };
+  documentProxy.exitPointerLock = () =>
+    requestDomOperation({ type: 'dom-action', action: 'exit-pointerlock' });
+  documentProxy.exitFullscreen = () =>
+    requestDomOperation({ type: 'dom-action', action: 'exit-fullscreen' });
+  Object.defineProperties(documentProxy, {
+    pointerLockElement: { get: () => domState.pointerLockActive ? canvasProxy : null },
+    fullscreenElement: { get: () => domState.fullscreenActive ? canvasProxy : null },
+    fullscreenEnabled: { value: capabilities.fullscreen },
+    visibilityState: { get: () => domState.visibilityState },
+    hidden: { get: () => domState.visibilityState !== 'visible' }
+  });
+  Object.defineProperties(windowProxy, {
+    innerWidth: { get: () => domState.innerWidth },
+    innerHeight: { get: () => domState.innerHeight },
+    outerWidth: { get: () => domState.outerWidth },
+    outerHeight: { get: () => domState.outerHeight },
+    pageXOffset: { value: 0 },
+    pageYOffset: { value: 0 }
+  });
+  windowProxy.screen = self.screen;
+  self.document = documentProxy;
+  self.innerWidth = domState.innerWidth;
+  self.innerHeight = domState.innerHeight;
+  self.outerWidth = domState.outerWidth;
+  self.outerHeight = domState.outerHeight;
+  self.pageXOffset = 0;
+  self.pageYOffset = 0;
+  self.alert = message => requestDomOperation({
+    type: 'dom-dialog',
+    message: String(message)
+  });
+}
+
+function handleDomMessage(event) {
+  const message = event.data;
+  if (message.type === 'dom-dialog') {
+    self.postMessage(message);
+    return;
+  }
+  if (message.type === 'dom-event') {
+    const registration = domListeners.get(message.registrationId);
+    if (!registration) return;
+    if (message.pointerLockActive !== undefined) domState.pointerLockActive = message.pointerLockActive;
+    if (message.fullscreenActive !== undefined) domState.fullscreenActive = message.fullscreenActive;
+    if (message.visibilityState) domState.visibilityState = message.visibilityState;
+    if (message.rect) {
+      domState.left = message.rect.left;
+      domState.top = message.rect.top;
+      domState.cssWidth = message.rect.width;
+      domState.cssHeight = message.rect.height;
+    }
+    if (message.viewport) {
+      domState.innerWidth = message.viewport.innerWidth;
+      domState.innerHeight = message.viewport.innerHeight;
+      domState.outerWidth = message.viewport.outerWidth;
+      domState.outerHeight = message.viewport.outerHeight;
+      self.innerWidth = domState.innerWidth;
+      self.innerHeight = domState.innerHeight;
+      self.outerWidth = domState.outerWidth;
+      self.outerHeight = domState.outerHeight;
+    }
+    const targetFor = name => name === 'canvas' ? canvasProxy :
+      name === 'window' ? windowProxy : name === 'document' ? documentProxy :
+        (name ? { nodeName: message.targetNodeName || '', id: message.targetId || '' } : null);
+    const domEvent = {
+      ...message.fields,
+      target: targetFor(message.target),
+      currentTarget: registration.target,
+      preventDefault() {},
+      stopPropagation() {},
+      stopImmediatePropagation() {}
+    };
+    const previousWindow = self.window;
+    self.window = windowProxy;
+    try {
+      if (typeof registration.listener === 'function') {
+        registration.listener.call(registration.target, domEvent);
+      } else if (typeof registration.listener?.handleEvent === 'function') {
+        registration.listener.handleEvent.call(registration.listener, domEvent);
+      }
+    } finally {
+      if (previousWindow === undefined) delete self.window;
+      else self.window = previousWindow;
+    }
+    return;
+  }
+  if (message.type !== 'dom-ack') return;
+  const result = new Int32Array(message.response);
+  Atomics.store(result, 0, message.ok ? 1 : -1);
+  Atomics.notify(result, 0);
+}
+
+self.addEventListener('message', handleDomMessage);
+let started = false;
+
+
 self.onmessage = async function (event) {
-  const { canvas, arguments: args, assetRoot, runtimeScript, elfconvTrace } = event.data;
+  if (started) return;
+  started = true;
+  const { canvas, arguments: args, assetRoot, runtimeScript, elfconvTrace,
+    domCapabilities, canvasRect, viewport } = event.data;
   if (!self.screen) self.screen = { width: canvas.width, height: canvas.height };
   try {
     const root = new URL(assetRoot);
@@ -19,29 +267,21 @@ self.onmessage = async function (event) {
         super(options.name?.startsWith('em-pthread') ? runtimeScript : url, options);
       }
     };
-    let cursor = 'auto';
+    createDomFacade(canvas, domCapabilities, canvasRect, viewport);
     self.Module = {
-      canvas: {
-        id: 'canvas',
-        width: canvas.width,
-        height: canvas.height,
-        style: {
-          get cursor() { return cursor; },
-          set cursor(value) {
-            cursor = String(value);
-            self.postMessage({ type: 'cursor', value: cursor });
-          }
-        },
-        transferControlToOffscreen: () => canvas
-      },
+      canvas: canvasProxy,
       arguments: args,
       elfconvTrace,
+      elfconvTraceShader: new URL(runtimeScript).searchParams.get('traceShader') === '1',
       elfconvAssets: { root: root.href, manifest },
       locateFile: path => new URL(path, runtimeScript).href,
       print: line => self.postMessage({ type: 'output', line: String(line) }),
       printErr: line => self.postMessage({ type: 'output', line: String(line) }),
       onFrame: milliseconds => self.postMessage({ type: 'frame', milliseconds }),
-      onRuntimeInitialized: () => self.postMessage({ type: 'running' }),
+      onRuntimeInitialized: () => {
+        if (Array.isArray(self.specialHTMLTargets)) self.specialHTMLTargets[2] = windowProxy;
+        self.postMessage({ type: 'running' });
+      },
       onExit: code => self.postMessage({ type: 'exit', code }),
       onAbort: reason => self.postMessage({ type: 'abort', reason: String(reason) })
     };

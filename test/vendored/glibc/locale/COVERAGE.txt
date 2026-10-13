@@ -1,0 +1,8 @@
+Source pin: glibc b72fcafcc9d307790bd24ebba65f52994ca5598e
+Upstream: https://sourceware.org/git/glibc.git
+Source: locale/tst-C-locale.c; unchanged.
+Coverage: localeconv string and character fields in C/POSIX, plus nl_langinfo,
+newlocale, and wide-character locale checks.
+Not registered: the upstream test-skeleton requires glibc support-driver
+sources not wired into run_i386.py; the test also covers many APIs beyond
+localeconv. Keep the source unchanged.

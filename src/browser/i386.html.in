@@ -81,14 +81,152 @@
           'This build requires OffscreenCanvas for HTTP-backed game files';
       return;
     }
+
     document.getElementById('status').textContent = 'Starting worker…';
+    const canvas = document.getElementById('canvas');
     const worker = new Worker('@ELFCONV_NAME@.assets-worker.js');
+    const domRegistrations = new Map();
+    let pointerLockRequested = false;
+    let fullscreenRequested = false;
+    const eventProperties = [
+      'type', 'timeStamp', 'screenX', 'screenY', 'clientX', 'clientY', 'pageX', 'pageY',
+      'movementX', 'movementY', 'button', 'buttons', 'ctrlKey', 'shiftKey', 'altKey',
+      'metaKey', 'key', 'code', 'char', 'charCode', 'keyCode', 'which', 'location',
+      'repeat', 'locale', 'isComposing', 'detail', 'deltaX', 'deltaY', 'deltaZ',
+      'deltaMode', 'pointerId', 'pointerType', 'isPrimary', 'width', 'height',
+      'pressure', 'tiltX', 'tiltY', 'twist'
+    ];
+    const describeTarget = target => ({
+      kind: target === canvas ? 'canvas' : target === document ? 'document' :
+        target === window ? 'window' : 'other',
+      id: target?.id || '',
+      nodeName: target?.nodeName || ''
+    });
+    const snapshotEvent = event => {
+      const fields = {};
+      for (const name of eventProperties) {
+        const value = event[name];
+        if (['number', 'string', 'boolean'].includes(typeof value)) fields[name] = value;
+      }
+      const touchProperties = [
+        'identifier', 'screenX', 'screenY', 'clientX', 'clientY', 'pageX', 'pageY'
+      ];
+      for (const name of ['touches', 'targetTouches', 'changedTouches']) {
+        fields[name] = Array.from(event[name] || [], touch =>
+          Object.fromEntries(touchProperties.map(key => [key, touch[key]])));
+      }
+      return fields;
+    };
+    const respondDomRequest = (message, ok) => {
+      const response = new Int32Array(message.response);
+      Atomics.store(response, 0, ok ? 1 : -1);
+      Atomics.notify(response, 0);
+    };
+    const forwardDomEvent = (registration, event) => {
+      if (event.cancelable &&
+          ['keydown', 'keyup', 'keypress', 'wheel', 'touchstart', 'touchmove'].includes(event.type) &&
+          registration.target !== window) event.preventDefault();
+      const rect = canvas.getBoundingClientRect();
+      worker.postMessage({
+        type: 'dom-event',
+        registrationId: registration.id,
+        target: describeTarget(event.target).kind,
+        targetId: event.target?.id || '',
+        targetNodeName: event.target?.nodeName || '',
+        fields: snapshotEvent(event),
+        pointerLockActive: document.pointerLockElement === canvas,
+        fullscreenActive: document.fullscreenElement === canvas,
+        visibilityState: document.visibilityState,
+        rect: { left: rect.left, top: rect.top, width: rect.width, height: rect.height },
+        viewport: {
+          innerWidth: window.innerWidth,
+          innerHeight: window.innerHeight,
+          outerWidth: window.outerWidth,
+          outerHeight: window.outerHeight
+        }
+      });
+    };
+
+    canvas.addEventListener('pointerdown', function () {
+      if (pointerLockRequested && canvas.requestPointerLock) {
+        pointerLockRequested = false;
+        canvas.requestPointerLock().catch(error => {
+          document.getElementById('output').textContent += error.message + '\n';
+        });
+      }
+      if (fullscreenRequested && canvas.requestFullscreen) {
+        fullscreenRequested = false;
+        canvas.requestFullscreen().catch(error => {
+          document.getElementById('output').textContent += error.message + '\n';
+        });
+      }
+    });
+
     worker.onmessage = function (event) {
       const message = event.data;
-      if (message.type === 'output') {
+      if (message.type === 'dom-register' || message.type === 'dom-unregister') {
+        try {
+          if (message.type === 'dom-register') {
+            const target = message.target === 'canvas' ? canvas :
+              message.target === 'document' ? document :
+                message.target === 'window' ? window : null;
+            if (!target) throw new Error('Unsupported DOM event target: ' + message.target);
+            const registration = {
+              id: message.registrationId,
+              target,
+              eventType: message.eventType,
+              capture: message.capture,
+              listener: null
+            };
+            registration.listener = event => forwardDomEvent(registration, event);
+            target.addEventListener(message.eventType, registration.listener, message.capture);
+            domRegistrations.set(registration.id, registration);
+          } else {
+            const registration = domRegistrations.get(message.registrationId);
+            if (registration) {
+              registration.target.removeEventListener(
+                registration.eventType, registration.listener, registration.capture);
+              domRegistrations.delete(registration.id);
+            }
+          }
+          respondDomRequest(message, true);
+        } catch (error) {
+          respondDomRequest(message, false);
+          document.getElementById('output').textContent +=
+            'DOM event bridge: ' + error.message + '\n';
+        }
+      } else if (message.type === 'dom-dialog') {
+        const dialog = document.createElement('dialog');
+        const text = document.createElement('p');
+        const button = document.createElement('button');
+        text.textContent = message.message;
+        button.textContent = 'OK';
+        button.addEventListener('click', () => dialog.close());
+        dialog.append(text, button);
+        dialog.addEventListener('close', () => {
+          dialog.remove();
+          respondDomRequest(message, true);
+        }, { once: true });
+        document.body.append(dialog);
+        dialog.showModal();
+        button.focus();
+      } else if (message.type === 'dom-action') {
+        let ok = true;
+        if (message.action === 'focus') canvas.focus();
+        else if (message.action === 'blur') canvas.blur();
+        else if (message.action === 'pointerlock') pointerLockRequested = true;
+        else if (message.action === 'fullscreen') fullscreenRequested = true;
+        else if (message.action === 'exit-pointerlock') document.exitPointerLock();
+        else if (message.action === 'exit-fullscreen') document.exitFullscreen();
+        else ok = false;
+        respondDomRequest(message, ok);
+      } else if (message.type === 'canvas-size') {
+        canvas.style.width = message.width + 'px';
+        canvas.style.height = message.height + 'px';
+      } else if (message.type === 'output') {
         document.getElementById('output').textContent += message.line + '\n';
       } else if (message.type === 'cursor') {
-        document.getElementById('canvas').style.cursor = message.value;
+        canvas.style.cursor = message.value;
       } else if (message.type === 'frame') {
         if (!document.hidden) {
           document.getElementById('frametime').textContent =
@@ -107,18 +245,35 @@
     worker.onerror = function (event) {
       document.getElementById('status').textContent = 'Worker error: ' + event.message;
     };
-    const canvas = document.getElementById('canvas');
+
     const offscreen = canvas.transferControlToOffscreen();
     const runtimeScript = new URL('@ELFCONV_NAME@.js', location.href);
-    for (const key of ['trace', 'traceWorker', 'tracePc', 'traceLimit']) {
+    for (const key of ['trace', 'traceWorker', 'tracePc', 'traceLimit', 'traceShader']) {
       if (query.has(key)) runtimeScript.searchParams.set(key, query.get(key));
     }
+    const canvasRect = canvas.getBoundingClientRect();
     worker.postMessage({
       canvas: offscreen,
       arguments: query.getAll('arg'),
       assetRoot,
       runtimeScript: runtimeScript.href,
-      elfconvTrace
+      elfconvTrace,
+      domCapabilities: {
+        pointerLock: typeof canvas.requestPointerLock === 'function',
+        fullscreen: typeof canvas.requestFullscreen === 'function'
+      },
+      canvasRect: {
+        left: canvasRect.left,
+        top: canvasRect.top,
+        width: canvasRect.width,
+        height: canvasRect.height
+      },
+      viewport: {
+        innerWidth: window.innerWidth,
+        innerHeight: window.innerHeight,
+        outerWidth: window.outerWidth,
+        outerHeight: window.outerHeight
+      }
     }, [offscreen]);
     canvas.focus();
   }, { once: true });

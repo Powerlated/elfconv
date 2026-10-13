@@ -1,3 +1,11 @@
+if (typeof window === 'undefined' && typeof self.postMessage === 'function') {
+  globalThis.alert = message => {
+    const response = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT));
+    self.postMessage({ type: 'dom-dialog', message: String(message), response: response.buffer });
+    Atomics.wait(response, 0, 0);
+  };
+}
+
 // Mount remote game files after Wasm memory exists, before guest startup.
 Module["preRun"] = Module["preRun"] || [];
 Module["preRun"].push(function () {
@@ -9,6 +17,9 @@ Module["preRun"].push(function () {
       "model name\t: elfconv virtual i386 CPU, 1 GHz TSC\n" +
       "cpu MHz\t\t: 1000.000\nphysical id\t: 0\ncore id\t\t: 0\n",
       true, false);
+  if (Module["elfconvTraceShader"]) {
+    ENV["LIBGL_LOGSHADERERROR"] = "1";
+  }
   const config = Module["elfconvAssets"];
   if (!config) return;
   const root = new URL(config.root);

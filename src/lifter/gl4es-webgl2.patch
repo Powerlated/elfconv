@@ -1,0 +1,136 @@
+--- a/src/glx/hardext.c
++++ b/src/glx/hardext.c
+@@ -164,0 +165,4 @@
++    EGLint egl_context_attrib_es3[] = {
++        EGL_CONTEXT_CLIENT_VERSION, 3,
++        EGL_NONE
++    };
+@@ -252,1 +256,1 @@
+-    eglContext = egl_eglCreateContext(eglDisplay, pbufConfigs[0], EGL_NO_CONTEXT, (hardext.esversion==1)?egl_context_attrib:egl_context_attrib_es2);
++    eglContext = egl_eglCreateContext(eglDisplay, pbufConfigs[0], EGL_NO_CONTEXT, (hardext.esversion==1)?egl_context_attrib:(hardext.esversion>=3)?egl_context_attrib_es3:egl_context_attrib_es2);
+--- a/src/glx/hardext.c
++++ b/src/glx/hardext.c
+@@ -324,4 +324,8 @@
+     S("GL_OES_element_index_uint ", elementuint, 1);
+     S("GL_OES_packed_depth_stencil ", depthstencil, 1);
++#ifdef ELFCONV_WEBGL2
++    // WebGL 2 makes packed depth/stencil core without exposing the GLES 2 extension.
++    hardext.depthstencil = 1;
++#endif
+     S("GL_OES_depth24 ", depth24, 1);
+     S("GL_OES_rgb8_rgba8 ", rgba8, 1);
+--- a/src/glx/hardext.c
++++ b/src/glx/hardext.c
+@@ -34,11 +34,10 @@
+-    const char* shadTest[4] = {
++    const char* shadTest[5] = {
+         version,
+-        "#extension require GL_IMG_uniform_buffer_object"
+-        "\n"
+-        "layout(location = 0) in vec4 vecPos;\n",
++        strcmp(version, "#version 300 es") ? "#extension require GL_IMG_uniform_buffer_object\n" : "\n",
++        "layout(location = 0) in vec4 vecPos;\n",
+         uniformLoc?"layout(location = 0) uniform mat4 matMVP;\n":"uniform mat4 matMVP;\n",
+         "void main() {\n"
+         " gl_Position = matMVP * vecPos;\n"
+         "}\n"
+     };
+-    gles_glShaderSource(shad, 4, shadTest, NULL);
++    gles_glShaderSource(shad, 5, shadTest, NULL);
+@@ -439,1 +442,7 @@
++#ifdef ELFCONV_WEBGL2
++    // WebGL 2 guarantees four color attachments and draw buffers.
++    hardext.drawbuffers = 1;
++    hardext.maxcolorattach = 4;
++    hardext.maxdrawbuffers = 4;
++#endif
+     SHUT_LOGD("Max Color Attachments: %d / Draw buffers: %d\n", hardext.maxdrawbuffers, hardext.maxcolorattach);
+--- a/src/gl/shaderconv.c
++++ b/src/gl/shaderconv.c
+@@ -495,1 +495,1 @@
+-  #if 0
++  #ifdef ELFCONV_WEBGL2
+@@ -500,2 +500,2 @@
+-  if(versionString && strcmp(versionString, "120")==0)
++  if(!versionString || strcmp(versionString, "120")==0 || strcmp(versionString, "100")==0)
+      version120 = 1;
+@@ -510,3 +510,8 @@
+   sprintf(GLESFullHeader, GLESHeader[versionHeader], "", (wanthighp)?"highp":"mediump", (wanthighp)?"highp":"mediump");
++  if(versionHeader>=2 && !isVertex) {
++    char* varying = strstr(GLESFullHeader, "#define varying out");
++    if(varying)
++      memcpy(varying, "#define varying in ", sizeof("#define varying in ") - 1);
++  }
+ 
+   int tmpsize = strlen(pBuffer)*2+strlen(GLESFullHeader)+100;
+@@ -527,1 +532,1 @@
+-  int headline = 3;
++  int headline = (versionHeader>=2)?5:3;
+@@ -547,1 +552,1 @@
+-  if (fragdepth) {
++  if (fragdepth && versionHeader < 2) {
+@@ -556,3 +561,5 @@
+-  const char* GLESUseShaderNonConstantGlobalInitialzers = "#extension GL_EXT_shader_non_constant_global_initializers : enable\n";
+-  Tmp = gl4es_inplace_insert(gl4es_getline(Tmp, 1), GLESUseShaderNonConstantGlobalInitialzers, Tmp, &tmpsize);
+-  ++headline;
++  if(versionHeader < 2) {
++    const char* GLESUseShaderNonConstantGlobalInitialzers = "#extension GL_EXT_shader_non_constant_global_initializers : enable\n";
++    Tmp = gl4es_inplace_insert(gl4es_getline(Tmp, 1), GLESUseShaderNonConstantGlobalInitialzers, Tmp, &tmpsize);
++    ++headline;
++  }
+@@ -569,1 +576,1 @@
+-  if (derivatives) {
++  if (derivatives && versionHeader < 2) {
+@@ -577,4 +584,10 @@
+-  // check if draw_buffers may be used (no fallback here :( )
+-  if(hardext.maxdrawbuffers>1 && strstr(pBuffer, "gl_FragData[")) {
+-    Tmp = gl4es_inplace_insert(gl4es_getline(Tmp, 1), useEXTDrawBuffers, Tmp, &tmpsize);
+-  }
++  if(versionHeader >= 2 && !isVertex &&
++     (strstr(Tmp, "gl_FragData[") || strstr(Tmp, "gl_FragColor"))) {
++    const char* GLESUseFragOutputs = "layout(location = 0) out vec4 _gl4es_FragData[4];\n";
++    Tmp = gl4es_inplace_insert(gl4es_getline(Tmp, headline), GLESUseFragOutputs, Tmp, &tmpsize);
++    ++headline;
++    Tmp = gl4es_inplace_replace(Tmp, &tmpsize, "gl_FragData", "_gl4es_FragData");
++    Tmp = gl4es_inplace_replace(Tmp, &tmpsize, "gl_FragColor", "_gl4es_FragData[0]");
++  } else if(versionHeader < 2 && hardext.maxdrawbuffers>1 && strstr(pBuffer, "gl_FragData[")) {
++    Tmp = gl4es_inplace_insert(gl4es_getline(Tmp, 1), useEXTDrawBuffers, Tmp, &tmpsize);
++  }
+@@ -598,0 +612,12 @@
++  if(versionHeader>=2) {
++    Tmp = gl4es_inplace_replace(Tmp, &tmpsize, "texture2DProjGradARB", "textureProjGrad");
++    Tmp = gl4es_inplace_replace(Tmp, &tmpsize, "texture2DGradARB", "textureGrad");
++    Tmp = gl4es_inplace_replace(Tmp, &tmpsize, "textureCubeGradARB", "textureGrad");
++    Tmp = gl4es_inplace_replace(Tmp, &tmpsize, "texture2DProjLod", "textureProjLod");
++    Tmp = gl4es_inplace_replace(Tmp, &tmpsize, "texture2DLod", "textureLod");
++    Tmp = gl4es_inplace_replace(Tmp, &tmpsize, "textureCubeLod", "textureLod");
++    Tmp = gl4es_inplace_replace(Tmp, &tmpsize, "texture2DProj", "textureProj");
++    Tmp = gl4es_inplace_replace(Tmp, &tmpsize, "texture2D", "texture");
++    Tmp = gl4es_inplace_replace(Tmp, &tmpsize, "texture3D", "texture");
++    Tmp = gl4es_inplace_replace(Tmp, &tmpsize, "textureCube", "texture");
++  }
+@@ -722,1 +747,2 @@
+-  Tmp = gl4es_inplace_replace(Tmp, &tmpsize, "gl_FragDepth", (hardext.fragdepth)?"gl_FragDepthEXT":"fakeFragDepth");
++  if(versionHeader < 2)
++    Tmp = gl4es_inplace_replace(Tmp, &tmpsize, "gl_FragDepth", (hardext.fragdepth)?"gl_FragDepthEXT":"fakeFragDepth");
+--- a/src/egl/egl.c
++++ b/src/egl/egl.c
+@@ -13,0 +14,4 @@
++static EGLint egl_context_attrib_es3[] = {
++    EGL_CONTEXT_CLIENT_VERSION, 3,
++    EGL_NONE
++};
+@@ -139,1 +143,6 @@
+-    return egl_eglCreateContext(dpy, config, share_context, (hardext.esversion == 1) ? egl_context_attrib : egl_context_attrib_es2);
++    const EGLint* context_attrib = egl_context_attrib_es2;
++    if (hardext.esversion == 1)
++        context_attrib = egl_context_attrib;
++    else if (hardext.esversion >= 3)
++        context_attrib = egl_context_attrib_es3;
++    return egl_eglCreateContext(dpy, config, share_context, context_attrib);
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -210,0 +211,3 @@
++if(DEFAULT_ES EQUAL 3)
++    add_definitions(-DDEFAULT_ES=3)
++endif()

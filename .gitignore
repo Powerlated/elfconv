@@ -31,6 +31,7 @@ compile_commands.json
 *.cache
 *.gdb
 *.js
+!scripts/portal_worker_debug.js
 *.html
 *.memo
 *.data

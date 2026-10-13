@@ -1,0 +1,9 @@
+glibc fortified sprintf oracle
+
+Source pin: glibc b72fcafcc9d307790bd24ebba65f52994ca5598e
+https://sourceware.org/git/glibc.git
+License: LGPL-2.1-or-later; source unchanged.
+
+Coverage: debug/tst-sprintf-fortify-unchecked.c directly calls __vsprintf_chk.
+Not registered: requires glibc support headers/driver and printf callback
+registry, which run_i386.py does not provide.

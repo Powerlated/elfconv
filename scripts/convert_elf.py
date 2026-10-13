@@ -97,6 +97,10 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--mount", action="append", default=[], metavar="HOST_DIR@/GUEST_PATH")
     result.add_argument("--runtime-archive", type=Path,
                         help="Prebuilt runtime archive matching the conversion configuration")
+    result.add_argument("--gl4es-library", type=Path,
+                        help="Pinned gl4es WebAssembly archive for OpenGL-to-GLES translation")
+    result.add_argument("--gl4es-include-dir", type=Path,
+                        help="Matching gl4es include directory for runtime compilation")
     result.add_argument("--bitcode-path", type=Path)
     result.add_argument("--link-map", type=Path)
     result.add_argument("--object-base", type=Path)
@@ -143,6 +147,9 @@ class Driver:
             self.env["LD_LIBRARY_PATH"] = str(ROOT / "lib") + (
                 ":" + self.env["LD_LIBRARY_PATH"] if self.env.get("LD_LIBRARY_PATH") else "")
         self.includes = [f"-I{ROOT / path}" for path in ("backend/remill/include", ".", "src")]
+        self.gl4es_compile_flags = (
+            ["-DECV_USE_GL4ES=1", f"-I{args.gl4es_include_dir}"]
+            if args.gl4es_library else ["-DECV_USE_GL4ES=0"])
         arch = args.target.split("-")[0]
         self.definitions = [] if arch == "i386" else [f"-DELF_IS_{arch.upper()}"]
         if args.debug:
@@ -310,11 +317,15 @@ class Driver:
                      if self.a.bitcode_path.is_dir() else [self.a.bitcode_path])
             semantics = [(str(path), digest(path)) for path in paths]
         return {
-            "version": 1,
-            "inputs": {str(path): digest(path) for path in [self.a.input, *self.a.shared_library]},
+            "version": 2,
+            "inputs": {str(path): digest(path) for path in [
+                self.a.input, *self.a.shared_library,
+                *([self.a.gl4es_library] if self.a.gl4es_library else [])]},
             "configuration": [self.a.target, self.a.elf_name, self.a.wasm_opt_level,
                               self.a.pthreads, self.a.float_status, self.a.entry_symbol,
-                              self.a.max_ir_chunks_per_elf, list(map(str, self.lift_flags()))],
+                              self.a.max_ir_chunks_per_elf, self.a.legacy_gl,
+                              str(self.a.gl4es_library), str(self.a.gl4es_include_dir),
+                              list(map(str, self.lift_flags()))],
             "semantics": semantics,
             "compiler": self.compiler_identity[self.a.emcc],
             "lifter": digest(Path(self.a.lifter)),
@@ -335,11 +346,12 @@ class Driver:
         runtime = [self.a.runtime_archive] if self.a.runtime_archive else []
         if not runtime:
             raise ValueError("--relink-only requires --runtime-archive")
+        gl4es = [self.a.gl4es_library] if self.a.gl4es_library else []
         # A fast link deliberately replaces the normal link result: invalidate its stamp.
         (self.cache / "link.key").unlink(missing_ok=True)
         await self.run("Final link", "linking",
                        [emcc, *self.browser_link_flags(plan["incremental"]), *objects,
-                        *runtime, "-o", self.output / f"{self.a.elf_name}.js"])
+                        *runtime, *gl4es, "-o", self.output / f"{self.a.elf_name}.js"])
         self.display.update("Final link", "done", "linking")
         self.html()
 
@@ -347,10 +359,13 @@ class Driver:
         flags = [f"-O{self.a.wasm_opt_level}", *self.thread_link, *self.exception_flags,
                  *(["-g2"] if self.a.wasm_opt_level == "0" or self.a.wasm_debug_symbols else []),
                  *(["-sASSERTIONS=1"] if self.a.wasm_assertions else []), *self.includes,
-                 "-std=c++17", *self.definitions, "-DELF_IS_I386", "-DADDRESS_SIZE_BITS=32",
+                 *self.gl4es_compile_flags, "-std=c++17", *self.definitions,
+                 "-DELF_IS_I386", "-DADDRESS_SIZE_BITS=32",
                  "-sUSE_SDL=2", "-sFORCE_FILESYSTEM=1", f"-sENVIRONMENT={self.a.wasm_environment}",
-                 f"-sLEGACY_GL_EMULATION={self.a.legacy_gl}",
-                 "-sMIN_WEBGL_VERSION=2", "-sMAX_WEBGL_VERSION=2", f"-DECV_LEGACY_GL={self.a.legacy_gl}",
+                 f"-sLEGACY_GL_EMULATION={'0' if self.a.gl4es_library else self.a.legacy_gl}",
+                 *(["-sFULL_ES2=1"] if self.a.gl4es_library else []),
+                 "-sMIN_WEBGL_VERSION=2", "-sMAX_WEBGL_VERSION=2",
+                 f"-DECV_LEGACY_GL={self.a.legacy_gl}",
                  "-sJSPI=1" if self.a.jspi or self.a.pthreads else
                  "-sASYNCIFY=0" if self.a.no_asyncify else "-sASYNCIFY=1",
                  "-sALLOW_MEMORY_GROWTH=1", "-sINITIAL_MEMORY=335544320",
@@ -580,12 +595,18 @@ class Driver:
                 for _ in range(a.jobs):
                     group.create_task(compile_ready())
 
-        headers = sorted(path for directory in (ROOT / "src/runtime", ROOT / "src/utils",
-                                                ROOT / "backend/remill/include")
-                         for path in directory.rglob("*") if path.suffix in (".h", ".hpp", ".inc"))
+        header_dirs = [ROOT / "src/runtime", ROOT / "src/utils",
+                       ROOT / "backend/remill/include"]
+        if a.gl4es_include_dir:
+            header_dirs.append(a.gl4es_include_dir)
+        headers = sorted(path for directory in header_dirs
+                         for path in directory.rglob("*")
+                         if path.suffix in (".h", ".hpp", ".inc"))
         header_key = key([(str(path), digest(path)) for path in headers])
-        runtime_flags = [*compile_flags, "-sUSE_SDL=2", *self.includes, "-std=c++17", *self.definitions,
-                         "-DELF_IS_I386", "-DADDRESS_SIZE_BITS=32", "-DELFCONV_INCREMENTAL_UNITS=1"]
+        runtime_flags = [*compile_flags, "-sUSE_SDL=2", *self.includes,
+                         *self.gl4es_compile_flags, "-std=c++17", *self.definitions,
+                         "-DELF_IS_I386", "-DADDRESS_SIZE_BITS=32",
+                         "-DELFCONV_INCREMENTAL_UNITS=1"]
         registry = self.cache / "UnitRegistry.cpp"
         registry_text = self.registry([entry[2] for entry in entries])
         atomic_text(registry, registry_text)
@@ -637,8 +658,10 @@ class Driver:
                                                   metadata_object, registry_object], True)))
         _, linked = await self.stage("Final link", "linking",
             [emcc, *self.browser_link_flags(True), *[obj for obj, _ in units], metadata_object,
-             registry_object, *runtime_objects, "-o", js], [js, wasm],
+             registry_object, *runtime_objects,
+             *([a.gl4es_library] if a.gl4es_library else []), "-o", js], [js, wasm],
             [metadata_compile_key, registry_key, [stamp for _, stamp in units], runtime_keys,
+             digest(a.gl4es_library) if a.gl4es_library else None,
              compiler_identity, digest(ROOT / "src/browser/i386-assets.js")],
             self.cache / "link.key")
         self.display.update("Final link", "done" if linked else "cached", "linking")
@@ -760,15 +783,20 @@ class Driver:
         runtime_tasks = []
         if not a.runtime_archive:
             sources = [*COMMON, ROOT / "src/runtime/I386Imports.cpp"]
-            headers = sorted(path for directory in (ROOT / "src/runtime", ROOT / "src/utils",
-                                                    ROOT / "backend/remill/include")
-                             for path in directory.rglob("*") if path.suffix in (".h", ".hpp", ".inc"))
+            header_dirs = [ROOT / "src/runtime", ROOT / "src/utils",
+                           ROOT / "backend/remill/include"]
+            if a.gl4es_include_dir:
+                header_dirs.append(a.gl4es_include_dir)
+            headers = sorted(path for directory in header_dirs
+                             for path in directory.rglob("*")
+                             if path.suffix in (".h", ".hpp", ".inc"))
             header_key = key([(str(path), digest(path)) for path in headers])
             runtime_flags: list[object] = [
                 f"-O{a.wasm_opt_level}", *self.thread_compile, *self.exception_flags,
-                *(["-g2"] if a.wasm_opt_level == "0" else []), *self.includes, "-std=c++17",
-                *self.definitions, "-DELF_IS_I386", "-DADDRESS_SIZE_BITS=32", "-sUSE_SDL=2",
-                f"-DECV_LEGACY_GL={a.legacy_gl}"]
+                *(["-g2"] if a.wasm_opt_level == "0" else []), *self.includes,
+                *self.gl4es_compile_flags, "-std=c++17",
+                *self.definitions, "-DELF_IS_I386", "-DADDRESS_SIZE_BITS=32",
+                "-sUSE_SDL=2", f"-DECV_LEGACY_GL={a.legacy_gl}"]
 
             async def compile_runtime(source: Path) -> tuple[Path, str]:
                 obj = self.cache / f"ir-chunk-runtime-{source.stem}.wasm.o"
@@ -797,9 +825,11 @@ class Driver:
             runtime_keys = [compile_key for _, compile_key in runtime_results]
         js, wasm = self.output / f"{name}.js", self.output / f"{name}.wasm"
         _, linked = await self.stage("Final link", "linking",
-            [emcc, *self.browser_link_flags(False), *chunk_objects, *runtime_objects, "-o", js],
-            [js, wasm], [lift_key, chunk_keys, runtime_keys, compiler_identity,
-                         digest(ROOT / "src/browser/i386-assets.js")],
+            [emcc, *self.browser_link_flags(False), *chunk_objects, *runtime_objects,
+             *([a.gl4es_library] if a.gl4es_library else []), "-o", js],
+            [js, wasm], [lift_key, chunk_keys, runtime_keys,
+                         digest(a.gl4es_library) if a.gl4es_library else None,
+                         compiler_identity, digest(ROOT / "src/browser/i386-assets.js")],
             self.cache / f"{name}.ir-chunks.link.key")
         self.display.update("Final link", "done" if linked else "cached")
         self.html()
@@ -893,15 +923,20 @@ class Driver:
                     runtime_objects = [a.runtime_archive]
                 else:
                     sources = [*COMMON, ROOT / "src/runtime/I386Imports.cpp"]
-                    headers = sorted(path for directory in (ROOT / "src/runtime", ROOT / "src/utils",
-                                                            ROOT / "backend/remill/include")
-                                     for path in directory.rglob("*") if path.suffix in (".h", ".hpp", ".inc"))
+                    header_dirs = [ROOT / "src/runtime", ROOT / "src/utils",
+                                   ROOT / "backend/remill/include"]
+                    if a.gl4es_include_dir:
+                        header_dirs.append(a.gl4es_include_dir)
+                    headers = sorted(path for directory in header_dirs
+                                     for path in directory.rglob("*")
+                                     if path.suffix in (".h", ".hpp", ".inc"))
                     header_key = key([(str(path), digest(path)) for path in headers])
                     runtime_flags: list[object] = [
                         f"-O{a.wasm_opt_level}", *self.thread_compile, *self.exception_flags,
-                        *(["-g2"] if a.wasm_opt_level == "0" else []), *self.includes, "-std=c++17",
-                        *self.definitions, "-DELF_IS_I386", "-DADDRESS_SIZE_BITS=32", "-sUSE_SDL=2",
-                        f"-DECV_LEGACY_GL={a.legacy_gl}"]
+                        *(["-g2"] if a.wasm_opt_level == "0" else []), *self.includes,
+                        *self.gl4es_compile_flags, "-std=c++17",
+                        *self.definitions, "-DELF_IS_I386", "-DADDRESS_SIZE_BITS=32",
+                        "-sUSE_SDL=2", f"-DECV_LEGACY_GL={a.legacy_gl}"]
                     semaphore = asyncio.Semaphore(a.jobs)
 
                     async def compile_runtime(source: Path) -> Path:
@@ -924,6 +959,7 @@ class Driver:
                         await asyncio.gather(*tasks, return_exceptions=True)
                 await self.run("Final link", "linking",
                     [emcc, *self.browser_link_flags(False), obj, *runtime_objects,
+                     *([a.gl4es_library] if a.gl4es_library else []),
                      "-o", self.output / f"{name}.js"])
                 self.html()
             else:
@@ -961,6 +997,15 @@ class Driver:
 def validate(a: argparse.Namespace) -> None:
     a.input = a.input.resolve(strict=True)
     a.shared_library = [path.resolve(strict=True) for path in a.shared_library]
+    if bool(a.gl4es_library) != bool(a.gl4es_include_dir):
+        raise ValueError("--gl4es-library and --gl4es-include-dir must be provided together")
+    if a.gl4es_library:
+        if a.target != "i386-wasm":
+            raise ValueError("--gl4es-library requires i386-wasm")
+        a.gl4es_library = a.gl4es_library.resolve(strict=True)
+        a.gl4es_include_dir = a.gl4es_include_dir.resolve(strict=True)
+        if not a.gl4es_include_dir.is_dir():
+            raise ValueError("--gl4es-include-dir must name a directory")
     a.elf_name = a.elf_name or a.input.name
     if Path(a.elf_name).name != a.elf_name or a.elf_name in (".", ".."):
         raise ValueError("--elf-name must be a filename, not a path")
@@ -985,10 +1030,12 @@ def validate(a: argparse.Namespace) -> None:
         if a.target != "i386-wasm":
             raise ValueError("--runtime-archive requires i386-wasm")
         a.runtime_archive = a.runtime_archive.resolve(strict=True)
-        if a.legacy_gl != "0" or a.debug or a.float_status:
-            raise ValueError("--runtime-archive requires --legacy-gl 0 without --debug or --float-status")
+        if a.debug or a.float_status:
+            raise ValueError("--runtime-archive is incompatible with --debug or --float-status")
         incremental = bool(a.incremental_units or a.shared_library)
         suffix = ("-incremental" if incremental else "") + ("-pthreads" if a.pthreads else "")
+        if a.legacy_gl == "1":
+            suffix += "-legacygl"
         expected = f"libelfconv-runtime-i386-wasm{suffix}.a"
         if a.runtime_archive.name != expected:
             raise ValueError(f"--runtime-archive must name {expected}")
@@ -1014,9 +1061,11 @@ def validate(a: argparse.Namespace) -> None:
     if a.target == "i386-wasm" and not a.runtime_archive and a.lifter:
         incremental = bool(a.incremental_units or a.shared_library)
         suffix = ("-incremental" if incremental else "") + ("-pthreads" if a.pthreads else "")
+        if a.legacy_gl == "1":
+            suffix += "-legacygl"
         sibling_archive = Path(a.lifter).resolve().with_name(
             f"libelfconv-runtime-i386-wasm{suffix}.a")
-        if sibling_archive.is_file() and a.legacy_gl == "0" and not a.debug and not a.float_status:
+        if sibling_archive.is_file() and not a.debug and not a.float_status:
             a.runtime_archive = sibling_archive
 
 
